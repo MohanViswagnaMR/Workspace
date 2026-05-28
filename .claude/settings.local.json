@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:5174/)",
+      "Bash(chromium-cli *)",
+      "Bash(npx playwright *)",
+      "Bash(cat)",
+      "Bash(node /tmp/test-app.js)",
+      "Bash(npx vite *)",
+      "Bash(google-chrome --headless --no-sandbox --disable-gpu --screenshot=/tmp/app-main.png --window-size=1400,900 http://localhost:5175/)",
+      "Bash(curl -s http://localhost:5175/)",
+      "Bash(curl -s \"http://localhost:5175/src/workspace.jsx\")",
+      "Bash(curl -sf \"http://localhost:5175/@vite/client\")",
+      "Bash(curl -sf \"http://localhost:5175/src/workspace.jsx\")",
+      "Bash(echo \"Exit: $?\")",
+      "Bash(pkill -f \"vite --port 5175\")",
+      "Bash(pkill -f \"vite --port 5174\")",
+      "Bash(npm install *)",
+      "Bash(curl -s http://localhost:5173)",
+      "Bash(grep *)",
+      "Bash(node -e \"const icons = require\\('./node_modules/lucide-react/dist/lucide-react.cjs.js'\\); const needed = ['Search','Home','Inbox','Settings','Plus','ChevronRight','ChevronDown','FileText','Trash2','MoreHorizontal','Star','LayoutTemplate','GripVertical','Check','X','Image','Link','Table','Kanban','LayoutGrid','List','Calendar','Filter','ArrowUpDown','Sun','Moon','Menu','ChevronLeft','Maximize2','Share2','Users','Archive','Upload','LayoutDashboard','RotateCcw','Download','Monitor','CloudCheck','CloudUpload','Key','ExternalLink','Copy','Keyboard']; needed.forEach\\(n => { if\\(!icons[n]\\) console.log\\('MISSING:', n\\); else console.log\\('OK:', n\\); }\\);\")",
+      "Bash(node -e \"const icons = require\\('/home/viswagna/Documents/GitHub/Note_Taker/node_modules/lucide-react/dist/cjs/lucide-react.js'\\); const needed = ['Search','Home','Inbox','Settings','Plus','ChevronRight','ChevronDown','FileText','Trash2','MoreHorizontal','Star','LayoutTemplate','GripVertical','Check','X','Image','Link','Table','Kanban','LayoutGrid','List','Calendar','Filter','ArrowUpDown','Sun','Moon','Menu','ChevronLeft','Maximize2','Share2','Users','Archive','Upload','LayoutDashboard','RotateCcw','Download','Monitor','CloudCheck','CloudUpload','Key','ExternalLink','Copy','Keyboard']; needed.forEach\\(n => { if\\(!icons[n]\\) console.log\\('MISSING:', n\\); else console.log\\('OK:', n\\); }\\);\")",
+      "Bash(node *)",
+      "Bash(timeout 15 bash -c 'until curl -sf http://localhost:5174 >/dev/null; do sleep 1; done')",
+      "Bash(google-chrome --headless --disable-gpu --no-sandbox --screenshot=/tmp/app_screenshot.png --window-size=1440,900 http://localhost:5174)",
+      "Bash(google-chrome --headless --disable-gpu --no-sandbox --remote-debugging-port=9222 http://localhost:5174)",
+      "Bash(curl -s http://localhost:9222/json)",
+      "Bash(python3 -c ' *)",
+      "Bash(VITE_FIREBASE_API_KEY= VITE_FIREBASE_AUTH_DOMAIN= VITE_FIREBASE_PROJECT_ID= VITE_FIREBASE_STORAGE_BUCKET= VITE_FIREBASE_MESSAGING_SENDER_ID= VITE_FIREBASE_APP_ID= npx vite --port 5175)",
+      "Bash(timeout 10 bash -c 'until curl -sf http://localhost:5175 >/dev/null; do sleep 1; done')",
+      "Bash(google-chrome --headless=new --screenshot=/tmp/ws-home.png --window-size=1400,900 --no-sandbox http://localhost:5174)",
+      "Bash(pkill -f \"vite.*5174\")"
+    ]
+  }
+}

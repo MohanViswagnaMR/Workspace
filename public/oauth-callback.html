@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connecting…</title>
+  <style>
+    *  { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f4f4f6;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; color: #1a1a2e;
+    }
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 8px 40px rgba(0,0,0,.12);
+      padding: 40px 48px;
+      text-align: center;
+      max-width: 320px;
+      width: 90%;
+    }
+    .icon { font-size: 52px; margin-bottom: 18px; }
+    h2   { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+    .msg  { font-size: 14px; color: #666; line-height: 1.5; }
+    .spinner {
+      display: inline-block;
+      width: 40px; height: 40px;
+      border: 3px solid #e5e7eb;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+      margin-bottom: 20px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div id="spinner" class="spinner"></div>
+  <div id="icon"    class="icon"    style="display:none"></div>
+  <h2  id="title">Completing sign-in…</h2>
+  <p   id="msg"   class="msg">Please wait a moment.</p>
+</div>
+
+<script>
+(function () {
+  function show(icon, title, msg) {
+    document.getElementById('spinner').style.display = 'none';
+    var ic = document.getElementById('icon');
+    ic.style.display = 'block';
+    ic.textContent   = icon;
+    document.getElementById('title').textContent = title;
+    document.getElementById('msg').textContent   = msg;
+  }
+
+  /* ── Parse both hash fragment (#access_token=…) and query string ── */
+  var rawHash   = window.location.hash.slice(1);
+  var rawSearch = window.location.search.slice(1);
+  var params    = new URLSearchParams(rawHash || rawSearch);
+
+  /* Dropbox uses its own format with token in hash */
+  if (!params.get('access_token') && rawHash) {
+    params = new URLSearchParams(rawHash);
+  }
+
+  var token     = params.get('access_token');
+  var expiresIn = params.get('expires_in') || params.get('token_expiry_utc');
+  var error     = params.get('error') || params.get('error_description');
+  var state     = params.get('state');
+
+  var payload = {
+    source:    'nt_oauth',
+    token:     token     || null,
+    expiresIn: expiresIn || null,
+    error:     error     || null,
+    state:     state     || null,
+  };
+
+  if (window.opener && !window.opener.closed) {
+    /* ── Popup mode: send token back and close ── */
+    try {
+      window.opener.postMessage(payload, window.location.origin);
+    } catch (e) {
+      /* cross-origin guard — shouldn't happen but be safe */
+      window.opener.postMessage(payload, '*');
+    }
+
+    if (token) {
+      show('✅', 'Signed in!', 'This window will close automatically.');
+    } else {
+      show('❌', 'Sign-in failed', error || 'Something went wrong. You can close this window.');
+    }
+    /* Close after a brief moment so the user can see the status */
+    setTimeout(function () { window.close(); }, 1200);
+
+  } else {
+    /* ── Redirect mode (popup was blocked): stash token and go back ── */
+    if (token) {
+      try {
+        sessionStorage.setItem('nt_oauth_callback', JSON.stringify(payload));
+      } catch (e) { /* ignore */ }
+      show('↩', 'Almost there…', 'Redirecting back to the app…');
+    } else {
+      show('❌', 'Sign-in failed', (error || 'Something went wrong.') + '\n\nYou can close this tab.');
+    }
+    if (token) {
+      setTimeout(function () { window.location.href = '/'; }, 1200);
+    }
+  }
+}());
+</script>
+</body>
+</html>
