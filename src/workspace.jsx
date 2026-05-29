@@ -19,6 +19,7 @@ import {
   loadStore, saveStore,
   searchUsersByEmail, shareWorkspaceWithUser,
   loadSharedWorkspaces, loadNotifications, markNotificationRead,
+  deleteSharedWorkspace, transferWorkspaceOwnership,
 } from './storage.js';
 import { writeLocalUploadFile } from './localfs.js';
 import { isFirebaseConfigured } from './firebase.js';
@@ -2260,6 +2261,80 @@ function ShareWorkspaceModal({workspace,user,currentSnapshot,onUpdateMembers,onC
             )}</>
           : <div className="share-empty-hint">No members yet. Invite people to collaborate.</div>}
       </div>
+    </div>
+  </div>;
+}
+
+/* ---------------- Delete Workspace Modal ---------------- */
+function DeleteWorkspaceModal({workspace,onDeleteAll,onLeave,onClose}){
+  const [step,setStep]=React.useState('choose'); // 'choose' | 'transfer'
+  const [selected,setSelected]=React.useState(null);
+  const [busy,setBusy]=React.useState(false);
+  const [err,setErr]=React.useState('');
+  const members=workspace.members||[];
+
+  async function handleTransfer(){
+    if(!selected){setErr('Select a member to transfer ownership to.');return;}
+    setBusy(true);setErr('');
+    try{await onLeave(selected);}
+    catch(e){setErr('Transfer failed. Please try again.');setBusy(false);}
+  }
+
+  return <div className="overlay" onClick={onClose}>
+    <div className="modal" onClick={e=>e.stopPropagation()}>
+      <div className="modal-h">
+        <h3>{step==='choose'?`Delete "${workspace.name}"`:'Transfer ownership'}</h3>
+        <button className="x" onClick={onClose}><Ic n="x"/></button>
+      </div>
+
+      {step==='choose'
+        ?<div style={{padding:'16px 20px 20px'}}>
+          <div style={{fontSize:13,color:'var(--text-2)',marginBottom:20,lineHeight:1.6}}>
+            This workspace is shared with <strong>{members.length} member{members.length!==1?'s':''}</strong>. How would you like to proceed?
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:10}}>
+            <button style={{padding:'12px 16px',textAlign:'left',border:'1.5px solid #ef4444',
+              borderRadius:8,background:'transparent',cursor:'pointer',width:'100%'}}
+              onClick={()=>{onClose();onDeleteAll();}}>
+              <div style={{fontWeight:600,color:'#ef4444',fontSize:13,marginBottom:3}}>Delete for everyone</div>
+              <div style={{fontSize:11,color:'var(--text-3)'}}>Permanently removes this workspace and all its pages for every member</div>
+            </button>
+            <button style={{padding:'12px 16px',textAlign:'left',border:'1.5px solid var(--border)',
+              borderRadius:8,background:'transparent',cursor:'pointer',width:'100%'}}
+              onClick={()=>setStep('transfer')}>
+              <div style={{fontWeight:600,fontSize:13,marginBottom:3}}>Delete only for me</div>
+              <div style={{fontSize:11,color:'var(--text-3)'}}>Transfer ownership to a member and remove from your list</div>
+            </button>
+          </div>
+        </div>
+
+        :<div style={{padding:'16px 20px 20px'}}>
+          <div style={{fontSize:13,color:'var(--text-2)',marginBottom:14,lineHeight:1.5}}>
+            Choose a member to become the new owner of <strong>"{workspace.name}"</strong>:
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:6,marginBottom:16,maxHeight:240,overflowY:'auto'}}>
+            {members.map(m=><div key={m.uid||m.email}
+              style={{display:'flex',alignItems:'center',gap:10,padding:'9px 10px',borderRadius:8,
+                cursor:'pointer',
+                border:`1.5px solid ${selected?.uid===m.uid?'var(--accent)':'transparent'}`,
+                background:selected?.uid===m.uid?'var(--accent-soft)':'var(--bg-2)'}}
+              onClick={()=>{setSelected(m);setErr('');}}>
+              <div className="share-ava">{m.email[0].toUpperCase()}</div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontWeight:500,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.email}</div>
+                <div style={{fontSize:11,color:'var(--text-3)'}}>Will become new owner</div>
+              </div>
+              {selected?.uid===m.uid&&<Ic n="check" style={{width:14,height:14,color:'var(--accent)',flexShrink:0}}/>}
+            </div>)}
+          </div>
+          {err&&<div className="auth-error" style={{marginBottom:12}}>{err}</div>}
+          <div style={{display:'flex',gap:8,justifyContent:'space-between',alignItems:'center'}}>
+            <button className="btn ghost" onClick={()=>{setStep('choose');setSelected(null);setErr('');}}>← Back</button>
+            <button className="btn primary" onClick={handleTransfer} disabled={busy||!selected}>
+              {busy?'Transferring…':'Transfer & Leave'}
+            </button>
+          </div>
+        </div>}
     </div>
   </div>;
 }
@@ -4787,6 +4862,11 @@ function Workspace({ user, onSignOut }){
     if(!wsId||wsId==='ws_main') return;
     const targetWs=(store.workspaces||[]).find(w=>w.id===wsId);
     const prov=targetWs?.cloudProvider?CLOUD_PROVIDERS[targetWs.cloudProvider]:null;
+    // For Firebase workspaces with shared members, show the two-option modal
+    if(!opts.skipConfirm&&!targetWs?.isLocalFile&&!targetWs?.cloudProvider&&!targetWs?.isShared){
+      const members=targetWs?.members||[];
+      if(members.length>0){ setModal({type:'delete-workspace',wsId}); return; }
+    }
     const msg=targetWs?.isLocalFile
       ?`Remove "${targetWs.name}" from the workspace list?\n\nThe folder and workspace.json file on your computer will NOT be deleted — you can add it back at any time.`
       :targetWs?.cloudProvider
@@ -4802,6 +4882,11 @@ function Workspace({ user, onSignOut }){
       delete cloudWsData.current[wsId];
       clearTimeout(cloudWriteTimers.current[wsId]);
       delete cloudWriteTimers.current[wsId];
+    }
+    // owner deleting a Firebase workspace — remove its sharedWorkspaces doc so
+    // collaborators lose access on their next load
+    if(!targetWs?.isLocalFile&&!targetWs?.cloudProvider&&!targetWs?.isShared){
+      deleteSharedWorkspace(wsId).catch(()=>{});
     }
     // pre-build fallback seed outside setStore to avoid double invocation in strict mode
     const fallbackSeed=buildSeed();
@@ -4822,6 +4907,28 @@ function Workspace({ user, onSignOut }){
     });
     setExpanded({});
   };
+  const leaveWorkspace=async(wsId,newOwner)=>{
+    await transferWorkspaceOwnership(wsId,newOwner,user.uid);
+    const fallbackSeed=buildSeed();
+    setStore(s=>{
+      const newSnap={...(s.workspaceSnapshots||{})};
+      delete newSnap[wsId];
+      const newWorkspaces=(s.workspaces||[]).filter(w=>w.id!==wsId);
+      if(s.activeWorkspaceId!==wsId) return {...s,workspaces:newWorkspaces,workspaceSnapshots:newSnap};
+      const mainTarget=newSnap['ws_main'];
+      if(mainTarget){
+        return {...s,workspaces:newWorkspaces,nodes:mainTarget.nodes,
+          favorites:mainTarget.favorites,currentId:mainTarget.currentId,
+          activeWorkspaceId:'ws_main',workspaceSnapshots:newSnap};
+      }
+      return {...s,workspaces:newWorkspaces,nodes:fallbackSeed.nodes,
+        favorites:fallbackSeed.favorites,currentId:fallbackSeed.currentId,
+        activeWorkspaceId:'ws_main',workspaceSnapshots:newSnap};
+    });
+    setExpanded({});
+    setModal(null);
+  };
+
   const updateWorkspaceMembers=(wsId,members)=>{
     setStore(s=>({...s,workspaces:(s.workspaces||[]).map(w=>w.id===wsId?{...w,members}:w)}));
   };
@@ -5043,6 +5150,15 @@ function Workspace({ user, onSignOut }){
         user={user}
         currentSnapshot={{nodes,favorites,currentId}}
         onUpdateMembers={members=>updateWorkspaceMembers(targetWs.id,members)}
+        onClose={()=>setModal(null)}/>;
+    })()}
+    {modal&&modal.type==='delete-workspace'&&(()=>{
+      const targetWs=workspaces.find(w=>w.id===modal.wsId);
+      if(!targetWs) return null;
+      return <DeleteWorkspaceModal
+        workspace={targetWs}
+        onDeleteAll={()=>deleteWorkspace(modal.wsId,{skipConfirm:true})}
+        onLeave={newOwner=>leaveWorkspace(modal.wsId,newOwner)}
         onClose={()=>setModal(null)}/>;
     })()}
     {modal&&modal.type==='page-menu'&&node&&
