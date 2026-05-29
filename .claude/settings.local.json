@@ -30,7 +30,9 @@
       "Bash(VITE_FIREBASE_API_KEY= VITE_FIREBASE_AUTH_DOMAIN= VITE_FIREBASE_PROJECT_ID= VITE_FIREBASE_STORAGE_BUCKET= VITE_FIREBASE_MESSAGING_SENDER_ID= VITE_FIREBASE_APP_ID= npx vite --port 5175)",
       "Bash(timeout 10 bash -c 'until curl -sf http://localhost:5175 >/dev/null; do sleep 1; done')",
       "Bash(google-chrome --headless=new --screenshot=/tmp/ws-home.png --window-size=1400,900 --no-sandbox http://localhost:5174)",
-      "Bash(pkill -f \"vite.*5174\")"
+      "Bash(pkill -f \"vite.*5174\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5174/)",
+      "Bash(kill %1)"
     ]
   }
 }

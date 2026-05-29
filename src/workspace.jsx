@@ -13,13 +13,14 @@ import {
   Filter, ArrowUpDown, Sun, Moon, Menu, ChevronLeft, Maximize2,
   Share2, Users, Archive, Upload, LayoutDashboard, RotateCcw, Download,
   Monitor, CloudCheck, CloudUpload, Key, ExternalLink, Copy, Keyboard,
-  Cloud, HardDrive,
+  Cloud, HardDrive, Paperclip, Database, Eye, PanelRight,
 } from 'lucide-react';
 import {
   loadStore, saveStore,
   searchUsersByEmail, shareWorkspaceWithUser,
   loadSharedWorkspaces, loadNotifications, markNotificationRead,
 } from './storage.js';
+import { writeLocalUploadFile } from './localfs.js';
 import { isFirebaseConfigured } from './firebase.js';
 import {
   isLocalFSSupported,
@@ -46,6 +47,11 @@ const clone = o => JSON.parse(JSON.stringify(o));
 const todayISO = () => new Date().toISOString().slice(0,10);
 const fmtDate = iso => { if(!iso) return ''; const d=new Date(iso+'T00:00');
   return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); };
+const fmtBytes = b => { if(!b) return '0 B'; const u=['B','KB','MB','GB']; let i=0;
+  while(b>=1024&&i<u.length-1){b/=1024;i++;} return b.toFixed(i>0?1:0)+' '+u[i]; };
+const readAsDataUrl = file => new Promise((res,rej)=>{
+  const r=new FileReader(); r.onload=e=>res(e.target.result); r.onerror=()=>rej(new Error('Read failed'));
+  r.readAsDataURL(file); });
 
 /* ---------- constants ---------- */
 const SEL_COLORS = ['default','gray','brown','orange','yellow','green','blue','purple','pink','red'];
@@ -89,7 +95,8 @@ const CMDS = [
   {g:'Database',id:'db-gallery',label:'Gallery view',desc:'Cards in a grid',ic:'▦',kw:'gallery cards database'},
   {g:'Database',id:'db-list',label:'List view',desc:'Minimal database list',ic:'☰',kw:'list database'},
   {g:'Database',id:'db-calendar',label:'Calendar view',desc:'Database on a calendar',ic:'📅',kw:'calendar database date'},
-  {g:'Media',id:'image',label:'Image',desc:'Embed an image by URL',ic:'🖼️',kw:'image picture photo'},
+  {g:'Media',id:'image',label:'Image',desc:'Upload or embed an image',ic:'🖼️',kw:'image picture photo upload'},
+  {g:'Media',id:'file',label:'File attachment',desc:'Attach any file or document',ic:'📎',kw:'file attach upload pdf doc'},
   {g:'Media',id:'bookmark',label:'Web bookmark',desc:'Save a link as a card',ic:'🔗',kw:'bookmark link url web'},
   {g:'Media',id:'code',label:'Code',desc:'Code with syntax style',ic:'</>',kw:'code snippet'},
 ];
@@ -123,9 +130,11 @@ const ICON_MAP = {
   'cloud-check': CloudCheck, 'cloud-upload': CloudUpload,
   key: Key, 'external-link': ExternalLink, copy: Copy, keyboard: Keyboard,
   cloud: Cloud, 'hard-drive': HardDrive,
+  paperclip: Paperclip, database: Database, eye: Eye, 'panel-right': PanelRight,
 };
 
 const DASH_ID='__dashboard__';
+const STORAGE_ID='__storage__';
 
 function Ic({n, style}) {
   const Icon = ICON_MAP[n];
@@ -273,7 +282,7 @@ function buildSeed(){
 
   return {nodes,favorites:['n_start','n_tasks'],currentId:'n_start',theme:'light',accent:'indigo',
     workspaces:[{id:'ws_main',name:'My Workspace',isPersonal:true,members:[]}],
-    activeWorkspaceId:'ws_main',workspaceSnapshots:{},sharedNodes:{},tutorialCompleted:false};
+    activeWorkspaceId:'ws_main',workspaceSnapshots:{},sharedNodes:{},tutorialCompleted:false,uploads:[]};
 }
 
 /* =========================================================================
@@ -322,6 +331,232 @@ function EmojiPicker({onPick,onClose,rect}){
 
 function ConfirmHint({msg}){ return <div className="hint">{msg}</div>; }
 
+/* ---- Image / file picker inline UI ---- */
+function ImagePicker({onFile, onUrl, uploads}){
+  const storedImgs=useMemo(()=>(uploads||[]).filter(u=>u.type?.startsWith('image/')||
+    /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i.test(u.name||'')),[uploads]);
+  const [showUrl,setShowUrl]=useState(false);
+  const [urlVal,setUrlVal]=useState('');
+  const fileRef=useRef();
+  return <div className="img-picker">
+    <input ref={fileRef} type="file" accept="image/*" style={{display:'none'}}
+      onChange={e=>{const f=e.target.files?.[0];if(f) onFile(f);}}/>
+    {showUrl
+      ? <div className="img-picker-url">
+          <input className="fld" autoFocus placeholder="Paste image URL…" value={urlVal}
+            onChange={e=>setUrlVal(e.target.value)} style={{flex:1}}
+            onKeyDown={e=>{if(e.key==='Enter'&&urlVal.trim()) onUrl(urlVal.trim());}}/>
+          <button className="btn primary" style={{padding:'6px 12px'}}
+            onClick={()=>{if(urlVal.trim()) onUrl(urlVal.trim());}}>Embed</button>
+        </div>
+      : storedImgs.length>0
+      ? <div className="img-picker-storage">
+          {storedImgs.map(u=><div key={u.id} className="ips-thumb" title={u.name}
+            onClick={()=>onUrl(u.dataUrl)}>
+            <img src={u.dataUrl} alt={u.name}/>
+            <div className="ips-name">{u.name}</div>
+          </div>)}
+        </div>
+      : <div className="img-picker-zone" onClick={()=>fileRef.current?.click()}>
+          <Ic n="import" style={{width:22,height:22}}/>
+          <span>Choose image from computer</span>
+        </div>}
+    <div className="img-picker-footer">
+      <button className="img-picker-foot-btn" onClick={()=>{setShowUrl(false);fileRef.current?.click();}}>
+        <Ic n="import" style={{width:13,height:13}}/> Upload
+      </button>
+      <button className={cx('img-picker-foot-btn',showUrl&&'on')} onClick={()=>setShowUrl(v=>!v)}>
+        <Ic n="link" style={{width:13,height:13}}/> Embed link
+      </button>
+    </div>
+  </div>;
+}
+
+/* ---- File picker (From Storage / Upload tabs) ---- */
+const FILE_ICON=t=>t?.startsWith('video/')?'🎬':t?.startsWith('audio/')?'🎵'
+  :t==='application/pdf'?'📄':t?.startsWith('image/')?'🖼️':t?.startsWith('text/')?'📝':'📎';
+
+function FilePicker({uploads,onUpload,onFromStorage}){
+  const all=uploads||[];
+  const [view,setView]=useState('list'); // 'list' | 'grid' | 'large'
+  const fileRef=useRef();
+
+  const FP_VIEWS=[
+    {id:'list', icon:'list',   title:'List'},
+    {id:'grid', icon:'gallery',title:'Grid'},
+    {id:'large',icon:'expand', title:'Large'},
+  ];
+
+  function renderItems(){
+    if(view==='grid') return (
+      <div className="fp-grid">
+        {all.map(u=>{
+          const isImg=u.type?.startsWith('image/');
+          return <div key={u.id} className="fp-grid-card" title={u.name} onClick={()=>onFromStorage(u)}>
+            <div className="fp-gc-thumb">
+              {isImg
+                ? <img src={u.dataUrl} alt={u.name}/>
+                : <span>{FILE_ICON(u.type)}</span>}
+            </div>
+            <div className="fp-gc-name">{u.name}</div>
+          </div>;
+        })}
+      </div>
+    );
+    if(view==='large') return (
+      <div className="fp-large-grid">
+        {all.map(u=>{
+          const isImg=u.type?.startsWith('image/');
+          return <div key={u.id} className="fp-lg-card" title={u.name} onClick={()=>onFromStorage(u)}>
+            <div className="fp-lg-thumb">
+              {isImg
+                ? <img src={u.dataUrl} alt={u.name}/>
+                : <span>{FILE_ICON(u.type)}</span>}
+            </div>
+            <div className="fp-lg-name">{u.name}</div>
+            <div className="fp-lg-meta">{fmtBytes(u.size||0)}</div>
+          </div>;
+        })}
+      </div>
+    );
+    // default list
+    return (
+      <div className="fp-list">
+        {all.map(u=><div key={u.id} className="fp-item" onClick={()=>onFromStorage(u)}>
+          <span className="fp-icon">{FILE_ICON(u.type)}</span>
+          <div className="fp-info">
+            <div className="fp-name">{u.name}</div>
+            <div className="fp-meta">{fmtBytes(u.size||0)}
+              {u.uploadedAt?' · '+new Date(u.uploadedAt).toLocaleDateString('en-US',{month:'short',day:'numeric'}):''}
+            </div>
+          </div>
+          <Ic n="plus" style={{width:14,height:14,color:'var(--accent)',flexShrink:0}}/>
+        </div>)}
+      </div>
+    );
+  }
+
+  return <div className="file-picker">
+    {all.length>0
+      ? <>
+          <div className="fp-header">
+            <span>From Storage</span>
+            <span className="fp-badge">{all.length}</span>
+            <div style={{flex:1}}/>
+            <div className="fp-view-toggle">
+              {FP_VIEWS.map(v=>
+                <button key={v.id} className={cx('fp-vbtn',view===v.id&&'on')}
+                  title={v.title} onClick={()=>setView(v.id)}>
+                  <Ic n={v.icon} style={{width:13,height:13}}/>
+                </button>
+              )}
+            </div>
+          </div>
+          {renderItems()}
+        </>
+      : <div className="fp-upload-zone" onClick={()=>fileRef.current?.click()}>
+          <Ic n="paperclip" style={{width:24,height:24}}/>
+          <span>Choose a file from your computer</span>
+        </div>}
+    <div className="fp-footer">
+      <button className="fp-upload-btn" onClick={()=>fileRef.current?.click()}>
+        <Ic n="import" style={{width:13,height:13}}/> Upload file
+      </button>
+      <input ref={fileRef} type="file" style={{display:'none'}}
+        onChange={e=>{const f=e.target.files?.[0];if(f)onUpload(f);}}/>
+    </div>
+  </div>;
+}
+
+/* ---- File attachment block body ---- */
+const FILE_TYPE_COLOR={
+  'image/':'#8b5cf6','video/':'#ec4899','audio/':'#f59e0b',
+  'application/pdf':'#ef4444','text/':'#3b82f6',
+};
+function fileAccentColor(type){
+  if(!type) return '#64748b';
+  for(const [k,v] of Object.entries(FILE_TYPE_COLOR)) if(type.startsWith(k)) return v;
+  return '#64748b';
+}
+
+function FileBlockBody({block,onChange,onUploadFile,uploads,onDelete}){
+  const [picking,setPicking]=useState(false);
+  const [preview,setPreview]=useState(false);
+
+  async function handleUpload(file){
+    const dataUrl=await readAsDataUrl(file);
+    const upId=nid();
+    onChange({...block,url:dataUrl,fileName:file.name,fileType:file.type,fileSize:file.size,uploadId:upId});
+    onUploadFile?.({id:upId,name:file.name,type:file.type,size:file.size,dataUrl,uploadedAt:Date.now()});
+    setPicking(false);
+  }
+  function handleFromStorage(upload){
+    onChange({...block,url:upload.dataUrl,fileName:upload.name,fileType:upload.type,
+      fileSize:upload.size,uploadId:upload.id});
+    setPicking(false);
+  }
+
+  if(!block.url){
+    return <div className="b-file">
+      {picking
+        ? <FilePicker uploads={uploads} onUpload={handleUpload} onFromStorage={handleFromStorage}/>
+        : <div className="img-empty" onClick={()=>setPicking(true)}>
+            <Ic n="paperclip" style={{width:20,height:20}}/> Attach a file
+          </div>}
+    </div>;
+  }
+
+  const isImg=block.fileType?.startsWith('image/');
+  const accent=fileAccentColor(block.fileType);
+  const ext=(block.fileType||'').split('/').pop().toUpperCase()||'FILE';
+
+  return <div className="b-file">
+    <div className="fc-chip" tabIndex={0} onClick={()=>setPreview(true)}
+      onKeyDown={e=>{
+        if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();onDelete?.();}
+        if(e.key==='Enter'||e.key===' '){e.preventDefault();setPreview(true);}
+      }}>
+      {/* thumbnail / icon swatch */}
+      <div className="fc-chip-thumb" style={{'--fc-accent':accent}}>
+        {isImg
+          ? <img src={block.url} alt={block.fileName}/>
+          : <span className="fc-chip-emoji">{FILE_ICON(block.fileType)}</span>}
+        <span className="fc-chip-ext">{ext}</span>
+      </div>
+      {/* info */}
+      <div className="fc-chip-info">
+        <div className="fc-chip-name" title={block.fileName||'Attached file'}>
+          {block.fileName||'Attached file'}
+        </div>
+        <div className="fc-chip-meta">
+          {fmtBytes(block.fileSize||0)}
+          {block.fileType?' · '+block.fileType.split('/').pop():''}
+          <span className="fc-chip-hint">· click to preview</span>
+        </div>
+      </div>
+      {/* actions — stop propagation so they don't open preview */}
+      <div className="fc-chip-actions" onClick={e=>e.stopPropagation()}>
+        <a href={block.url} download={block.fileName||'file'}
+          className="icon-btn" title="Download"
+          style={{width:28,height:28,display:'flex',alignItems:'center',justifyContent:'center'}}>
+          <Ic n="download" style={{width:13,height:13}}/>
+        </a>
+        <button className="icon-btn" style={{width:28,height:28}} title="Remove attachment"
+          onClick={()=>onChange({...block,url:'',fileName:'',fileType:'',fileSize:0})}>
+          <Ic n="x" style={{width:12,height:12}}/>
+        </button>
+      </div>
+    </div>
+
+    {preview&&<FilePreviewModal
+      upload={{id:block.uploadId||block.id,name:block.fileName||'file',
+        type:block.fileType,size:block.fileSize,dataUrl:block.url}}
+      onClose={()=>setPreview(false)}
+      hasPrev={false} hasNext={false}
+    />}
+  </div>;
+}
+
 /* =========================================================================
    CONTEXT MENU  — right-click popup positioned at cursor
    ========================================================================= */
@@ -358,23 +593,49 @@ function ContextMenu({x,y,items,onClose}){
    ========================================================================= */
 const TOUR_STEPS=[
   {id:'welcome',target:null,icon:'👋',title:'Welcome to your Workspace!',pos:'center',
-    body:"Let's take a quick 60-second tour. We'll highlight each part of the app as we go."},
+    body:"Let's take a quick tour of everything available. We'll walk through each part of the app — use the arrows to go at your own pace."},
+
   {id:'sidebar',target:'.sidebar',icon:'🗂️',title:'Your Sidebar',pos:'right',
-    body:'All your pages live here. The "My Workspace" section holds your personal pages. Drag pages to reorder or nest them.'},
+    body:'All your pages live here, organised into Private and Shared sections. Drag pages to reorder or nest them inside each other for infinite hierarchy.'},
+
   {id:'workspace',target:'.ws-btn',icon:'🏢',title:'Workspaces',pos:'right',
-    body:'Click here to switch between workspaces, create a new one, or share your workspace with teammates.'},
+    body:'Click here to switch between workspaces or create a new one. Each workspace has its own set of pages and can be shared independently with teammates.'},
+
   {id:'newpage',target:'.sec-title',icon:'➕',title:'Creating Pages',pos:'right',
-    body:'Click the + button next to any section to create a new page. Pages can be nested inside each other.'},
+    body:'Click the + next to any section header to create a new page. Pages support an emoji icon, a gradient cover image, and any combination of blocks below the title.'},
+
   {id:'editor',target:'.page-head',icon:'✏️',title:'The Block Editor',pos:'bottom',
-    body:"Click the emoji to change the page icon. Type / on any empty line to open the block menu — 20+ block types."},
+    body:'Click the emoji to change the icon. Click the cover area to add a gradient header. Every line below the title is a block — hover the left margin to drag, duplicate, colour, or delete it.'},
+
   {id:'slash',target:null,icon:'/',title:'Slash Commands',pos:'center',
-    body:"Type / anywhere while editing to open the command palette. Add headings, lists, to-dos, databases, code blocks, images, and more."},
-  {id:'share',target:'.topbar-actions',icon:'🔗',title:'Share & Collaborate',pos:'bottom-left',
-    body:'Hover any sidebar page to see the share icon. Click Share in the toolbar to invite by email. Toggle the ↑ icon to see your Shared panel.'},
+    body:"Type / on any empty line to open the block menu. Choose from 20+ types: headings, lists, to-dos, toggles, quotes, callouts, dividers, images, file attachments, code blocks, databases, and more."},
+
+  {id:'codeblock',target:null,icon:'</>', title:'Code Blocks',pos:'center',
+    body:'Insert a code block with /code. The header shows traffic-light dots and a language picker — click the language pill to choose from 14 languages. Hit Copy to grab the code instantly.'},
+
+  {id:'media',target:null,icon:'📎',title:'Images & File Attachments',pos:'center',
+    body:'Use /image to embed a photo (upload, paste URL, or pick from storage) or /file to attach any document. Attached files show a colour-coded icon chip — red for PDF, purple for images — with preview and download built in.'},
+
+  {id:'database',target:null,icon:'🗃️',title:'Multi-view Databases',pos:'center',
+    body:'Type /table, /board, /gallery, /list, or /calendar to insert a database. Switch views from the tab bar, add custom properties (status, select, date, person), and filter or sort any column.'},
+
+  {id:'storage',target:'.storage-badge',icon:'📦',title:'Storage Manager',pos:'bottom-left',
+    body:'Click the storage badge in the toolbar — or open Storage in the sidebar — to browse every uploaded file. Switch between grid, large gallery, and list views. Icons are colour-coded to match the file attachment chip.'},
+
   {id:'search',target:null,icon:'🔍',title:'Quick Search',pos:'center',
-    body:'Press Ctrl+K (or ⌘K on Mac) to instantly search all pages and content in your workspace.'},
-  {id:'done',target:null,icon:'🎯',title:"You're all set!",pos:'center',
-    body:"Press Ctrl+K to search, Ctrl+N for a new page, and / anywhere to open the block menu. Restart the tour anytime from Settings. Happy building!"},
+    body:'Press Ctrl+K (or ⌘K on Mac) to instantly search every page and block in your workspace. Arrow keys navigate results; Enter opens the page.'},
+
+  {id:'share',target:'.topbar-actions',icon:'🔗',title:'Share & Collaborate',pos:'bottom-left',
+    body:'Click Share in the toolbar to invite someone by email with view or edit access. The Shared panel (↑ icon) shows everyone currently on the document. Shared pages appear in their sidebar automatically.'},
+
+  {id:'trash',target:'.nav-scroll',icon:'🗑️',title:'Trash & Archive',pos:'right',
+    body:'Deleted pages go to Trash — restore them any time or permanently delete. The Archive is for pages you want to keep but hide from the sidebar. Both are accessible at the bottom of the navigation.'},
+
+  {id:'themes',target:null,icon:'🎨',title:'Themes & Dark Mode',pos:'center',
+    body:'Open Settings to pick from 7 accent colours (Indigo, Blue, Ocean, Forest, Rose, Sunset, Violet) and toggle dark mode. Press Ctrl+Shift+L (or ⌘+Shift+L) to flip dark mode at any time.'},
+
+  {id:'done',target:null,icon:'🚀',title:"You're all set!",pos:'center',
+    body:"Ctrl+K to search · Ctrl+N for a new page · / for blocks · Ctrl+/ for all shortcuts. Restart this tour any time from Settings → Tutorial. Happy building!"},
 ];
 
 function TutorialOverlay({onComplete,onSkip}){
@@ -650,17 +911,46 @@ function BlockMenu({rect,block,onClose,onAction}){
   </>;
 }
 
+/* ---- Code block language selector ---- */
+function CodeLangSelect({value, onChange}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef();
+  useEffect(()=>{
+    if(!open) return;
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
+    setTimeout(()=>document.addEventListener('mousedown',h),0);
+    return()=>document.removeEventListener('mousedown',h);
+  },[open]);
+  const lang=value||'plain text';
+  return <div ref={ref} className="code-lang-sel">
+    <button className={cx('code-lang-btn',open&&'open')}
+      onMouseDown={e=>{e.preventDefault();setOpen(o=>!o);}}>
+      <span className="code-lang-pill">{lang}</span>
+      <Ic n="chevron-down" style={{width:11,height:11}}/>
+    </button>
+    {open&&<div className="code-lang-menu">
+      {CODE_LANGS.map(l=><div key={l}
+        className={cx('code-lang-opt',lang===l&&'sel')}
+        onMouseDown={e=>{e.preventDefault();onChange(l);setOpen(false);}}>
+        <span>{l}</span>
+        {lang===l&&<Ic n="check" style={{width:12,height:12}}/>}
+      </div>)}
+    </div>}
+  </div>;
+}
+
 /* =========================================================================
    BLOCK  — renders one block of any type
    ========================================================================= */
 function Block(props){
   const {block,index,listNumber,onChange,onEnter,onBackspace,onArrow,onIndent,
     focus,setFocus,onSlash,onBlockAction,openPage,onDragStart,onDragOver,onDrop,
-    dragInfo,depth} = props;
+    dragInfo,depth,onUploadFile,uploads} = props;
   const ceRef=useRef();
   const codeRef=useRef();
   const [menu,setMenu]=useState(null);
   const [emoji,setEmoji]=useState(false);
+  const [imgPick,setImgPick]=useState(false);
   const T=block.type;
   // auto-resize code textarea whenever its content changes
   useEffect(()=>{
@@ -802,17 +1092,15 @@ function Block(props){
   </div>;
   else if(T==='code') body=<div className="b-code">
     <div className="code-head">
-      <select value={block.lang||'plain text'}
-        onChange={e=>onChange({...block,lang:e.target.value})}>
-        {CODE_LANGS.map(l=><option key={l}>{l}</option>)}</select>
-      <button className="g-btn" style={{width:'auto',padding:'0 6px',fontSize:12}}
-        onClick={()=>{navigator.clipboard&&navigator.clipboard.writeText(block.code||'');}}
-        >Copy</button>
+      <div className="code-dots"><span/><span/><span/></div>
+      <CodeLangSelect value={block.lang||'plain text'} onChange={l=>onChange({...block,lang:l})}/>
+      <div style={{flex:1}}/>
+      <button className="code-copy"
+        onClick={()=>{navigator.clipboard&&navigator.clipboard.writeText(block.code||'');}}>
+        <Ic n="copy" style={{width:11,height:11}}/>Copy
+      </button>
     </div>
-    <textarea ref={codeRef} className="ce"
-      style={{fontFamily:'var(--mono)',resize:'none',border:'none',overflow:'hidden',
-        background:'transparent',color:'var(--text)',minHeight:60,display:'block',
-        width:'100%',boxSizing:'border-box'}}
+    <textarea ref={codeRef} className="code-area"
       value={block.code||''} placeholder="Type your code…"
       onChange={e=>{
         const el=e.target;
@@ -822,16 +1110,40 @@ function Block(props){
       }}
       onKeyDown={e=>{ if(e.key==='Backspace'&&!block.code){e.preventDefault();onBackspace(block);}}}/>
   </div>;
-  else if(T==='image') body=<div className="b-image">
+  else if(T==='image') body=<div className="b-image"
+    tabIndex={block.url?0:undefined}
+    onKeyDown={block.url?e=>{
+      if((e.key==='Delete'||e.key==='Backspace')&&e.target===e.currentTarget){
+        e.preventDefault(); onBlockAction(block,'delete');
+      }
+    }:undefined}>
     {block.url ? <Fragment>
-      <img src={block.url} alt="" onError={e=>e.target.style.opacity=.3}/>
+      <img src={block.url} alt="" onError={e=>e.target.style.opacity=.3}
+        onClick={e=>e.currentTarget.closest('.b-image')?.focus()}/>
       <Editable html={block.caption} placeholder="Add a caption…" className="img-cap"
-        onInput={h=>onChange({...block,caption:h})}/>
-    </Fragment> : <div className="img-empty" onClick={()=>{
-      const u=prompt('Paste an image URL'); if(u)onChange({...block,url:u}); }}>
-      <Ic n="image" style={{width:20,height:20}}/> Add an image — click to paste a URL
-    </div>}
+        onInput={h=>onChange({...block,caption:h})}
+        onKeyDown={e=>{
+          if((e.key==='Delete'||e.key==='Backspace')&&caretAtStart(e.currentTarget)&&!(block.caption||'').trim()){
+            e.preventDefault(); onBlockAction(block,'delete');
+          }
+        }}/>
+    </Fragment> : imgPick
+      ? <ImagePicker
+          uploads={uploads}
+          onFile={async file=>{
+            const dataUrl=await readAsDataUrl(file);
+            const upId=nid();
+            onChange({...block,url:dataUrl,fileName:file.name,fileType:file.type,fileSize:file.size,uploadId:upId});
+            onUploadFile?.({id:upId,name:file.name,type:file.type||'image/'+file.name.split('.').pop(),size:file.size,dataUrl,uploadedAt:Date.now()});
+            setImgPick(false);
+          }}
+          onUrl={url=>{onChange({...block,url});setImgPick(false);}}
+        />
+      : <div className="img-empty" onClick={()=>setImgPick(true)}>
+          <Ic n="image" style={{width:20,height:20}}/> Add an image
+        </div>}
   </div>;
+  else if(T==='file') body=<FileBlockBody block={block} onChange={onChange} onUploadFile={onUploadFile} uploads={uploads} onDelete={()=>onBlockAction(block,'delete')}/>;
   else if(T==='bookmark') body=<div className="b-bookmark">
     {block.url ? <a href={block.url} target="_blank" rel="noreferrer">
       <div className="bm-txt">
@@ -864,6 +1176,7 @@ function Block(props){
     (dragInfo.pos==='above'?'drop-above':'drop-below') : '';
 
   return <div className={cx('blk','b-'+T,dragInfo&&dragInfo.dragId===block.id&&'dragging',dropCls)}
+    data-block-id={block.id}
     style={{marginLeft:(depth||0)*26}}
     onDragOver={e=>onDragOver(e,block)} onDrop={e=>onDrop(e,block)}
     onContextMenu={T!=='database'?e=>{
@@ -881,7 +1194,7 @@ window.__NOTION_PART2_DONE=true;
 /* =========================================================================
    PAGE EDITOR
    ========================================================================= */
-function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=[]}){
+function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=[],onUploadFile,uploads}){
   const [focus,setFocus]=useState(null);
   const [slash,setSlash]=useState(null); // {blockId,rect,el}
   const [drag,setDrag]=useState(null);   // {dragId,overId,pos}
@@ -890,12 +1203,49 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
   const blocks=node.blocks||[];
 
   const setBlocks=nb=>update(node.id,{blocks:nb});
+
+  /* ── undo / redo (block-structural history) ── */
+  const undoStack=useRef([]);
+  const redoStack=useRef([]);
+  function setBlocksH(nb){        // history-aware setter for structural ops
+    undoStack.current=[...undoStack.current.slice(-20), blocks];
+    redoStack.current=[];
+    setBlocks(nb);
+  }
+  function undo(){
+    if(!undoStack.current.length) return;
+    const prev=undoStack.current[undoStack.current.length-1];
+    undoStack.current=undoStack.current.slice(0,-1);
+    redoStack.current=[blocks,...redoStack.current.slice(0,20)];
+    setBlocks(prev);
+  }
+  function redo(){
+    if(!redoStack.current.length) return;
+    const next=redoStack.current[0];
+    redoStack.current=redoStack.current.slice(1);
+    undoStack.current=[...undoStack.current.slice(-100),blocks];
+    setBlocks(next);
+  }
+  useEffect(()=>{
+    function onKey(e){
+      const m=e.metaKey||e.ctrlKey;
+      if(!m) return;
+      if(e.key.toLowerCase()==='z'&&!e.shiftKey&&undoStack.current.length){
+        e.preventDefault(); undo();
+      }
+      if((e.key.toLowerCase()==='y'||(e.key.toLowerCase()==='z'&&e.shiftKey))&&redoStack.current.length){
+        e.preventDefault(); redo();
+      }
+    }
+    document.addEventListener('keydown',onKey,true); // capture so it beats contentEditable
+    return ()=>document.removeEventListener('keydown',onKey,true);
+  },[]);
   const updateBlock=(b)=>setBlocks(blocks.map(x=>x.id===b.id?b:x));
   const idx=id=>blocks.findIndex(b=>b.id===id);
 
   function insertAfter(afterId,blk){
     const i=idx(afterId);
-    const nb=[...blocks]; nb.splice(i+1,0,blk); setBlocks(nb);
+    const nb=[...blocks]; nb.splice(i+1,0,blk); setBlocksH(nb);
     setFocus({id:blk.id,pos:'start'});
   }
   function onEnter(b,el){
@@ -913,23 +1263,31 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
   }
   function onBackspace(b,el){
     const i=idx(b.id);
+    // media/embed blocks should be deleted on backspace, not converted to text
+    if(['image','file','bookmark','divider','subpage'].includes(b.type)){
+      const nb=blocks.filter(x=>x.id!==b.id);
+      if(!nb.length) nb.push({id:nid(),type:'text',html:''});
+      setBlocksH(nb);
+      if(i>0) setFocus({id:blocks[i-1].id,pos:'end'});
+      return;
+    }
     if(b.type!=='text' && b.type!=='code'){
       updateBlock({...b,type:'text',checked:undefined,children:undefined,
         emoji:undefined,color:b.color}); setFocus({id:b.id,pos:'start'}); return;
     }
     if(b.type==='code'){
-      const nb=blocks.filter(x=>x.id!==b.id); setBlocks(nb);
+      const nb=blocks.filter(x=>x.id!==b.id); setBlocksH(nb);
       if(i>0)setFocus({id:blocks[i-1].id,pos:'end'}); return;
     }
     if(i===0) return;
     const prev=blocks[i-1];
-    if(['divider','image','bookmark','subpage','database'].includes(prev.type)){
+    if(['divider','image','file','bookmark','subpage','database'].includes(prev.type)){
       // delete the media block above instead
-      setBlocks(blocks.filter(x=>x.id!==prev.id)); return;
+      setBlocksH(blocks.filter(x=>x.id!==prev.id)); return;
     }
     const merged={...prev,html:(prev.html||'')+(b.html||'')};
     const nb=blocks.filter(x=>x.id!==b.id).map(x=>x.id===prev.id?merged:x);
-    setBlocks(nb); setFocus({id:prev.id,pos:'end'});
+    setBlocksH(nb); setFocus({id:prev.id,pos:'end'});
   }
   function onArrow(dir,b){
     const i=idx(b.id);
@@ -945,11 +1303,11 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     if(action==='delete'){
       const nb=blocks.filter(x=>x.id!==b.id);
       if(!nb.length)nb.push({id:nid(),type:'text',html:''});
-      setBlocks(nb); return;
+      setBlocksH(nb); return;
     }
     if(action==='duplicate'){
       const copy={...clone(b),id:nid()};
-      const nb=[...blocks]; nb.splice(i+1,0,copy); setBlocks(nb); return;
+      const nb=[...blocks]; nb.splice(i+1,0,copy); setBlocksH(nb); return;
     }
     if(action==='add-below'){
       insertAfter(b.id,{id:nid(),type:'text',html:''}); return;
@@ -992,6 +1350,7 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
         case 'callout': return {id,type:'callout',html:'',emoji:'💡',color:'gray'};
         case 'divider': return {id,type:'divider'};
         case 'image': return {id,type:'image',url:'',caption:''};
+        case 'file': return {id,type:'file',url:'',fileName:'',fileType:'',fileSize:0};
         case 'bookmark': return {id,type:'bookmark',url:''};
         case 'code': return {id,type:'code',code:'',lang:'plain text'};
         case 'page': {
@@ -1008,14 +1367,13 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     const nb=mk();
     if(text.trim()===''){
       // replace current block
-      setBlocks(blocks.map(x=>x.id===b.id?nb:x));
+      setBlocksH(blocks.map(x=>x.id===b.id?nb:x));
       if(['text','h1','h2','h3','quote','todo','bullet','number','toggle','callout'].includes(nb.type))
         setFocus({id:nb.id,pos:'start'});
     } else {
       // keep current text, insert new after
-      updateBlock({...b,html:text});
       const i=idx(b.id); const arr=[...blocks]; arr[i]={...b,html:text};
-      arr.splice(i+1,0,nb); setBlocks(arr);
+      arr.splice(i+1,0,nb); setBlocksH(arr);
       if(nb.type==='text') setFocus({id:nb.id,pos:'start'});
     }
   }
@@ -1051,10 +1409,43 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     let ti=rest.findIndex(x=>x.id===b.id);
     if(drag.pos==='below')ti++;
     rest.splice(ti,0,moving);
-    setBlocks(rest); setDrag(null);
+    setBlocksH(rest); setDrag(null);
   }
   useEffect(()=>{ const end=()=>setDrag(null);
     document.addEventListener('dragend',end); return ()=>document.removeEventListener('dragend',end); },[]);
+
+  // Clipboard image paste → auto-create image block
+  const editorDivRef=useRef();
+  useEffect(()=>{
+    const el=editorDivRef.current; if(!el) return;
+    function onPaste(e){
+      const items=Array.from(e.clipboardData?.items||[]);
+      const imgItem=items.find(i=>i.type.startsWith('image/')); if(!imgItem) return;
+      e.preventDefault(); e.stopPropagation();
+      const file=imgItem.getAsFile(); if(!file) return;
+      readAsDataUrl(file).then(dataUrl=>{
+        const upId=nid();
+        const imgBlk={id:nid(),type:'image',url:dataUrl,caption:'',
+          fileName:`paste-${Date.now()}.png`,fileType:file.type,fileSize:file.size,uploadId:upId};
+        // insert after the currently focused block (detected via DOM data-block-id)
+        let insertAt=blocks.length;
+        const active=document.activeElement;
+        if(active&&el.contains(active)){
+          const blkEl=active.closest('[data-block-id]');
+          if(blkEl){
+            const i=blocks.findIndex(b=>b.id===blkEl.dataset.blockId);
+            if(i>=0) insertAt=i+1;
+          }
+        }
+        const nb=[...blocks]; nb.splice(insertAt,0,imgBlk); setBlocksH(nb);
+        setFocus({id:imgBlk.id,pos:'end'});
+        onUploadFile?.({id:upId,name:`paste-${Date.now()}.png`,
+          type:file.type,size:file.size,dataUrl,uploadedAt:Date.now()});
+      });
+    }
+    el.addEventListener('paste',onPaste,true); // capture so we intercept before Editable
+    return ()=>el.removeEventListener('paste',onPaste,true);
+  },[blocks,onUploadFile]);
 
   // numbering for numbered lists
   const numbers=useMemo(()=>{
@@ -1098,7 +1489,7 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       {node.kind==='database'
         ? <div style={{paddingBottom:'30vh'}}><DatabaseView db={node.db}
             onChange={ndb=>update(node.id,{db:ndb})} openRow={openRow}/></div>
-        : <div className="editor">
+        : <div className="editor" ref={editorDivRef}>
         {blocks.map((b,i)=><Block key={b.id} block={b} index={i} depth={b.depth}
           listNumber={numbers[b.id]}
           onChange={updateBlock} onEnter={onEnter} onBackspace={onBackspace}
@@ -1108,15 +1499,19 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
           onBlockAction={blockAction} openPage={openPage} openRow={openRow}
           lookupNode={lookupNode}
           onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop}
-          dragInfo={drag}/>)}
-        <div className="blk" onClick={()=>{
-          const last=blocks[blocks.length-1];
-          if(last&&last.type==='text'&&!(last.html||'').trim()){
-            setFocus({id:last.id,pos:'start'});
-          }else{
-            const b={id:nid(),type:'text',html:''};
-            setBlocks([...blocks,b]); setFocus({id:b.id,pos:'start'});
-          }}}>
+          dragInfo={drag} onUploadFile={onUploadFile} uploads={uploads}/>)}
+        <div className="blk editor-end-zone" onClick={()=>{
+          const EDITABLE=['text','h1','h2','h3','bullet','number','todo','toggle','quote','callout'];
+          // walk backwards to find the last editable block
+          for(let i=blocks.length-1;i>=0;i--){
+            if(EDITABLE.includes(blocks[i].type)){
+              setFocus({id:blocks[i].id,pos:'end'}); return;
+            }
+          }
+          // no editable block found — create one
+          const b={id:nid(),type:'text',html:''};
+          setBlocksH([...blocks,b]); setFocus({id:b.id,pos:'start'});
+        }}>
           <div className="blk-body"><div className="ce" style={{color:'var(--text-3)',
             cursor:'text',minHeight:24}}> </div></div>
         </div>
@@ -2090,10 +2485,441 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
       <div className="nav" style={{marginTop:10}}>
         {navRow('layout','Templates',()=>setModal({type:'templates'}))}
         {navRow('import','Import',()=>setModal({type:'import'}))}
+        {navRow('database','Storage',()=>openPage(STORAGE_ID),null,currentId===STORAGE_ID)}
         {navRow('archive','Archive',()=>setModal({type:'archive'}))}
         {navRow('trash','Trash',()=>setModal({type:'trash'}))}
       </div>
     </div>
+  </div>;
+}
+
+/* =========================================================================
+   STORAGE PAGE  — shows all uploaded files for the active workspace
+   ========================================================================= */
+/* ---- Grid card (medium) ---- */
+/* ---- File preview modal ---- */
+const FP_MIN_W=280, FP_MAX_W=900, FP_DEFAULT_W=400;
+
+function FilePreviewModal({upload,onClose,onPrev,onNext,hasPrev,hasNext}){
+  /* 'panel' = right-side drawer (default), 'modal' = centred overlay */
+  const [mode,setMode]=useState(()=>{
+    try{return localStorage.getItem('fp-view-mode')||'panel';}catch{return'panel';}
+  });
+  const [panelW,setPanelW]=useState(()=>{
+    try{return Math.min(FP_MAX_W,Math.max(FP_MIN_W,+localStorage.getItem('fp-panel-w')||FP_DEFAULT_W));}
+    catch{return FP_DEFAULT_W;}
+  });
+  const dragRef=useRef(null);
+
+  function toggleMode(){
+    const next=mode==='panel'?'modal':'panel';
+    setMode(next);
+    try{localStorage.setItem('fp-view-mode',next);}catch{}
+  }
+
+  /* drag-to-resize the panel */
+  function onResizeMouseDown(e){
+    e.preventDefault();
+    const startX=e.clientX;
+    const startW=panelW;
+    function onMove(ev){
+      const newW=Math.min(FP_MAX_W,Math.max(FP_MIN_W,startW+(startX-ev.clientX)));
+      setPanelW(newW);
+    }
+    function onUp(){
+      document.removeEventListener('mousemove',onMove);
+      document.removeEventListener('mouseup',onUp);
+      setPanelW(w=>{
+        try{localStorage.setItem('fp-panel-w',w);}catch{}
+        return w;
+      });
+      document.body.style.cursor='';
+      document.body.style.userSelect='';
+    }
+    document.body.style.cursor='ew-resize';
+    document.body.style.userSelect='none';
+    document.addEventListener('mousemove',onMove);
+    document.addEventListener('mouseup',onUp);
+  }
+
+  useEffect(()=>{
+    const k=e=>{
+      if(e.key==='Escape') onClose();
+      if(e.key==='ArrowLeft'&&hasPrev) onPrev?.();
+      if(e.key==='ArrowRight'&&hasNext) onNext?.();
+    };
+    document.addEventListener('keydown',k,true);
+    return ()=>document.removeEventListener('keydown',k,true);
+  },[hasPrev,hasNext]);
+
+  /* push the .main area to the left when the panel is open */
+  const isPanel=mode==='panel';
+  useEffect(()=>{
+    const main=document.querySelector('.main');
+    if(!main) return;
+    if(isPanel){
+      document.documentElement.style.setProperty('--fp-panel-w',panelW+'px');
+      main.classList.add('fp-panel-open');
+    } else {
+      main.classList.remove('fp-panel-open');
+    }
+    return ()=>{ main.classList.remove('fp-panel-open'); };
+  },[isPanel,panelW]);
+
+  const isImg=upload.type?.startsWith('image/');
+  const isVideo=upload.type?.startsWith('video/');
+  const isAudio=upload.type?.startsWith('audio/');
+  const isPdf=upload.type==='application/pdf';
+  const isText=upload.type?.startsWith('text/');
+  const maxH=isPanel?'calc(100vh - 120px)':'calc(80vh - 100px)';
+
+  function renderBody(){
+    if(isImg) return <img src={upload.dataUrl} alt={upload.name}
+      style={{maxWidth:'100%',maxHeight:maxH,objectFit:'contain',borderRadius:6}}/>;
+    if(isVideo) return <video src={upload.dataUrl} controls autoPlay
+      style={{maxWidth:'100%',maxHeight:maxH,borderRadius:6}}/>;
+    if(isAudio) return <div style={{width:'100%',padding:'40px 0',textAlign:'center'}}>
+      <div style={{fontSize:48,marginBottom:16}}>🎵</div>
+      <audio src={upload.dataUrl} controls style={{width:'100%'}}/></div>;
+    if(isPdf) return <iframe src={upload.dataUrl} title={upload.name}
+      style={{width:'100%',height:maxH,border:'none',borderRadius:6}}/>;
+    if(isText) return <pre style={{
+      width:'100%',maxHeight:maxH,overflow:'auto',
+      background:'var(--bg-input)',borderRadius:6,padding:16,
+      fontSize:13,fontFamily:'var(--mono)',whiteSpace:'pre-wrap',wordBreak:'break-word'}}>
+      {atob(upload.dataUrl.split(',')[1]||'')}
+    </pre>;
+    return <div style={{padding:'48px 0',textAlign:'center'}}>
+      <div style={{fontSize:56,marginBottom:12}}>{FILE_ICON(upload.type)}</div>
+      <div style={{color:'var(--text-2)',fontSize:14,marginBottom:20}}>No preview available.</div>
+      <a href={upload.dataUrl} download={upload.name} className="btn primary"
+        style={{display:'inline-flex',alignItems:'center',gap:6,padding:'8px 16px'}}>
+        <Ic n="download" style={{width:14,height:14}}/> Download to view
+      </a>
+    </div>;
+  }
+
+  const metaLine=<>
+    {fmtBytes(upload.size||0)}
+    {upload.uploadedAt?' · '+new Date(upload.uploadedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):''}
+  </>;
+
+  const toggleBtn=<button className="icon-btn fp-mode-btn"
+    title={isPanel?'Expand to overlay':'Move to side panel'} onClick={toggleMode}
+    style={{width:30,height:30}}>
+    {isPanel ? <Maximize2 size={14}/> : <PanelRight size={14}/>}
+  </button>;
+
+  const downloadBtn=<a href={upload.dataUrl} download={upload.name} className="btn ghost"
+    style={{display:'flex',alignItems:'center',gap:5,padding:'5px 10px',fontSize:12}}>
+    <Ic n="download" style={{width:13,height:13}}/> Download
+  </a>;
+
+  const closeBtn=<button className="icon-btn" style={{width:30,height:30}} title="Close (Esc)" onClick={onClose}>
+    <Ic n="x" style={{width:15,height:15}}/>
+  </button>;
+
+  const navButtons=(hasPrev||hasNext)&&<>
+    <button className="btn ghost" disabled={!hasPrev} onClick={onPrev}
+      style={{display:'flex',alignItems:'center',gap:5,padding:'5px 12px',fontSize:12}}>
+      <Ic n="back" style={{width:13,height:13}}/> Previous
+    </button>
+    <button className="btn ghost" disabled={!hasNext} onClick={onNext}
+      style={{display:'flex',alignItems:'center',gap:5,padding:'5px 12px',fontSize:12}}>
+      Next <Ic n="fwd" style={{width:13,height:13}}/>
+    </button>
+  </>;
+
+  /* ── RIGHT-SIDE PANEL ── */
+  if(isPanel) return createPortal(
+    <div className="fp-panel" style={{width:panelW}} ref={dragRef}>
+      {/* drag handle on left edge */}
+      <div className="fp-resize-handle" onMouseDown={onResizeMouseDown} title="Drag to resize"/>
+      <div className="fp-panel-header">
+        <div style={{display:'flex',alignItems:'center',gap:10,minWidth:0}}>
+          <span style={{fontSize:18,flexShrink:0}}>{FILE_ICON(upload.type)}</span>
+          <div style={{minWidth:0}}>
+            <div className="fp-panel-filename">{upload.name}</div>
+            <div className="preview-filemeta">{metaLine}</div>
+          </div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
+          {toggleBtn}{downloadBtn}{closeBtn}
+        </div>
+      </div>
+      <div className="fp-panel-body">{renderBody()}</div>
+      {navButtons&&<div className="preview-nav">{navButtons}</div>}
+    </div>,
+    document.body
+  );
+
+  /* ── CENTRED OVERLAY ── */
+  return createPortal(
+    <div className="preview-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div className="preview-modal">
+        <div className="preview-header">
+          <div style={{display:'flex',alignItems:'center',gap:10,minWidth:0}}>
+            <span style={{fontSize:18}}>{FILE_ICON(upload.type)}</span>
+            <div style={{minWidth:0}}>
+              <div className="preview-filename">{upload.name}</div>
+              <div className="preview-filemeta">{metaLine}</div>
+            </div>
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
+            {toggleBtn}{downloadBtn}{closeBtn}
+          </div>
+        </div>
+        <div className="preview-body">{renderBody()}</div>
+        {navButtons&&<div className="preview-nav">{navButtons}</div>}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function UploadCard({upload,onDelete,onPreview}){
+  const isImg=upload.type?.startsWith('image/');
+  return <div className="upload-card">
+    <div className="uc-thumb" onClick={onPreview} style={{cursor:'pointer',position:'relative'}}>
+      {isImg
+        ? <img src={upload.dataUrl} alt={upload.name} style={{width:'100%',height:'100%',objectFit:'cover',borderRadius:6}}/>
+        : <div className="uc-icon" style={{'--fc-accent':fileAccentColor(upload.type)}}>{FILE_ICON(upload.type)}</div>}
+      <div className="uc-preview-hint"><Eye size={14}/></div>
+    </div>
+    <div className="uc-info">
+      <div className="uc-name" title={upload.name}>{upload.name}</div>
+      <div className="uc-meta">
+        {fmtBytes(upload.size||0)}
+        {upload.uploadedAt?' · '+new Date(upload.uploadedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):''}
+      </div>
+    </div>
+    <div className="uc-actions">
+      <button className="icon-btn" style={{width:28,height:28}} title="Preview" onClick={onPreview}>
+        <Ic n="eye" style={{width:13,height:13}}/>
+      </button>
+      <a href={upload.dataUrl} download={upload.name} className="icon-btn" title="Download"
+        style={{display:'flex',alignItems:'center',justifyContent:'center',width:28,height:28}}>
+        <Ic n="download" style={{width:13,height:13}}/>
+      </a>
+      <button className="icon-btn" style={{width:28,height:28}} title="Delete" onClick={onDelete}>
+        <Ic n="trash" style={{width:13,height:13,color:'#d44c47'}}/>
+      </button>
+    </div>
+  </div>;
+}
+
+/* ---- Large gallery card ---- */
+function UploadCardLarge({upload,onDelete,onPreview}){
+  const isImg=upload.type?.startsWith('image/');
+  return <div className="upload-card-large">
+    <div className="ucl-thumb" onClick={onPreview} style={{cursor:'pointer',position:'relative'}}>
+      {isImg
+        ? <img src={upload.dataUrl} alt={upload.name}/>
+        : <div className="ucl-icon" style={{'--fc-accent':fileAccentColor(upload.type)}}>{FILE_ICON(upload.type)}</div>}
+      <div className="uc-preview-hint"><Eye size={16}/></div>
+    </div>
+    <div className="ucl-footer">
+      <div style={{flex:1,minWidth:0}}>
+        <div className="ucl-name" title={upload.name}>{upload.name}</div>
+        <div className="uc-meta">{fmtBytes(upload.size||0)}</div>
+      </div>
+      <div style={{display:'flex',gap:2,flexShrink:0}}>
+        <button className="icon-btn" style={{width:26,height:26}} title="Preview" onClick={onPreview}>
+          <Ic n="eye" style={{width:12,height:12}}/>
+        </button>
+        <a href={upload.dataUrl} download={upload.name} className="icon-btn" title="Download"
+          style={{display:'flex',alignItems:'center',justifyContent:'center',width:26,height:26}}>
+          <Ic n="download" style={{width:12,height:12}}/>
+        </a>
+        <button className="icon-btn" style={{width:26,height:26}} title="Delete" onClick={onDelete}>
+          <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
+        </button>
+      </div>
+    </div>
+  </div>;
+}
+
+/* ---- List row ---- */
+function UploadListRow({upload,onDelete,onPreview}){
+  const isImg=upload.type?.startsWith('image/');
+  const ext=upload.type?.split('/').pop()||'file';
+  const date=upload.uploadedAt?new Date(upload.uploadedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'—';
+  return <div className="ul-row">
+    <div className="ul-name-cell" onClick={onPreview} style={{cursor:'pointer'}}>
+      {isImg
+        ? <img src={upload.dataUrl} alt="" className="ul-thumb"/>
+        : <span className="ul-file-icon" style={{'--fc-accent':fileAccentColor(upload.type)}}>{FILE_ICON(upload.type)}</span>}
+      <span className="ul-fname" title={upload.name}>{upload.name}</span>
+    </div>
+    <span className="ul-ext">{ext.toUpperCase()}</span>
+    <span className="ul-size">{fmtBytes(upload.size||0)}</span>
+    <span className="ul-date">{date}</span>
+    <div className="ul-actions">
+      <button className="icon-btn" style={{width:26,height:26}} title="Preview" onClick={onPreview}>
+        <Ic n="eye" style={{width:13,height:13}}/>
+      </button>
+      <a href={upload.dataUrl} download={upload.name} className="icon-btn" title="Download"
+        style={{display:'flex',alignItems:'center',justifyContent:'center',width:26,height:26}}>
+        <Ic n="download" style={{width:13,height:13}}/>
+      </a>
+      <button className="icon-btn" style={{width:26,height:26}} title="Delete" onClick={onDelete}>
+        <Ic n="trash" style={{width:13,height:13,color:'#d44c47'}}/>
+      </button>
+    </div>
+  </div>;
+}
+
+function StoragePage({uploads,activeWorkspace,onDeleteUpload,onUpload}){
+  const [filter,setFilter]=useState('all');
+  const [view,setView]=useState('grid'); // 'grid' | 'list' | 'large'
+  const [uploading,setUploading]=useState(false);
+  const [previewId,setPreviewId]=useState(null);
+  const uploadRef=useRef();
+  const sorted=[...(uploads||[])].sort((a,b)=>b.uploadedAt-a.uploadedAt);
+  const filtered=filter==='all'?sorted
+    :filter==='images'?sorted.filter(u=>u.type?.startsWith('image/'))
+    :sorted.filter(u=>!u.type?.startsWith('image/'));
+  const totalSize=(uploads||[]).reduce((s,u)=>s+(u.size||0),0);
+  const previewIdx=filtered.findIndex(u=>u.id===previewId);
+  const previewUpload=previewIdx>=0?filtered[previewIdx]:null;
+
+  async function handleFiles(files){
+    setUploading(true);
+    for(const file of Array.from(files)){
+      const dataUrl=await readAsDataUrl(file);
+      await onUpload?.({id:nid(),name:file.name,type:file.type,size:file.size,dataUrl,uploadedAt:Date.now()});
+    }
+    setUploading(false);
+  }
+
+  let locationIcon,locationLabel,locationDetail,folderPath;
+  if(activeWorkspace?.isLocalFile){
+    locationIcon='💻'; locationLabel='Local folder';
+    folderPath=(activeWorkspace.dirName||'workspace')+' / uploads';
+    locationDetail='Files are stored in your local workspace folder under an uploads/ subfolder.';
+  } else if(activeWorkspace?.cloudProvider==='gdrive'){
+    locationIcon='📁'; locationLabel='Google Drive';
+    folderPath='Drive app folder / workspace-uploads';
+    locationDetail='Files are embedded in the workspace data saved to Google Drive.';
+  } else if(activeWorkspace?.isShared){
+    locationIcon='👥'; locationLabel='Shared workspace';
+    folderPath='Cloud storage (shared)';
+    locationDetail='Files are stored in the shared workspace cloud data.';
+  } else {
+    locationIcon='☁️'; locationLabel='Cloud storage';
+    folderPath='Firebase cloud workspace data';
+    locationDetail='Files are embedded in workspace cloud data as encoded content.';
+  }
+
+  const VIEW_BTNS=[
+    {id:'grid',   icon:'gallery', title:'Grid view'},
+    {id:'list',   icon:'list',    title:'List view'},
+    {id:'large',  icon:'expand',  title:'Gallery view'},
+  ];
+
+  return <div className="storage-page scroll">
+    <div className="page-wrap">
+      <div className="storage-pg-head">
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
+          <div style={{display:'flex',alignItems:'center',gap:12}}>
+            <div className="storage-pg-icon">📦</div>
+            <h1 className="storage-pg-title">Storage</h1>
+          </div>
+          <button className="btn primary" style={{display:'flex',alignItems:'center',gap:6,padding:'7px 14px'}}
+            onClick={()=>uploadRef.current?.click()} disabled={uploading}>
+            <Ic n="import" style={{width:14,height:14}}/>
+            {uploading?'Uploading…':'Upload files'}
+          </button>
+          <input ref={uploadRef} type="file" multiple style={{display:'none'}}
+            onChange={e=>{if(e.target.files?.length) handleFiles(e.target.files); e.target.value='';}}/>
+        </div>
+        <div className="storage-loc-row">
+          <div className="storage-loc-badge">
+            <span>{locationIcon}</span>
+            <span>{locationLabel}</span>
+          </div>
+          <div className="storage-loc-path">{folderPath}</div>
+          <div className="storage-loc-desc">{locationDetail}</div>
+        </div>
+      </div>
+
+      <div className="storage-stats-row">
+        <div className="st-stat">
+          <span className="st-n">{(uploads||[]).length}</span>
+          <span className="st-l">Files uploaded</span>
+        </div>
+        <div className="st-stat">
+          <span className="st-n">{fmtBytes(totalSize)}</span>
+          <span className="st-l">Total size</span>
+        </div>
+        <div className="st-stat">
+          <span className="st-n">{(uploads||[]).filter(u=>u.type?.startsWith('image/')).length}</span>
+          <span className="st-l">Images</span>
+        </div>
+      </div>
+
+      {(uploads||[]).length===0
+        ? <div className="empty-state" style={{marginTop:60}}>
+            <div className="es-em">📦</div>
+            <b>No uploads yet</b>
+            <p>Upload files directly using the button above, or attach them in any page using the image block or the <code>/file</code> command.</p>
+            <button className="btn primary" style={{display:'flex',alignItems:'center',gap:6,padding:'8px 18px',margin:'12px auto 0'}}
+              onClick={()=>uploadRef.current?.click()} disabled={uploading}>
+              <Ic n="import" style={{width:14,height:14}}/>
+              {uploading?'Uploading…':'Upload files'}
+            </button>
+          </div>
+        : <>
+            {/* toolbar: filters + view toggle */}
+            <div className="storage-toolbar">
+              <div className="storage-filters">
+                {[['all','All files'],['images','🖼️ Images'],['docs','📄 Documents']].map(([f,l])=>
+                  <button key={f} className={cx('storage-filter-btn',filter===f&&'on')} onClick={()=>setFilter(f)}>{l}</button>
+                )}
+              </div>
+              <div className="storage-view-toggle">
+                {VIEW_BTNS.map(v=>
+                  <button key={v.id} className={cx('svt-btn',view===v.id&&'on')}
+                    title={v.title} onClick={()=>setView(v.id)}>
+                    <Ic n={v.icon} style={{width:15,height:15}}/>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {filtered.length===0
+              ? <div className="empty-state" style={{marginTop:40}}>
+                  <div className="es-em">🔍</div>
+                  <b>No {filter==='images'?'images':'documents'} uploaded yet</b>
+                </div>
+              : view==='grid'
+              ? <div className="upload-grid">
+                  {filtered.map(u=><UploadCard key={u.id} upload={u}
+                    onDelete={()=>onDeleteUpload(u.id)} onPreview={()=>setPreviewId(u.id)}/>)}
+                </div>
+              : view==='large'
+              ? <div className="upload-grid-large">
+                  {filtered.map(u=><UploadCardLarge key={u.id} upload={u}
+                    onDelete={()=>onDeleteUpload(u.id)} onPreview={()=>setPreviewId(u.id)}/>)}
+                </div>
+              : /* list view */
+                <div className="upload-list">
+                  <div className="ul-header">
+                    <span>Name</span><span>Type</span><span>Size</span><span>Date</span><span/>
+                  </div>
+                  {filtered.map(u=><UploadListRow key={u.id} upload={u}
+                    onDelete={()=>onDeleteUpload(u.id)} onPreview={()=>setPreviewId(u.id)}/>)}
+                </div>}
+          </>}
+    </div>
+    {previewUpload&&<FilePreviewModal
+      upload={previewUpload}
+      onClose={()=>setPreviewId(null)}
+      hasPrev={previewIdx>0}
+      hasNext={previewIdx<filtered.length-1}
+      onPrev={()=>setPreviewId(filtered[previewIdx-1].id)}
+      onNext={()=>setPreviewId(filtered[previewIdx+1].id)}
+    />}
   </div>;
 }
 
@@ -3727,6 +4553,19 @@ function Workspace({ user, onSignOut }){
     openPage(id);
   };
 
+  /* ---- file uploads ---- */
+  const uploadFile=async uploadRecord=>{
+    setStore(s=>({...s,uploads:[...(s.uploads||[]),uploadRecord]}));
+    // for local workspaces, also write the file to the uploads/ subfolder
+    if(activeWorkspace?.isLocalFile){
+      writeLocalUploadFile(activeWorkspace.id,uploadRecord.name,uploadRecord.dataUrl)
+        .catch(()=>{});
+    }
+  };
+  const deleteUpload=id=>{
+    setStore(s=>({...s,uploads:(s.uploads||[]).filter(u=>u.id!==id)}));
+  };
+
   const createFromTemplate=t=>{
     const id=addNode(null,'private',{title:t.name,icon:t.icon});
     if(t.db){
@@ -4034,6 +4873,7 @@ function Workspace({ user, onSignOut }){
 
   const lookupNode=id=>nodes[id];
   const isDashboard=currentId===DASH_ID;
+  const isStoragePage=currentId===STORAGE_ID;
 
   const renameNode=(id,title,section)=>updateNode(id,{
     ...(title!==undefined?{title}:{}),
@@ -4078,7 +4918,23 @@ function Workspace({ user, onSignOut }){
       renameNode={renameNode} user={user} notifCount={notifCount}/>
 
     <div className="main">
-      {isDashboard
+      {isStoragePage
+        ? <>
+            <div className="topbar">
+              {!sidebarOpen&&<div className="tb-btn" title="Open sidebar"
+                onClick={()=>setSidebarOpen(o=>!o)}>
+                <Ic n="menu" style={{width:17,height:17}}/></div>}
+              <div className="crumbs">
+                <div className="crumb"><span>📦</span><span>Storage</span></div>
+              </div>
+              <StorageBadge ws={activeWorkspace}
+                onCreateWorkspace={()=>setModal({type:'create-workspace'})}/>
+              <div className="topbar-actions"/>
+            </div>
+            <StoragePage uploads={store.uploads||[]} activeWorkspace={activeWorkspace}
+              onDeleteUpload={deleteUpload} onUpload={uploadFile}/>
+          </>
+        : isDashboard
         ? <>
             <div className="topbar">
               {!sidebarOpen&&<div className="tb-btn" title="Open sidebar"
@@ -4111,6 +4967,7 @@ function Workspace({ user, onSignOut }){
             {node&&<Editor key={node.id} node={node} update={updateNode}
               createChild={createChild} openPage={openPage}
               lookupNode={lookupNode} openRow={editorOpenRow}
+              onUploadFile={uploadFile} uploads={store.uploads||[]}
               childPages={Object.values(nodes).filter(n=>n.parentId===node.id&&!n.trashed&&!n.archived)
                 .sort((a,b)=>(a.sort||0)-(b.sort||0))}/>}
           </>}

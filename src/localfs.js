@@ -205,3 +205,29 @@ export async function getLocalWorkspaceRecord(id) {
 export async function removeLocalWorkspaceRecord(id) {
   await idbDelete(id);
 }
+
+/**
+ * Write an uploaded file into the workspace's `uploads/` sub-folder.
+ * Creates the sub-folder if it doesn't exist yet.
+ * Returns the unique filename used inside uploads/, or null on failure.
+ */
+export async function writeLocalUploadFile(wsId, originalName, dataUrl) {
+  try {
+    const rec = await idbGet(wsId);
+    if (!rec) return null;
+    const ok = await verifyPermission(rec.handle, true);
+    if (!ok) return null;
+    const uploadsDir = await rec.handle.getDirectoryHandle('uploads', { create: true });
+    const safeName = Date.now() + '_' + originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const fh = await uploadsDir.getFileHandle(safeName, { create: true });
+    const writable = await fh.createWritable();
+    const res = await fetch(dataUrl);
+    const blob = await res.blob();
+    await writable.write(blob);
+    await writable.close();
+    return safeName;
+  } catch (e) {
+    console.warn('[localfs] writeLocalUploadFile failed:', e.message);
+    return null;
+  }
+}
