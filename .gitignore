@@ -1,5 +1,7 @@
 # dependencies
 node_modules
+upcoming_upgrades
+.claude
 
 # build output
 dist

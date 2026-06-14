@@ -21,18 +21,37 @@ import {
   loadSharedWorkspaces, loadNotifications, markNotificationRead,
   deleteSharedWorkspace, transferWorkspaceOwnership,
 } from './storage.js';
-import { writeLocalUploadFile } from './localfs.js';
+import { writeLocalUploadFile, deleteLocalUploadFile } from './localfs.js';
 import { isFirebaseConfigured } from './firebase.js';
 import {
   isLocalFSSupported,
   pickAndRegisterDirectory,
+  relinkAndRegisterDirectory,
+  openExistingDirectory,
   loadLocalWorkspaceIndex,
   readLocalWorkspace,
   writeLocalWorkspaceDebounced,
   writeLocalWorkspaceNow,
-  requestLocalWorkspacePermission,
+  requestPermissionForHandleDetailed,
+  getLocalWorkspaceRecord,
   removeLocalWorkspaceRecord,
+  readLocalUploadURL,
 } from './localfs.js';
+
+/* Turn a permission-failure reason into a human-readable message. */
+function localPermMessage(reason){
+  switch(reason){
+    case 'denied':
+      return 'You clicked “Don’t allow”. Click the workspace again and choose “Allow” / “Edit files” to grant access.';
+    case 'no-handle':
+      return 'This local workspace folder is no longer linked. Re-create it to pick the folder again.';
+    case 'SecurityError':
+    case 'NotAllowedError':
+      return 'The browser blocked the permission prompt. Make sure you opened the app over http://localhost (or https) and try clicking the workspace once more.';
+    default:
+      return 'Could not get access to the local folder ('+reason+'). Try clicking the workspace again.';
+  }
+}
 import {
   CLOUD_PROVIDERS,
   isCloudProviderConfigured, getCloudClientId, setCloudClientId,
@@ -287,6 +306,68 @@ function buildSeed(){
 }
 
 /* =========================================================================
+   external-workspace helpers
+   -------------------------------------------------------------------------
+   "External" = a local-file or cloud-provider workspace. Its pages and
+   uploads live only in its own backing (workspace.json + uploads/ folder, or
+   the provider file) and must never be written to Firebase. Firebase keeps
+   only the workspace list, settings, and personal/shared content.
+   ========================================================================= */
+const isExternalWs = ws => !!(ws && (ws.isLocalFile || ws.cloudProvider));
+
+/* Replace/insert this workspace's uploads in the global in-memory array. */
+function mergeUploads(existing, wsId, incoming){
+  return [...(existing||[]).filter(u=>u.wsId!==wsId),
+          ...(incoming||[]).map(u=>({...u, wsId}))];
+}
+
+/* Strip everything that belongs to an external workspace before saving to
+   Firebase. setDoc replaces the whole document, so this also purges any data
+   that leaked from earlier (un-sanitised) saves. */
+function toCloudStore(store){
+  const wss = store.workspaces||[];
+  const ext = id => isExternalWs(wss.find(w=>w.id===id));
+  const activeId = store.activeWorkspaceId||'ws_main';
+
+  // keep only non-external workspace snapshots
+  const snaps = {};
+  for(const [id,snap] of Object.entries(store.workspaceSnapshots||{})){
+    if(!ext(id)) snaps[id]=snap;
+  }
+
+  // the top-level active view must reflect a non-external workspace
+  let {nodes,favorites,currentId} = store;
+  if(ext(activeId)){
+    const personal = snaps['ws_main'] || {};
+    nodes     = personal.nodes     || {};
+    favorites = personal.favorites || [];
+    currentId = personal.currentId || null;
+  }
+
+  // drop uploads that belong to external workspaces
+  const uploads = (store.uploads||[]).filter(u=>!ext(u.wsId));
+
+  return {...store, nodes, favorites, currentId, workspaceSnapshots:snaps, uploads};
+}
+
+/* Build the workspace.json payload for a local workspace: strip the transient
+   blob URLs (blocks keep only `localName`; uploads drop `dataUrl`/`wsId`) so the
+   file holds durable references only. `live` = {nodes,favorites,currentId,uploads}. */
+function dehydrateLocalData(name, live){
+  const nodes={};
+  for(const [id,n] of Object.entries(live.nodes||{})){
+    const blocks=(n.blocks||[]).map(b=> b.localName ? {...b, url:''} : b);
+    nodes[id]={...n, blocks};
+  }
+  const uploads=(live.uploads||[]).map(u=>{
+    const {dataUrl, wsId, ...rest}=u;
+    return rest;
+  });
+  return {name, version:2, nodes, favorites:live.favorites||[],
+    currentId:live.currentId, uploads};
+}
+
+/* =========================================================================
    small reusable bits
    ========================================================================= */
 function Popup({rect,onClose,children,width,placement}){
@@ -485,15 +566,14 @@ function FileBlockBody({block,onChange,onUploadFile,uploads,onDelete}){
   const [preview,setPreview]=useState(false);
 
   async function handleUpload(file){
-    const dataUrl=await readAsDataUrl(file);
-    const upId=nid();
-    onChange({...block,url:dataUrl,fileName:file.name,fileType:file.type,fileSize:file.size,uploadId:upId});
-    onUploadFile?.({id:upId,name:file.name,type:file.type,size:file.size,dataUrl,uploadedAt:Date.now()});
+    const u=await onUploadFile?.(file);
+    if(u) onChange({...block,url:u.url,fileName:u.name,fileType:u.type,fileSize:u.size,
+      uploadId:u.id,localName:u.localName});
     setPicking(false);
   }
   function handleFromStorage(upload){
     onChange({...block,url:upload.dataUrl,fileName:upload.name,fileType:upload.type,
-      fileSize:upload.size,uploadId:upload.id});
+      fileSize:upload.size,uploadId:upload.id,localName:upload.localName});
     setPicking(false);
   }
 
@@ -543,7 +623,7 @@ function FileBlockBody({block,onChange,onUploadFile,uploads,onDelete}){
           <Ic n="download" style={{width:13,height:13}}/>
         </a>
         <button className="icon-btn" style={{width:28,height:28}} title="Remove attachment"
-          onClick={()=>onChange({...block,url:'',fileName:'',fileType:'',fileSize:0})}>
+          onClick={()=>onChange({...block,url:'',fileName:'',fileType:'',fileSize:0,localName:undefined,uploadId:undefined})}>
           <Ic n="x" style={{width:12,height:12}}/>
         </button>
       </div>
@@ -1132,10 +1212,9 @@ function Block(props){
       ? <ImagePicker
           uploads={uploads}
           onFile={async file=>{
-            const dataUrl=await readAsDataUrl(file);
-            const upId=nid();
-            onChange({...block,url:dataUrl,fileName:file.name,fileType:file.type,fileSize:file.size,uploadId:upId});
-            onUploadFile?.({id:upId,name:file.name,type:file.type||'image/'+file.name.split('.').pop(),size:file.size,dataUrl,uploadedAt:Date.now()});
+            const u=await onUploadFile?.(file);
+            if(u) onChange({...block,url:u.url,fileName:u.name,fileType:u.type,fileSize:u.size,
+              uploadId:u.id,localName:u.localName});
             setImgPick(false);
           }}
           onUrl={url=>{onChange({...block,url});setImgPick(false);}}
@@ -1424,10 +1503,11 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       const imgItem=items.find(i=>i.type.startsWith('image/')); if(!imgItem) return;
       e.preventDefault(); e.stopPropagation();
       const file=imgItem.getAsFile(); if(!file) return;
-      readAsDataUrl(file).then(dataUrl=>{
-        const upId=nid();
-        const imgBlk={id:nid(),type:'image',url:dataUrl,caption:'',
-          fileName:`paste-${Date.now()}.png`,fileType:file.type,fileSize:file.size,uploadId:upId};
+      (async()=>{
+        const u=await onUploadFile?.(file);
+        const imgBlk={id:nid(),type:'image',url:u?.url||'',caption:'',
+          fileName:u?.name||`paste-${Date.now()}.png`,fileType:u?.type||file.type,
+          fileSize:u?.size||file.size,uploadId:u?.id,localName:u?.localName};
         // insert after the currently focused block (detected via DOM data-block-id)
         let insertAt=blocks.length;
         const active=document.activeElement;
@@ -1440,9 +1520,7 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
         }
         const nb=[...blocks]; nb.splice(insertAt,0,imgBlk); setBlocksH(nb);
         setFocus({id:imgBlk.id,pos:'end'});
-        onUploadFile?.({id:upId,name:`paste-${Date.now()}.png`,
-          type:file.type,size:file.size,dataUrl,uploadedAt:Date.now()});
-      });
+      })();
     }
     el.addEventListener('paste',onPaste,true); // capture so we intercept before Editable
     return ()=>el.removeEventListener('paste',onPaste,true);
@@ -1991,7 +2069,7 @@ window.__NOTION_PART4_DONE=true;
    ========================================================================= */
 
 /* ---------------- Workspace Switcher popup ---------------- */
-function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDelete,onClose,rect,onReconnectLocal,onBrowseCloud}){
+function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDelete,onClose,rect,onReconnectLocal,onRelinkLocal,onOpenExisting,onBrowseCloud}){
   return <Popup rect={rect} onClose={onClose} width={300}>
     <div className="menu">
       <div className="menu-h">Switch workspace</div>
@@ -2031,7 +2109,7 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDele
             </div>
             <div className="mi-tx" style={{minWidth:0}}>{ws.name}
               <small style={{display:'flex',alignItems:'center',gap:4}}>
-                {needsAccess&&<span style={{color:'#d44c47'}}>🔒 Needs access — click to reconnect</span>}
+                {needsAccess&&<span style={{color:'#d44c47'}}>{ws.unlinked?'🔗 Folder not linked here — click to pick it':'🔒 Needs access — click to reconnect'}</span>}
                 {!needsAccess&&subtitle}
               </small>
             </div>
@@ -2050,11 +2128,19 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDele
               </button>
             </div>}
           {(isLocal||prov)&&
-            <button className="icon-btn" style={{width:22,height:22,marginLeft:4,flexShrink:0}}
-              title={isLocal?'Remove local workspace from list (files are not deleted)':'Remove cloud workspace from list (file is not deleted)'}
-              onMouseDown={e=>{e.preventDefault();e.stopPropagation();onDelete(ws.id);onClose();}}>
-              <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
-            </button>}
+            <div style={{display:'flex',gap:2,flexShrink:0,marginLeft:4}}>
+              {isLocal&&
+                <button className="icon-btn" style={{width:22,height:22}}
+                  title="Reconnect / pick the workspace folder again"
+                  onMouseDown={e=>{e.preventDefault();e.stopPropagation();onRelinkLocal&&onRelinkLocal(ws.id);onClose();}}>
+                  <Ic n="link" style={{width:12,height:12,color:'var(--accent)'}}/>
+                </button>}
+              <button className="icon-btn" style={{width:22,height:22}}
+                title={isLocal?'Remove local workspace from list (files are not deleted)':'Remove cloud workspace from list (file is not deleted)'}
+                onMouseDown={e=>{e.preventDefault();e.stopPropagation();onDelete(ws.id);onClose();}}>
+                <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
+              </button>
+            </div>}
         </div>;
       })}
       <div className="menu-sep"/>
@@ -2062,6 +2148,10 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDele
         <div className="mi-ic"><Ic n="plus" style={{width:15,height:15}}/></div>
         <div className="mi-tx">Create workspace</div>
       </div>
+      {onOpenExisting&&<div className="mi" onMouseDown={e=>{e.preventDefault();onOpenExisting();onClose();}}>
+        <div className="mi-ic"><Ic n="import" style={{width:15,height:15}}/></div>
+        <div className="mi-tx">Open existing workspace folder…</div>
+      </div>}
       {onBrowseCloud&&<div className="mi" onMouseDown={async e=>{
         e.preventDefault();
         try{ await onBrowseCloud('gdrive'); onClose(); }
@@ -2468,8 +2558,8 @@ function TreeItem({node,nodes,depth,currentId,expanded,toggleExp,openPage,addChi
 /* ---------------- Sidebar ---------------- */
 function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,addChild,
   trashNode,archiveNode,onDrop,addTop,setModal,workspaces,activeWorkspaceId,
-  onSwitchWorkspace,onCreateWorkspace,onShareWorkspace,onDeleteWorkspace,onReconnectLocal,
-  onBrowseCloudWorkspaces,
+  onSwitchWorkspace,onCreateWorkspace,onShareWorkspace,onDeleteWorkspace,onReconnectLocal,onRelinkLocal,
+  onOpenExistingWorkspace,onBrowseCloudWorkspaces,
   toggleFav,duplicate,exportPage,renameNode,user,notifCount}){
   const roots=sec=>Object.values(nodes)
     .filter(n=>n.parentId===null&&n.section===sec&&!n.trashed&&!n.archived)
@@ -2503,7 +2593,8 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
       {wsPop&&<WorkspaceSwitcher rect={wsPop} workspaces={workspaces||[activeWs]}
         activeId={activeWorkspaceId} onSwitch={onSwitchWorkspace}
         onCreate={onCreateWorkspace} onShare={onShareWorkspace} onDelete={onDeleteWorkspace}
-        onReconnectLocal={onReconnectLocal} onBrowseCloud={onBrowseCloudWorkspaces}
+        onReconnectLocal={onReconnectLocal} onRelinkLocal={onRelinkLocal}
+        onOpenExisting={onOpenExistingWorkspace} onBrowseCloud={onBrowseCloudWorkspaces}
         onClose={()=>setWsPop(null)}/>}
     </div>
     <div className="nav">
@@ -2861,8 +2952,7 @@ function StoragePage({uploads,activeWorkspace,onDeleteUpload,onUpload}){
   async function handleFiles(files){
     setUploading(true);
     for(const file of Array.from(files)){
-      const dataUrl=await readAsDataUrl(file);
-      await onUpload?.({id:nid(),name:file.name,type:file.type,size:file.size,dataUrl,uploadedAt:Date.now()});
+      await onUpload?.(file);
     }
     setUploading(false);
   }
@@ -3826,7 +3916,7 @@ function PromptModal({title,placeholder,onConfirm,onClose}){
 }
 
 /* ---------------- Create Workspace Modal (cloud vs local) ---------------- */
-function CreateWorkspaceModal({onCreateCloud,onCreateLocal,onCreateCloudProvider,onClose}){
+function CreateWorkspaceModal({onCreateCloud,onCreateLocal,onCreateCloudProvider,onOpenExisting,onClose}){
   const [name,setName]=useState('');
   const [type,setType]=useState('cloud'); // 'cloud' | 'local' | 'gdrive'
   const [busy,setBusy]=useState(false);
@@ -3944,7 +4034,14 @@ function CreateWorkspaceModal({onCreateCloud,onCreateLocal,onCreateCloudProvider
         {err&&<div style={{color:'#d44c47',fontSize:13,background:'#fff0f0',borderRadius:6,
           padding:'8px 12px'}}>{err}</div>}
 
-        <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:4}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4}}>
+          {onOpenExisting&&localSupported&&
+            <button type="button" className="btn ghost"
+              title="Connect a workspace folder that already exists (e.g. copied from another machine)"
+              onClick={()=>{onOpenExisting();onClose();}} disabled={busy}>
+              📂 Open existing folder…
+            </button>}
+          <div style={{flex:1}}/>
           <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
           <button type="submit" className="btn primary"
             disabled={!name.trim()||busy||(type==='local'&&!localSupported)}>
@@ -4357,6 +4454,12 @@ function Workspace({ user, onSignOut }){
   /* ---- local-file workspace ---- */
   const [localWsIndex,setLocalWsIndex]=React.useState([]); // [{id,name,dirName,accessible},…]
   const localWsData=React.useRef({});  // {[wsId]: {nodes,favorites,currentId}} — in-memory cache
+  const localObjURLs=React.useRef({}); // {[wsId]: [blobURL,…]} — transient upload URLs to revoke
+  // Local workspaces whose data we've actually read from disk (or created) this
+  // session. We ONLY write a local workspace.json for ids in this set — this is
+  // the safeguard against clobbering a real folder with placeholder/seed content
+  // when the active id and the in-memory content briefly disagree (e.g. boot).
+  const loadedLocalWs=React.useRef(new Set());
 
   /* ---- cloud-provider workspaces ---- */
   const cloudWsData=React.useRef({});      // {[wsId]: {nodes,favorites,currentId}} — session cache
@@ -4394,6 +4497,20 @@ function Workspace({ user, onSignOut }){
           };
         }
       }
+      // External workspaces need a permission prompt / re-auth before their
+      // content can be loaded, and their pages must never be shown under the
+      // personal id. So always boot on the personal workspace, rebuilding its
+      // view from the ws_main snapshot (also fixes any leaked external nodes
+      // that an older build may have stored as the top-level content).
+      if(isExternalWs((init.workspaces||[]).find(w=>w.id===(init.activeWorkspaceId||'ws_main')))){
+        const personal=(init.workspaceSnapshots||{})['ws_main'];
+        const fbId=nid();const fbBlk=nid();
+        init={...init,activeWorkspaceId:'ws_main',
+          nodes:personal?.nodes||{[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
+            parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}},
+          favorites:personal?.favorites||[],
+          currentId:personal?.currentId||fbId};
+      }
       setStore(init);
       setNotifications(notifs||[]);
       if(!init.tutorialCompleted) setShowTutorial(true);
@@ -4414,8 +4531,15 @@ function Workspace({ user, onSignOut }){
       for(const entry of index){
         if(!entry.accessible) continue;
         try{
-          const data=await readLocalWorkspace(entry.id);
-          if(data) localWsData.current[entry.id]=data;
+          let data=await readLocalWorkspace(entry.id);
+          if(data){
+            data=await hydrateLocalData(entry.id,data);
+            loadedLocalWs.current.add(entry.id);
+            await upgradeLocalFolderIfNeeded(entry.id,entry.name,data);
+            localWsData.current[entry.id]=data;
+            if(data.uploads?.length)
+              setStore(s=>s?{...s,uploads:mergeUploads(s.uploads,entry.id,data.uploads)}:s);
+          }
         }catch(_){}
       }
     })();
@@ -4425,21 +4549,26 @@ function Workspace({ user, onSignOut }){
   /* ---- persist + theme ---- */
   React.useEffect(()=>{
     if(!store) return;
-    saveStore(user.uid,store);
+    // External (local/cloud) workspace data is stripped out — only the
+    // workspace list, settings and personal/shared content reach Firebase.
+    saveStore(user.uid,toCloudStore(store));
 
     const activeWs=(store.workspaces||[]).find(w=>w.id===(store.activeWorkspaceId||'ws_main'));
 
     // write to local file if the active workspace is a local-file workspace
-    if(activeWs?.isLocalFile){
-      const snapshot={nodes:store.nodes,favorites:store.favorites,currentId:store.currentId};
-      localWsData.current[activeWs.id]=snapshot;
-      writeLocalWorkspaceDebounced(activeWs.id,snapshot);
+    // (only once its real content has been loaded/created this session)
+    if(activeWs?.isLocalFile&&loadedLocalWs.current.has(activeWs.id)){
+      const live={nodes:store.nodes,favorites:store.favorites,currentId:store.currentId,
+        uploads:(store.uploads||[]).filter(u=>u.wsId===activeWs.id),name:activeWs.name};
+      localWsData.current[activeWs.id]=live;                  // hydrated in-memory cache
+      writeLocalWorkspaceDebounced(activeWs.id,dehydrateLocalData(activeWs.name,live)); // lean on-disk
     }
 
     // write to cloud provider if the active workspace has one
     if(activeWs?.cloudProvider){
       const wsId=activeWs.id;
-      const snapshot={nodes:store.nodes,favorites:store.favorites,currentId:store.currentId,wsName:activeWs.name};
+      const snapshot={nodes:store.nodes,favorites:store.favorites,currentId:store.currentId,wsName:activeWs.name,
+        uploads:(store.uploads||[]).filter(u=>u.wsId===wsId)};
       cloudWsData.current[wsId]=snapshot;
       // debounced write: 1.5 s
       clearTimeout(cloudWriteTimers.current[wsId]);
@@ -4496,6 +4625,9 @@ function Workspace({ user, onSignOut }){
   const workspaces=store.workspaces||[{id:'ws_main',name:'My Workspace',isPersonal:true,members:[]}];
   const activeWorkspaceId=store.activeWorkspaceId||'ws_main';
   const activeWorkspace=workspaces.find(w=>w.id===activeWorkspaceId)||workspaces[0];
+  // uploads scoped to the active workspace (legacy untagged uploads count as personal)
+  const scopedUploads=(store.uploads||[]).filter(u=>
+    u.wsId===activeWorkspaceId||(!u.wsId&&activeWorkspaceId==='ws_main'));
   const sharedNodes=store.sharedNodes||{};
   const sharedCount=Object.values(sharedNodes).filter(s=>s&&s.length>0).length;
   const notifCount=notifications.filter(n=>!n.read).length;
@@ -4629,15 +4761,100 @@ function Workspace({ user, onSignOut }){
   };
 
   /* ---- file uploads ---- */
-  const uploadFile=async uploadRecord=>{
-    setStore(s=>({...s,uploads:[...(s.uploads||[]),uploadRecord]}));
-    // for local workspaces, also write the file to the uploads/ subfolder
+  const trackLocalURL=(wsId,url)=>{
+    (localObjURLs.current[wsId]||(localObjURLs.current[wsId]=[])).push(url);
+  };
+  /* Central upload entry-point. Takes a File, stores it according to the active
+     workspace type, adds the record to store.uploads, and returns
+     { id, name, type, size, url, localName } for the caller to put on its block.
+     - local  → file written to ./uploads (referenced by `localName`); `url` is a
+                transient blob URL for display, never persisted.
+     - others → base64 data URL (kept inline, as before). */
+  const uploadFile=async file=>{
+    const id=nid();
+    const base={id,name:file.name,type:file.type||'application/octet-stream',
+      size:file.size,uploadedAt:Date.now()};
     if(activeWorkspace?.isLocalFile){
-      writeLocalUploadFile(activeWorkspace.id,uploadRecord.name,uploadRecord.dataUrl)
-        .catch(()=>{});
+      const dataUrl=await readAsDataUrl(file);
+      const localName=await writeLocalUploadFile(activeWorkspace.id,file.name,dataUrl).catch(()=>null);
+      const url=URL.createObjectURL(file);
+      trackLocalURL(activeWorkspace.id,url);
+      const rec={...base,localName,wsId:activeWorkspace.id,dataUrl:url};
+      setStore(s=>({...s,uploads:[...(s.uploads||[]),rec]}));
+      return {...base,url,localName};
     }
+    const dataUrl=await readAsDataUrl(file);
+    const rec={...base,dataUrl,wsId:activeWorkspaceId};
+    setStore(s=>({...s,uploads:[...(s.uploads||[]),rec]}));
+    return {...base,url:dataUrl};
+  };
+
+  /* Turn the on-disk workspace.json (file references only) into something
+     renderable: rebuild a blob URL for every uploaded file from ./uploads and
+     plug it into the upload records and the blocks that reference them. Also
+     migrates legacy workspaces that still embed base64 (writes those bytes out
+     to ./uploads and assigns a localName so the next save is lean). */
+  const hydrateLocalData=async(wsId,data)=>{
+    if(!data) return data;
+    // revoke any prior URLs for this workspace before making new ones
+    (localObjURLs.current[wsId]||[]).forEach(u=>{try{URL.revokeObjectURL(u);}catch{}});
+    localObjURLs.current[wsId]=[];
+
+    // anything below schema v2 (no version field, base64 inline) is "old format"
+    let migrated=(data.version||0)<2;
+
+    const uploads=[...(data.uploads||[])];
+    const map={}; // localName -> blob URL
+    for(let i=0;i<uploads.length;i++){
+      let u=uploads[i];
+      // migrate a legacy base64 upload into ./uploads
+      if(!u.localName && typeof u.dataUrl==='string' && u.dataUrl.startsWith('data:')){
+        const localName=await writeLocalUploadFile(wsId,u.name||'file',u.dataUrl).catch(()=>null);
+        if(localName){ u={...u,localName}; uploads[i]=u; migrated=true; }
+      }
+      if(u.localName && !map[u.localName]){
+        const res=await readLocalUploadURL(wsId,u.localName);
+        if(res){ map[u.localName]=res.url; trackLocalURL(wsId,res.url); }
+      }
+    }
+
+    // uploadId -> localName, to migrate base64 image/file blocks
+    const idToLocal={};
+    for(const u of uploads) if(u.id&&u.localName) idToLocal[u.id]=u.localName;
+
+    const nodes={};
+    for(const [id,n] of Object.entries(data.nodes||{})){
+      const blocks=(n.blocks||[]).map(b=>{
+        let localName=b.localName;
+        if(!localName && b.uploadId && idToLocal[b.uploadId]) localName=idToLocal[b.uploadId];
+        if(localName && map[localName]) return {...b,localName,url:map[localName]};
+        return localName?{...b,localName}:b;
+      });
+      nodes[id]={...n,blocks};
+    }
+
+    const hydratedUploads=uploads.map(u=>
+      u.localName&&map[u.localName] ? {...u,dataUrl:map[u.localName]} : u);
+
+    return {...data,nodes,uploads:hydratedUploads,migrated};
+  };
+
+  /* If hydrateLocalData reported the folder was in the old format, rewrite
+     workspace.json in the new (v2, file-reference) format immediately so the
+     folder is upgraded on disk on first open — not only after the next edit. */
+  const upgradeLocalFolderIfNeeded=async(wsId,name,data)=>{
+    if(!data?.migrated) return;
+    try{
+      await writeLocalWorkspaceNow(wsId,dehydrateLocalData(name||data.name||'Workspace',
+        {nodes:data.nodes,favorites:data.favorites,currentId:data.currentId,uploads:data.uploads}));
+    }catch(_){}
   };
   const deleteUpload=id=>{
+    const rec=(store.uploads||[]).find(u=>u.id===id);
+    if(rec?.localName){
+      const ws=workspaces.find(w=>w.id===rec.wsId);
+      if(ws?.isLocalFile) deleteLocalUploadFile(rec.wsId,rec.localName).catch(()=>{});
+    }
     setStore(s=>({...s,uploads:(s.uploads||[]).filter(u=>u.id!==id)}));
   };
 
@@ -4661,8 +4878,10 @@ function Workspace({ user, onSignOut }){
     /* helper: flush current ws to its persistent store before switching */
     const flushCurrent=async()=>{
       const curWs=(store.workspaces||[]).find(w=>w.id===(store.activeWorkspaceId||'ws_main'));
-      if(curWs?.isLocalFile){
-        await writeLocalWorkspaceNow(curWs.id,{nodes:store.nodes,favorites:store.favorites,currentId:store.currentId});
+      if(curWs?.isLocalFile&&loadedLocalWs.current.has(curWs.id)){
+        await writeLocalWorkspaceNow(curWs.id,dehydrateLocalData(curWs.name,
+          {nodes:store.nodes,favorites:store.favorites,currentId:store.currentId,
+           uploads:(store.uploads||[]).filter(u=>u.wsId===curWs.id)}));
       }
       if(curWs?.cloudProvider){
         clearTimeout(cloudWriteTimers.current[curWs.id]);
@@ -4679,19 +4898,27 @@ function Workspace({ user, onSignOut }){
       await flushCurrent();
       let data=localWsData.current[wsId];
       if(!data){
-        const ok=await requestLocalWorkspacePermission(wsId);
-        if(!ok){ alert('Access to the local workspace folder was denied. Please try again.'); return; }
+        let handle=localWsIndex.find(l=>l.id===wsId)?.handle;
+        if(!handle){ const rec=await getLocalWorkspaceRecord(wsId); handle=rec?.handle; }
+        const {granted,reason}=await requestPermissionForHandleDetailed(handle,true);
+        if(!granted){ alert(localPermMessage(reason)); return; }
         try{ data=await readLocalWorkspace(wsId); }catch(_){ data=null; }
+        if(data){ data=await hydrateLocalData(wsId,data); await upgradeLocalFolderIfNeeded(wsId,targetWs?.name,data); }
         setLocalWsIndex(prev=>prev.map(l=>l.id===wsId?{...l,accessible:true}:l));
       }
       const fbId=nid();const fbBlk=nid();
       const fallback={[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
         parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}};
       const ws=data||{nodes:fallback,favorites:[],currentId:fbId};
-      localWsData.current[wsId]=ws;
+      // Only cache + allow writes when we actually read real data from disk.
+      // If the read failed/was empty we show a transient fallback but DON'T
+      // cache it or mark it loaded — otherwise a later switch would treat the
+      // empty fallback as real and autosave it over the folder (a wipe).
+      if(data){ localWsData.current[wsId]=ws; loadedLocalWs.current.add(wsId); }
       setStore(s=>({...s,
         nodes:ws.nodes||fallback,favorites:ws.favorites||[],currentId:ws.currentId||fbId,
         activeWorkspaceId:wsId,
+        uploads:mergeUploads(s.uploads,wsId,ws.uploads||[]),
         workspaceSnapshots:{...(s.workspaceSnapshots||{}),
           [s.activeWorkspaceId||'ws_main']:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}},
       }));
@@ -4722,6 +4949,7 @@ function Workspace({ user, onSignOut }){
       setStore(s=>({...s,
         nodes:ws.nodes||fallback,favorites:ws.favorites||[],currentId:ws.currentId||fbId,
         activeWorkspaceId:wsId,
+        uploads:mergeUploads(s.uploads,wsId,ws.uploads||[]),
         workspaceSnapshots:{...(s.workspaceSnapshots||{}),
           [s.activeWorkspaceId||'ws_main']:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}},
       }));
@@ -4770,16 +4998,49 @@ function Workspace({ user, onSignOut }){
     const id=nid(); const startId=nid(); const startBlk=nid();
     const emptyNodes={[startId]:{id:startId,kind:'page',title:'',icon:'',cover:'',
       parentId:null,section:'private',sort:0,blocks:[{id:startBlk,type:'text',html:''}]}};
-    const initialData={nodes:emptyNodes,favorites:[],currentId:startId};
+    const initialData={name:name.trim(),version:2,nodes:emptyNodes,favorites:[],currentId:startId,uploads:[]};
 
     // open OS folder picker + register in IndexedDB
     const rec=await pickAndRegisterDirectory(id,name.trim());
-    // write initial workspace.json immediately
+
+    // NEVER clobber an existing workspace: if the chosen folder already has a
+    // workspace.json, open that instead of overwriting it with an empty one.
+    let existing=null;
+    try{ existing=await readLocalWorkspace(id); }catch(_){}
+    if(existing){
+      const ok=window.confirm(
+        'This folder already contains a workspace ("'+(existing.name||rec.dirName)+'").\n\n'+
+        'Open it as-is? (Cancel to pick a different, empty folder — your data will NOT be touched.)');
+      if(!ok){ try{ await removeLocalWorkspaceRecord(id); }catch(_){} return; }
+      const data=await hydrateLocalData(id,existing);
+      const wsName=(data.name||rec.dirName||name.trim()).toString();
+      const fbId=nid();
+      const ws=data;
+      localWsData.current[id]=ws;
+      loadedLocalWs.current.add(id);
+      const newWs={id,name:wsName,isPersonal:false,isLocalFile:true,dirName:rec.dirName,members:[]};
+      setLocalWsIndex(prev=>[...prev,{id,name:wsName,dirName:rec.dirName,
+        handle:rec.handle,accessible:true,createdAt:Date.now()}]);
+      setStore(s=>{
+        const curId=s.activeWorkspaceId||'ws_main';
+        const snap=s.workspaceSnapshots||{};
+        return {...s,workspaces:[...(s.workspaces||[]),newWs],
+          nodes:ws.nodes||emptyNodes,favorites:ws.favorites||[],currentId:ws.currentId||startId,
+          activeWorkspaceId:id,
+          uploads:mergeUploads(s.uploads,id,ws.uploads||[]),
+          workspaceSnapshots:{...snap,[curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
+      });
+      setExpanded({});
+      return;
+    }
+
+    // folder is empty → safe to write the fresh workspace
     await writeLocalWorkspaceNow(id,initialData);
 
     const newWs={id,name:name.trim(),isPersonal:false,isLocalFile:true,
       dirName:rec.dirName,members:[]};
     localWsData.current[id]=initialData;
+    loadedLocalWs.current.add(id);
     setLocalWsIndex(prev=>[...prev,{id,name:name.trim(),dirName:rec.dirName,
       handle:rec.handle,accessible:true,createdAt:Date.now()}]);
     setStore(s=>{
@@ -4787,6 +5048,47 @@ function Workspace({ user, onSignOut }){
       const snap=s.workspaceSnapshots||{};
       return {...s,workspaces:[...(s.workspaces||[]),newWs],
         nodes:emptyNodes,favorites:[],currentId:startId,activeWorkspaceId:id,
+        workspaceSnapshots:{...snap,[curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
+    });
+    setExpanded({});
+  };
+
+  /* Connect an EXISTING workspace folder (e.g. one copied from another machine)
+     as a new local workspace — reads its workspace.json without overwriting. */
+  const openExistingLocalWorkspace=async()=>{
+    const id=nid();
+    let rec;
+    try{ rec=await openExistingDirectory(id); }
+    catch(e){ if(e?.name!=='AbortError') alert('Could not open the folder: '+(e?.message||e)); return; }
+    if(!rec.foundFile){
+      alert('No workspace.json was found in “'+rec.dirName+'” or its subfolders.\n\n'+
+        'Pick the folder that directly contains workspace.json (it must be at the top '+
+        'of the chosen folder, or one subfolder deep).');
+      return;
+    }
+    // workspace.json was already read by openExistingDirectory while it held the handle
+    let data=rec.data||null;
+    if(!data){ try{ data=await readLocalWorkspace(id); }catch(_){} }
+    if(!data){ alert('Found workspace.json in “'+rec.dirName+'” but could not read it (it may be corrupted or empty).'); return; }
+    data=await hydrateLocalData(id,data);
+    const name=(data?.name||rec.dirName||'Workspace').toString();
+    await upgradeLocalFolderIfNeeded(id,name,data);
+    const fbId=nid();const fbBlk=nid();
+    const fallback={[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
+      parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}};
+    const ws=data||{nodes:fallback,favorites:[],currentId:fbId};
+    localWsData.current[id]=ws;
+    loadedLocalWs.current.add(id);
+    const newWs={id,name,isPersonal:false,isLocalFile:true,dirName:rec.dirName,members:[]};
+    setLocalWsIndex(prev=>[...prev,{id,name,dirName:rec.dirName,
+      handle:rec.handle,accessible:true,createdAt:Date.now()}]);
+    setStore(s=>{
+      const curId=s.activeWorkspaceId||'ws_main';
+      const snap=s.workspaceSnapshots||{};
+      return {...s,workspaces:[...(s.workspaces||[]),newWs],
+        nodes:ws.nodes||fallback,favorites:ws.favorites||[],currentId:ws.currentId||fbId,
+        activeWorkspaceId:id,
+        uploads:mergeUploads(s.uploads,id,ws.uploads||[]),
         workspaceSnapshots:{...snap,[curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
     });
     setExpanded({});
@@ -4991,13 +5293,66 @@ function Workspace({ user, onSignOut }){
   const enrichedWorkspaces=workspaces.map(ws=>{
     if(!ws.isLocalFile) return ws;
     const local=localWsIndex.find(l=>l.id===ws.id);
-    if(!local) return ws;
+    // No local handle on this device (e.g. opened in another browser or after
+    // clearing site data): mark it as needing reconnect so the user can re-pick
+    // the folder instead of hitting a dead end.
+    if(!local) return {...ws,accessible:false,unlinked:true};
     return {...ws,accessible:local.accessible,dirName:local.dirName||ws.dirName};
   });
 
+  // Re-pick the OS folder for a local workspace whose handle is missing on this
+  // device, register it under the same id, then switch to it. Must run inside a
+  // user gesture (the folder picker requires user activation).
+  const relinkLocalWorkspace=async wsId=>{
+    const ws=(workspaces||[]).find(w=>w.id===wsId);
+    try{
+      const rec=await relinkAndRegisterDirectory(wsId,ws?.name||'Workspace');
+      const entry={id:wsId,name:ws?.name||rec.dirName,dirName:rec.dirName,
+        handle:rec.handle,accessible:true,createdAt:Date.now()};
+      setLocalWsIndex(prev=>prev.some(l=>l.id===wsId)
+        ?prev.map(l=>l.id===wsId?entry:l)
+        :[...prev,entry]);
+      if(!rec.foundFile){
+        alert('No existing workspace.json was found in “'+rec.dirName+'” or its subfolders. '+
+          'This workspace will start empty here and save into that folder. '+
+          'If your content is elsewhere, pick the exact folder that contains workspace.json.');
+      }
+      // drop any stale cached blank so the new folder is re-read from disk
+      delete localWsData.current[wsId];
+      if((store?.activeWorkspaceId||'ws_main')===wsId){
+        // Already the active workspace — switchWorkspace would no-op, so load
+        // the freshly linked folder's content into the current view directly.
+        let data=null;
+        try{ data=await readLocalWorkspace(wsId); }catch(_){}
+        if(data){ data=await hydrateLocalData(wsId,data); await upgradeLocalFolderIfNeeded(wsId,ws?.name,data); }
+        if(data){
+          loadedLocalWs.current.add(wsId);
+          localWsData.current[wsId]=data;
+          const fbId=nid();
+          setStore(s=>({...s,
+            nodes:data.nodes||{},favorites:data.favorites||[],
+            currentId:data.currentId||Object.keys(data.nodes||{})[0]||fbId,
+            uploads:mergeUploads(s.uploads,wsId,data.uploads||[])}));
+          setExpanded({});
+        }
+      }else{
+        await switchWorkspace(wsId);
+      }
+    }catch(e){
+      if(e?.name!=='AbortError') alert('Could not link the folder: '+(e?.message||e));
+    }
+  };
+
   const handleReconnectLocal=async wsId=>{
-    const ok=await requestLocalWorkspacePermission(wsId);
-    if(!ok){ alert('Permission was not granted. Try again.'); return; }
+    // Use the in-memory directory handle so requestPermission() runs inside the
+    // click's user-activation window (no IndexedDB await first) — otherwise the
+    // browser silently suppresses the permission prompt.
+    let handle=localWsIndex.find(l=>l.id===wsId)?.handle;
+    if(!handle){ const rec=await getLocalWorkspaceRecord(wsId); handle=rec?.handle; }
+    // Folder link lost on this device — let the user re-pick the folder.
+    if(!handle){ await relinkLocalWorkspace(wsId); return; }
+    const {granted,reason}=await requestPermissionForHandleDetailed(handle,true);
+    if(!granted){ alert(localPermMessage(reason)); return; }
     setLocalWsIndex(prev=>prev.map(l=>l.id===wsId?{...l,accessible:true}:l));
     // now switch to it
     await switchWorkspace(wsId);
@@ -5019,7 +5374,8 @@ function Workspace({ user, onSignOut }){
       onCreateWorkspace={()=>setModal({type:'create-workspace'})}
       onShareWorkspace={wsId=>setModal({type:'share-workspace',wsId})}
       onDeleteWorkspace={deleteWorkspace}
-      onReconnectLocal={handleReconnectLocal}
+      onReconnectLocal={handleReconnectLocal} onRelinkLocal={relinkLocalWorkspace}
+      onOpenExistingWorkspace={isLocalFSSupported()?openExistingLocalWorkspace:undefined}
       onBrowseCloudWorkspaces={handleBrowseCloudWorkspaces}
       toggleFav={toggleFav} duplicate={duplicate} exportPage={exportPage}
       renameNode={renameNode} user={user} notifCount={notifCount}/>
@@ -5038,7 +5394,7 @@ function Workspace({ user, onSignOut }){
                 onCreateWorkspace={()=>setModal({type:'create-workspace'})}/>
               <div className="topbar-actions"/>
             </div>
-            <StoragePage uploads={store.uploads||[]} activeWorkspace={activeWorkspace}
+            <StoragePage uploads={scopedUploads} activeWorkspace={activeWorkspace}
               onDeleteUpload={deleteUpload} onUpload={uploadFile}/>
           </>
         : isDashboard
@@ -5074,7 +5430,7 @@ function Workspace({ user, onSignOut }){
             {node&&<Editor key={node.id} node={node} update={updateNode}
               createChild={createChild} openPage={openPage}
               lookupNode={lookupNode} openRow={editorOpenRow}
-              onUploadFile={uploadFile} uploads={store.uploads||[]}
+              onUploadFile={uploadFile} uploads={scopedUploads}
               childPages={Object.values(nodes).filter(n=>n.parentId===node.id&&!n.trashed&&!n.archived)
                 .sort((a,b)=>(a.sort||0)-(b.sort||0))}/>}
           </>}
@@ -5114,6 +5470,7 @@ function Workspace({ user, onSignOut }){
         onCreateCloud={name=>{createWorkspace(name);}}
         onCreateLocal={createLocalWorkspace}
         onCreateCloudProvider={createCloudProviderWorkspace}
+        onOpenExisting={isLocalFSSupported()?openExistingLocalWorkspace:undefined}
         onClose={()=>setModal(null)}/>}
     {modal&&modal.type==='templates'&&
       <TemplatesModal create={createFromTemplate} onClose={()=>setModal(null)}/>}

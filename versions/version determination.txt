@@ -1,0 +1,6 @@
+version determination
+
+_.0.0 --> this is for major changes
+0._.0 --> this is for minor changes
+0.0._ --> this is for bug fixes
+
