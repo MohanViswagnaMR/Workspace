@@ -38,6 +38,11 @@ import {
   readLocalUploadURL,
 } from './localfs.js';
 
+/* Shown when the browser lacks the File System Access API (Firefox/Zen/Safari). */
+const LOCAL_FS_UNSUPPORTED_MSG =
+  'Local folders require a Chromium browser (Chrome, Edge, or Brave). '+
+  'In Firefox or Zen, use cloud sync (Firebase or Google Drive) instead.';
+
 /* Turn a permission-failure reason into a human-readable message. */
 function localPermMessage(reason){
   switch(reason){
@@ -2070,13 +2075,18 @@ window.__NOTION_PART4_DONE=true;
 
 /* ---------------- Workspace Switcher popup ---------------- */
 function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDelete,onClose,rect,onReconnectLocal,onRelinkLocal,onOpenExisting,onBrowseCloud}){
+  const localSupported=isLocalFSSupported();
   return <Popup rect={rect} onClose={onClose} width={300}>
     <div className="menu">
       <div className="menu-h">Switch workspace</div>
       {(workspaces||[]).map(ws=>{
         const isLocal=ws.isLocalFile;
         const prov=ws.cloudProvider?CLOUD_PROVIDERS[ws.cloudProvider]:null;
-        const needsAccess=isLocal&&ws.accessible===false;
+        // In Firefox/Zen the File System Access API is missing, so local
+        // workspaces can never be opened here — show an explanatory note
+        // instead of an actionable "reconnect" affordance that only errors.
+        const localUnavailable=isLocal&&!localSupported;
+        const needsAccess=isLocal&&!localUnavailable&&ws.accessible===false;
         const avatarBg=ws.isPersonal
           ?'linear-gradient(135deg,#ff9a6b,#e8506e)'
           :ws.isShared
@@ -2094,10 +2104,12 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDele
         const avatarLabel=isLocal?'💻':prov?prov.emoji:ws.name[0].toUpperCase();
 
         return <div key={ws.id} className={cx('mi',ws.id===activeId&&'hi')} style={{gap:0,paddingRight:6}}>
-          <div style={{display:'flex',alignItems:'center',gap:8,flex:1,cursor:'pointer',minWidth:0,
-            opacity:needsAccess?.6:1}}
+          <div style={{display:'flex',alignItems:'center',gap:8,flex:1,
+            cursor:localUnavailable?'not-allowed':'pointer',minWidth:0,
+            opacity:(needsAccess||localUnavailable)?.6:1}}
             onMouseDown={e=>{
               e.preventDefault();
+              if(localUnavailable){ alert(LOCAL_FS_UNSUPPORTED_MSG); onClose(); return; }
               if(needsAccess){ onReconnectLocal&&onReconnectLocal(ws.id); onClose(); return; }
               if(ws.id!==activeId) onSwitch(ws.id);
               onClose();
@@ -2109,8 +2121,9 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDele
             </div>
             <div className="mi-tx" style={{minWidth:0}}>{ws.name}
               <small style={{display:'flex',alignItems:'center',gap:4}}>
+                {localUnavailable&&<span style={{color:'#d4894c'}}>💻 Local — needs Chrome / Edge to open</span>}
                 {needsAccess&&<span style={{color:'#d44c47'}}>{ws.unlinked?'🔗 Folder not linked here — click to pick it':'🔒 Needs access — click to reconnect'}</span>}
-                {!needsAccess&&subtitle}
+                {!needsAccess&&!localUnavailable&&subtitle}
               </small>
             </div>
             {ws.id===activeId&&<Ic n="check" style={{width:14,height:14,color:'var(--accent)',flexShrink:0}}/>}
@@ -2129,7 +2142,7 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDele
             </div>}
           {(isLocal||prov)&&
             <div style={{display:'flex',gap:2,flexShrink:0,marginLeft:4}}>
-              {isLocal&&
+              {isLocal&&!localUnavailable&&
                 <button className="icon-btn" style={{width:22,height:22}}
                   title="Reconnect / pick the workspace folder again"
                   onMouseDown={e=>{e.preventDefault();e.stopPropagation();onRelinkLocal&&onRelinkLocal(ws.id);onClose();}}>
@@ -3932,7 +3945,7 @@ function CreateWorkspaceModal({onCreateCloud,onCreateLocal,onCreateCloudProvider
     setErr('');
 
     if(type==='local'){
-      if(!localSupported){ setErr('Your browser does not support local file storage. Please use Chrome or Edge.'); return; }
+      if(!localSupported){ setErr(LOCAL_FS_UNSUPPORTED_MSG); return; }
       setBusy(true);
       try{ await onCreateLocal(n); onClose(); }
       catch(ex){ if(ex.name!=='AbortError') setErr(ex.message||'Could not access the folder.'); }
@@ -3998,9 +4011,15 @@ function CreateWorkspaceModal({onCreateCloud,onCreateLocal,onCreateCloudProvider
               isFirebaseConfigured?null:'⚠ No Firebase')}
             {card('local','💻','This Computer',
               'JSON file in a folder you choose.',
-              localSupported?'Chrome / Edge required.':'⚠ Browser not supported.',
+              localSupported?'Chrome / Edge required.':'⚠ Not available in this browser',
               !localSupported)}
           </div>
+          {!localSupported&&<div style={{marginTop:8,fontSize:12,color:'var(--text-2)',
+            background:'var(--bg-2)',borderRadius:8,padding:'10px 14px',display:'flex',
+            gap:8,alignItems:'flex-start'}}>
+            <span style={{fontSize:16}}>ℹ️</span>
+            <span>{LOCAL_FS_UNSUPPORTED_MSG}</span>
+          </div>}
         </div>
 
         {/* ── Storage row 2: Google Drive ── */}
@@ -5304,6 +5323,7 @@ function Workspace({ user, onSignOut }){
   // device, register it under the same id, then switch to it. Must run inside a
   // user gesture (the folder picker requires user activation).
   const relinkLocalWorkspace=async wsId=>{
+    if(!isLocalFSSupported()){ alert(LOCAL_FS_UNSUPPORTED_MSG); return; }
     const ws=(workspaces||[]).find(w=>w.id===wsId);
     try{
       const rec=await relinkAndRegisterDirectory(wsId,ws?.name||'Workspace');
@@ -5344,6 +5364,7 @@ function Workspace({ user, onSignOut }){
   };
 
   const handleReconnectLocal=async wsId=>{
+    if(!isLocalFSSupported()){ alert(LOCAL_FS_UNSUPPORTED_MSG); return; }
     // Use the in-memory directory handle so requestPermission() runs inside the
     // click's user-activation window (no IndexedDB await first) — otherwise the
     // browser silently suppresses the permission prompt.
