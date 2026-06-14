@@ -32,7 +32,10 @@
       "Bash(google-chrome --headless=new --screenshot=/tmp/ws-home.png --window-size=1400,900 --no-sandbox http://localhost:5174)",
       "Bash(pkill -f \"vite.*5174\")",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5174/)",
-      "Bash(kill %1)"
+      "Bash(kill %1)",
+      "Bash(git add *)",
+      "Bash(git restore *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
