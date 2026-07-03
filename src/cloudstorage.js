@@ -1,551 +1,376 @@
 /* =========================================================================
-   cloudstorage.js — third-party cloud storage providers
+   cloudstorage.js — Google Drive workspace storage (folder-tree mirror)
    =========================================================================
-   Supports: Google Drive · OneDrive (Microsoft Graph) · Dropbox
+   A Google Drive workspace is a real folder in the user's Drive that mirrors
+   the exact same on-disk layout as a local workspace:
 
-   Each provider stores workspace data as a single JSON file inside the
-   app's dedicated folder so it never clutters the user's Drive / OneDrive
-   / Dropbox root:
+     <Workspace Title>/          (a normal Drive folder)
+     ├── Upload/                 uploaded files
+     └── Space/                  pages as Markdown (.md), nested by folders
 
-     Google Drive  → appDataFolder  (hidden, not browsable by the user)
-     OneDrive      → /me/drive/special/approot  (Apps/<app name>/)
-     Dropbox       → app-folder root  (Apps/<app name>/)
+   Because it uses the `drive.file` scope (not the hidden appDataFolder), the
+   files are browsable and editable directly in Google Drive — the data stays
+   readable without the app. Serialization lives in ./markdown.js; this module
+   only talks to the Drive REST API.
 
-   OAuth flow
-   ──────────
-   All three use the implicit-grant flow (response_type=token) via a popup
-   window that redirects to /oauth-callback.html.  That page posts the
-   token back via postMessage and closes itself.
-
-   Tokens are cached in sessionStorage for the lifetime of the tab.
-   Client IDs are stored in localStorage so they survive between sessions
-   (the user only enters them once, in the workspace creation modal).
-
-   Public API
-   ──────────
-   CLOUD_PROVIDERS          — provider metadata map
-   isCloudProviderConfigured(id) — true if a client ID has been saved
-   getCloudClientId(id)     — retrieve saved client ID
-   setCloudClientId(id,cid) — persist client ID
-   authenticateProvider(id) — OAuth popup → returns access token
-   readCloudWorkspace(id,fileRef)       — fetch + parse JSON from provider
-   writeCloudWorkspace(id,wsId,data,fileRef) — upsert JSON to provider
-   listCloudWorkspaces(id)  — list workspace files (for import / scan)
-   getProviderToken(id)     — read cached token (or null)
-   clearProviderToken(id)   — revoke cached token (force re-auth)
+   OAuth: Google Identity Services token client (implicit, browser-only). The
+   GIS script is pre-loaded in index.html. Tokens are cached in sessionStorage.
    ========================================================================= */
+import { buildFolderPlan, parseFolderTree } from './markdown.js';
 
-/* ---------------------------------------------------------------- metadata */
-export const CLOUD_PROVIDERS = {
-  gdrive: {
-    id:        'gdrive',
-    name:      'Google Drive',
-    shortName: 'Drive',
-    emoji:     '📁',
-    color:     '#4285F4',
-    gradient:  'linear-gradient(135deg,#4285F4,#34A853)',
-    scope:     'https://www.googleapis.com/auth/drive.appdata',
-    helpUrl:   'https://console.cloud.google.com/apis/credentials',
-    /* No redirect URI needed — GIS Token Client only requires the JS origin */
-    helpText:  'Create an OAuth 2.0 Client ID (Web application). No redirect URI needed — just add this site\'s origin as an Authorised JavaScript origin.',
-  },
-  onedrive: {
-    id:        'onedrive',
-    name:      'OneDrive',
-    shortName: 'OneDrive',
-    emoji:     '☁',
-    color:     '#0078D4',
-    gradient:  'linear-gradient(135deg,#0078D4,#00BCF2)',
-    scope:     'files.readwrite.appfolder openid',
-    authUrl:   'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-    helpUrl:   'https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps',
-    helpText:  'Register a new application in Azure Portal. Under Authentication, add a Single-page application redirect URI pointing to /oauth-callback.html on this site.',
-  },
-  dropbox: {
-    id:        'dropbox',
-    name:      'Dropbox',
-    shortName: 'Dropbox',
-    emoji:     '📦',
-    color:     '#0061FF',
-    gradient:  'linear-gradient(135deg,#0061FF,#1da3f0)',
-    scope:     '',   // Dropbox implicit flow does not use scope param
-    authUrl:   'https://www.dropbox.com/oauth2/authorize',
-    helpUrl:   'https://www.dropbox.com/developers/apps',
-    helpText:  'Create a Dropbox app (Scoped access → App folder). Under Settings, add the OAuth 2 redirect URI pointing to /oauth-callback.html on this site.',
-  },
+export const GDRIVE = {
+  id: 'gdrive',
+  name: 'Google Drive',
+  shortName: 'Drive',
+  emoji: '📁',
+  color: '#4285F4',
+  gradient: 'linear-gradient(135deg,#4285F4,#34A853)',
+  scope: 'https://www.googleapis.com/auth/drive.file',
 };
 
-/* ---------------------------------------------------------------- bundled credentials
-   Client ID from the Google Cloud OAuth 2.0 credential (web application).
-   The client_secret is intentionally omitted — GIS Token Client is a
-   browser-only implicit flow that never needs the secret.
-   Authorised JavaScript origins must include this app's origin in Google
-   Cloud Console → APIs & Services → Credentials.                           */
+/* Bundled OAuth client ID (browser implicit flow — no secret needed). The
+   app's origin must be an Authorised JavaScript origin in Google Cloud. */
 const GDRIVE_CLIENT_ID =
   '298006869899-tfavelqu4up3u11dd462kqhcgallgcd5.apps.googleusercontent.com';
 
-/* ---------------------------------------------------------------- storage keys */
-const TOK_KEY = id => `nt_cloud_tok_${id}`;
-const CID_KEY = id => `nt_cloud_cid_${id}`;
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+const TOK_KEY = 'ws_gdrive_tok';
 
 /* ============================================================ token cache */
-function _getToken(providerId) {
+function _getToken() {
   try {
-    const raw = sessionStorage.getItem(TOK_KEY(providerId));
+    const raw = sessionStorage.getItem(TOK_KEY);
     if (!raw) return null;
     const { token, expires } = JSON.parse(raw);
-    if (expires && Date.now() > expires) {
-      sessionStorage.removeItem(TOK_KEY(providerId));
-      return null;
-    }
+    if (expires && Date.now() > expires) { sessionStorage.removeItem(TOK_KEY); return null; }
     return token;
   } catch { return null; }
 }
-
-function _setToken(providerId, token, expiresIn = 3600) {
+function _setToken(token, expiresIn = 3600) {
   const expires = Date.now() + (Math.max(parseInt(expiresIn, 10) || 3600, 120) - 60) * 1000;
-  sessionStorage.setItem(TOK_KEY(providerId), JSON.stringify({ token, expires }));
+  sessionStorage.setItem(TOK_KEY, JSON.stringify({ token, expires }));
 }
+export function getDriveToken() { return _getToken(); }
+export function clearDriveToken() { sessionStorage.removeItem(TOK_KEY); }
 
-/* ============================================================ Google Identity Services (GIS)
-   The GIS script is loaded via index.html so it pre-warms before any user
-   gesture.  We still guard here with a poller so the module never crashes if
-   the script hasn't finished executing yet.
-   ============================================================ */
-
-let _gisLoadPromise = null;
-
+/* ============================================================ GIS loader */
+let _gisPromise = null;
 function _loadGIS() {
-  /* Already fully initialised — return synchronously (no async gap) */
   if (window.google?.accounts?.oauth2) return Promise.resolve();
-  if (_gisLoadPromise) return _gisLoadPromise;
-
-  _gisLoadPromise = new Promise((resolve, reject) => {
-    /* The script tag is already in <head> (index.html).
-       Poll until window.google.accounts.oauth2 is available. */
+  if (_gisPromise) return _gisPromise;
+  _gisPromise = new Promise((resolve, reject) => {
     const start = Date.now();
-    const poll  = setInterval(() => {
-      if (window.google?.accounts?.oauth2) {
+    const poll = setInterval(() => {
+      if (window.google?.accounts?.oauth2) { clearInterval(poll); resolve(); }
+      else if (Date.now() - start > 15000) {
         clearInterval(poll);
-        resolve();
-      } else if (Date.now() - start > 15000) {
-        clearInterval(poll);
-        reject(new Error(
-          'Google Identity Services did not load. ' +
-          'Check your internet connection and that ' +
-          'https://accounts.google.com is reachable.'
-        ));
+        reject(new Error('Google Identity Services did not load. Check your connection and that https://accounts.google.com is reachable.'));
       }
     }, 80);
   });
-  return _gisLoadPromise;
+  return _gisPromise;
 }
 
-/* ============================================================ Google Drive */
-async function _gdriveAuth(clientId, loginHint) {
-  const existing = _getToken('gdrive');
+/* Authenticate with Google Drive. Must be called from a user gesture. */
+export async function authenticateGoogleDrive(opts = {}) {
+  const existing = _getToken();
   if (existing) return existing;
-
-  /* Wait for GIS — should already be ready since the script is in index.html.
-     This await completes in one microtask tick, keeping the user-gesture window. */
   await _loadGIS();
-
   return new Promise((resolve, reject) => {
     let settled = false;
-    const settle = (fn, val) => { if (!settled) { settled = true; fn(val); } };
-
+    const settle = (fn, v) => { if (!settled) { settled = true; fn(v); } };
     const cfg = {
-      client_id: clientId,
-      scope:     CLOUD_PROVIDERS.gdrive.scope,
-      callback: (resp) => {
-        if (resp.error) {
-          settle(reject, new Error(resp.error_description || resp.error));
-          return;
-        }
-        _setToken('gdrive', resp.access_token, resp.expires_in);
+      client_id: GDRIVE_CLIENT_ID,
+      scope: GDRIVE.scope,
+      callback: resp => {
+        if (resp.error) { settle(reject, new Error(resp.error_description || resp.error)); return; }
+        _setToken(resp.access_token, resp.expires_in);
         settle(resolve, resp.access_token);
       },
-      error_callback: (err) => {
-        settle(reject, new Error(err?.message || 'Google authorisation was cancelled.'));
-      },
+      error_callback: err => settle(reject, new Error(err?.message || 'Google authorisation was cancelled.')),
     };
-
-    /* login_hint tells GIS which Google account to use — skips the account
-       picker entirely and goes straight to the Drive consent screen.         */
-    if (loginHint) cfg.login_hint = loginHint;
-
-    const client = window.google.accounts.oauth2.initTokenClient(cfg);
-
-    /* No prompt arg → GIS decides:
-         - silent token if scope was already consented in a previous session
-         - consent overlay if this is the first time (shows "Allow Drive access") */
-    client.requestAccessToken();
+    if (opts.loginHint) cfg.login_hint = opts.loginHint;
+    window.google.accounts.oauth2.initTokenClient(cfg).requestAccessToken();
   });
 }
 
-/* Helper: extract a human-readable message from a Google API error response */
-async function _gdriveErrMsg(res) {
-  if (res.status === 401) sessionStorage.removeItem(TOK_KEY('gdrive'));
+/* ============================================================ REST helpers */
+async function _errMsg(res) {
+  if (res.status === 401) clearDriveToken();
   let reason = res.statusText;
-  try {
-    const j = await res.json();
-    reason = j?.error?.message || j?.error?.errors?.[0]?.message || reason;
-  } catch (_) {}
+  try { const j = await res.json(); reason = j?.error?.message || reason; } catch (_) {}
   let hint = '';
-  if (res.status === 403) {
-    hint = ' — Make sure the Google Drive API is enabled in your Google Cloud project ' +
-           '(APIs & Services → Library → "Google Drive API" → Enable). ' +
-           'If your OAuth app is in Testing mode, also add your email as a Test User.';
-  }
+  if (res.status === 403)
+    hint = ' — Ensure the Google Drive API is enabled in your Google Cloud project and, if the OAuth app is in Testing, that your email is a Test User.';
   return `(${res.status}) ${reason}${hint}`;
 }
 
-async function _gdriveRead(token, fileId) {
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok) throw new Error(`Google Drive read failed ${await _gdriveErrMsg(res)}`);
-  return res.json();
+async function _driveFetch(token, url, init = {}) {
+  const res = await fetch(url, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers || {}) } });
+  if (!res.ok) throw new Error('Drive request failed ' + (await _errMsg(res)));
+  return res;
 }
 
-async function _gdriveWrite(token, wsId, data, existingFileId) {
-  const filename = `workspace-ws-${wsId}.json`;
-  const body     = JSON.stringify(data, null, 2);
-  const authHdr  = { Authorization: `Bearer ${token}` };
-
-  if (existingFileId) {
-    /* PATCH — update existing file content */
-    const res = await fetch(
-      `https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=media`,
-      { method: 'PATCH', headers: { ...authHdr, 'Content-Type': 'application/json' }, body },
-    );
-    if (!res.ok) throw new Error(`Google Drive write failed ${await _gdriveErrMsg(res)}`);
-    return (await res.json()).id;
-  }
-
-  /* POST — create new file in appDataFolder (multipart) */
-  const meta     = JSON.stringify({ name: filename, parents: ['appDataFolder'],
-    ...(data.wsName ? { appProperties: { wsName: data.wsName } } : {}) });
-  const boundary = '----NTFormBoundary' + Date.now().toString(36);
-  const multipartBody = [
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}`,
-    `\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${body}`,
-    `\r\n--${boundary}--`,
-  ].join('');
-
-  const res = await fetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
-    {
-      method:  'POST',
-      headers: { ...authHdr, 'Content-Type': `multipart/related; boundary=${boundary}` },
-      body:    multipartBody,
-    },
-  );
-  if (!res.ok) throw new Error(`Google Drive create failed ${await _gdriveErrMsg(res)}`);
+async function _createFolder(token, name, parentId) {
+  const res = await _driveFetch(token, 'https://www.googleapis.com/drive/v3/files?fields=id', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: parentId ? [parentId] : undefined }),
+  });
   return (await res.json()).id;
 }
 
-async function _gdriveList(token) {
-  const q   = encodeURIComponent("name contains 'workspace-ws-'");
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,name,modifiedTime,appProperties)`,
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok) throw new Error(`Google Drive list failed ${await _gdriveErrMsg(res)}`);
+async function _findChild(token, name, parentId, folderOnly) {
+  const q = [
+    `name='${name.replace(/'/g, "\\'")}'`,
+    `'${parentId}' in parents`,
+    'trashed=false',
+    folderOnly ? `mimeType='${FOLDER_MIME}'` : null,
+  ].filter(Boolean).join(' and ');
+  const res = await _driveFetch(token,
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType)&pageSize=1000`);
   return (await res.json()).files || [];
 }
 
-/* ============================================================ OneDrive */
-async function _onedriveAuth(clientId) {
-  const existing = _getToken('onedrive');
-  if (existing) return existing;
+async function _listChildren(token, parentId) {
+  const q = `'${parentId}' in parents and trashed=false`;
+  const res = await _driveFetch(token,
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size)&pageSize=1000`);
+  return (await res.json()).files || [];
+}
 
-  const state  = Math.random().toString(36).slice(2);
-  const params = new URLSearchParams({
-    client_id:     clientId,
-    redirect_uri:  REDIRECT_URI(),
-    response_type: 'token',
-    scope:         CLOUD_PROVIDERS.onedrive.scope,
-    state,
+async function _uploadText(token, parentId, name, text, existingId) {
+  const meta = { name, parents: existingId ? undefined : [parentId] };
+  const boundary = '----wsBoundary' + name.length + text.length;
+  const body =
+    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}` +
+    `\r\n--${boundary}\r\nContent-Type: text/markdown\r\n\r\n${text}\r\n--${boundary}--`;
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id`
+    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
+  const res = await _driveFetch(token, url, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
   });
-
-  const result = await _openOAuthPopup(`${CLOUD_PROVIDERS.onedrive.authUrl}?${params}`);
-  if (result.state !== state) throw new Error('OAuth state mismatch — possible CSRF');
-  _setToken('onedrive', result.token, result.expiresIn);
-  return result.token;
+  return (await res.json()).id;
 }
 
-/* OneDrive stores files in the app folder — path is deterministic by wsId */
-const _odriveFilePath = wsId =>
-  `https://graph.microsoft.com/v1.0/me/drive/special/approot:/workspace-ws-${wsId}.json`;
-
-async function _onedriveRead(token, fileRef) {
-  /* fileRef may be a Graph item ID (faster) or fall back to path */
-  const url = fileRef && !fileRef.startsWith('http')
-    ? `https://graph.microsoft.com/v1.0/me/drive/items/${fileRef}/content`
-    : `${_odriveFilePath(fileRef)}:/content`;
-
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!res.ok) {
-    if (res.status === 401) sessionStorage.removeItem(TOK_KEY('onedrive'));
-    throw new Error(`OneDrive read failed (${res.status})`);
-  }
-  return res.json();
-}
-
-async function _onedriveWrite(token, wsId, data) {
-  const res = await fetch(
-    `${_odriveFilePath(wsId)}:/content`,
-    {
-      method:  'PUT',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body:    JSON.stringify(data, null, 2),
-    },
-  );
-  if (!res.ok) {
-    if (res.status === 401) sessionStorage.removeItem(TOK_KEY('onedrive'));
-    throw new Error(`OneDrive write failed (${res.status})`);
-  }
-  const result = await res.json();
-  return result.id || wsId;  /* return Graph item ID for future reads */
-}
-
-async function _onedriveList(token) {
-  const res = await fetch(
-    'https://graph.microsoft.com/v1.0/me/drive/special/approot/children',
-    { headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok) throw new Error(`OneDrive list failed (${res.status})`);
-  const { value = [] } = await res.json();
-  return value.filter(f => f.name.startsWith('workspace-ws-'));
-}
-
-/* ============================================================ Dropbox */
-async function _dropboxAuth(clientId) {
-  const existing = _getToken('dropbox');
-  if (existing) return existing;
-
-  const state  = Math.random().toString(36).slice(2);
-  const params = new URLSearchParams({
-    client_id:         clientId,
-    redirect_uri:      REDIRECT_URI(),
-    response_type:     'token',
-    token_access_type: 'legacy',
-    state,
+async function _uploadBinary(token, parentId, name, blob, existingId) {
+  const meta = { name, parents: existingId ? undefined : [parentId] };
+  const boundary = '----wsBin' + name.length;
+  const metaPart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n`;
+  const mediaHead = `--${boundary}\r\nContent-Type: ${blob.type || 'application/octet-stream'}\r\n\r\n`;
+  const tail = `\r\n--${boundary}--`;
+  const body = new Blob([metaPart, mediaHead, blob, tail]);
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id`
+    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id';
+  const res = await _driveFetch(token, url, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body,
   });
-
-  const result = await _openOAuthPopup(`${CLOUD_PROVIDERS.dropbox.authUrl}?${params}`);
-  /* Dropbox does not return state in all flows — skip strict check */
-  _setToken('dropbox', result.token, result.expiresIn || 14400);
-  return result.token;
+  return (await res.json()).id;
 }
 
-const _dbxFilePath = wsId => `/workspace-ws-${wsId}.json`;
-
-async function _dropboxRead(token, fileRef) {
-  const path = fileRef && fileRef.startsWith('/') ? fileRef : _dbxFilePath(fileRef);
-  const res  = await fetch('https://content.dropboxapi.com/2/files/download', {
-    method:  'POST',
-    headers: {
-      Authorization:    `Bearer ${token}`,
-      'Dropbox-API-Arg': JSON.stringify({ path }),
-    },
-  });
-  if (!res.ok) {
-    if (res.status === 401) sessionStorage.removeItem(TOK_KEY('dropbox'));
-    throw new Error(`Dropbox read failed (${res.status})`);
-  }
-  return res.json();
+async function _deleteFile(token, id) {
+  try { await _driveFetch(token, `https://www.googleapis.com/drive/v3/files/${id}`, { method: 'DELETE' }); } catch (_) {}
+}
+async function _downloadText(token, id) {
+  const res = await _driveFetch(token, `https://www.googleapis.com/drive/v3/files/${id}?alt=media`);
+  return res.text();
+}
+async function _downloadBlob(token, id) {
+  const res = await _driveFetch(token, `https://www.googleapis.com/drive/v3/files/${id}?alt=media`);
+  return res.blob();
 }
 
-async function _dropboxWrite(token, wsId, data) {
-  const path = _dbxFilePath(wsId);
-  const res  = await fetch('https://content.dropboxapi.com/2/files/upload', {
-    method:  'POST',
-    headers: {
-      Authorization:    `Bearer ${token}`,
-      'Dropbox-API-Arg': JSON.stringify({ path, mode: 'overwrite', autorename: false }),
-      'Content-Type':   'application/octet-stream',
-    },
-    body: JSON.stringify(data, null, 2),
-  });
-  if (!res.ok) {
-    if (res.status === 401) sessionStorage.removeItem(TOK_KEY('dropbox'));
-    throw new Error(`Dropbox write failed (${res.status})`);
-  }
-  return path; /* path is the stable file ref for Dropbox */
+/* ============================================================ workspace ops */
+/* Per-root caches so unchanged files are skipped and deletions can be diffed. */
+const _cache = {};   // rootId -> { text:Map(path->text), fileId:Map(path->id), folderId:Map(dirPath->id) }
+const _objURLs = {}; // rootId -> [blobURL]
+function _cacheFor(rootId) {
+  return _cache[rootId] || (_cache[rootId] = { text: new Map(), fileId: new Map(), folderId: new Map() });
+}
+export function revokeDriveURLs(rootId) {
+  (_objURLs[rootId] || []).forEach(u => { try { URL.revokeObjectURL(u); } catch (_) {} });
+  _objURLs[rootId] = [];
 }
 
-async function _dropboxList(token) {
-  const res = await fetch('https://api.dropboxapi.com/2/files/list_folder', {
-    method:  'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ path: '' }),
-  });
-  if (!res.ok) throw new Error(`Dropbox list failed (${res.status})`);
-  const { entries = [] } = await res.json();
-  return entries.filter(f => f['.tag'] === 'file' && f.name.startsWith('workspace-ws-'));
+/* Create a new empty Drive workspace folder; returns its folderId. */
+export async function createDriveWorkspace(name) {
+  const token = await authenticateGoogleDrive();
+  const folderId = await _createFolder(token, name || 'Workspace', null);
+  return folderId;
 }
 
-/* ================================================================
-   PUBLIC API
-   ================================================================ */
-
-/**
- * True if the provider can be used.
- * Google Drive is always ready (bundled credentials).
- * Other providers still require a client ID to be saved by the user.
- */
-export function isCloudProviderConfigured(providerId) {
-  if (providerId === 'gdrive') return true;
-  return !!localStorage.getItem(CID_KEY(providerId));
-}
-
-/** Retrieve the OAuth client ID for a provider. Google Drive uses the bundled one. */
-export function getCloudClientId(providerId) {
-  if (providerId === 'gdrive') return GDRIVE_CLIENT_ID;
-  return localStorage.getItem(CID_KEY(providerId)) || '';
-}
-
-/** Persist the OAuth client ID for a provider (not needed for Google Drive). */
-export function setCloudClientId(providerId, clientId) {
-  if (providerId === 'gdrive') return; // bundled — cannot be overridden
-  const trimmed = (clientId || '').trim();
-  if (trimmed) localStorage.setItem(CID_KEY(providerId), trimmed);
-  else         localStorage.removeItem(CID_KEY(providerId));
-}
-
-/**
- * Authenticate with a provider.
- * Must be called from a user-gesture handler (button click).
- * @param {string} providerId  - 'gdrive' | 'onedrive' | 'dropbox'
- * @param {object} [opts]
- * @param {string} [opts.loginHint] - email address to pre-select the account (Google only)
- * Returns the access token string.
- */
-export async function authenticateProvider(providerId, opts = {}) {
-  const clientId = getCloudClientId(providerId);
-  if (!clientId) throw new Error(`No client ID configured for "${providerId}".`);
-
-  switch (providerId) {
-    case 'gdrive':   return _gdriveAuth(clientId, opts.loginHint);
-    case 'onedrive': return _onedriveAuth(clientId);
-    case 'dropbox':  return _dropboxAuth(clientId);
-    default: throw new Error(`Unknown provider: "${providerId}"`);
-  }
-}
-
-/**
- * Read and parse the workspace JSON for `wsId` from the given provider.
- * `fileRef` is provider-specific (GDrive: file ID · OneDrive: item ID · Dropbox: path).
- * Returns null if the file does not exist yet (first use).
- */
-export async function readCloudWorkspace(providerId, wsId, fileRef) {
-  const token = _getToken(providerId);
-  if (!token) throw new Error('Not authenticated — call authenticateProvider() first.');
-
-  try {
-    switch (providerId) {
-      case 'gdrive':   return await _gdriveRead(token, fileRef);
-      case 'onedrive': return await _onedriveRead(token, fileRef || wsId);
-      case 'dropbox':  return await _dropboxRead(token, fileRef || wsId);
-      default: throw new Error(`Unknown provider: "${providerId}"`);
-    }
-  } catch (e) {
-    if (e.message.includes('404') || e.message.includes('(404)')) return null;
-    throw e;
-  }
-}
-
-/**
- * Write workspace data to the provider.
- * Returns the new/updated file reference (store this back on the workspace object).
- */
-export async function writeCloudWorkspace(providerId, wsId, data, fileRef = null) {
-  const token = _getToken(providerId);
-  if (!token) throw new Error('Not authenticated — call authenticateProvider() first.');
-
-  switch (providerId) {
-    case 'gdrive':   return _gdriveWrite(token, wsId, data, fileRef);
-    case 'onedrive': return _onedriveWrite(token, wsId, data);
-    case 'dropbox':  return _dropboxWrite(token, wsId, data);
-    default: throw new Error(`Unknown provider: "${providerId}"`);
-  }
-}
-
-/**
- * List workspace files on the provider (used for "scan for existing workspaces").
- * Returns an array of provider-native file objects.
- */
-export async function listCloudWorkspaces(providerId) {
-  const token = _getToken(providerId);
+/* List candidate Drive workspaces (app-created folders containing a Space/). */
+export async function listDriveWorkspaces() {
+  const token = _getToken();
   if (!token) return [];
+  const q = `mimeType='${FOLDER_MIME}' and trashed=false and 'root' in parents`;
+  const res = await _driveFetch(token,
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1000`);
+  const folders = (await res.json()).files || [];
+  const out = [];
+  for (const f of folders) {
+    const hasSpace = (await _findChild(token, 'Space', f.id, true)).length > 0;
+    if (hasSpace) out.push({ id: f.id, name: f.name });
+  }
+  return out;
+}
 
-  switch (providerId) {
-    case 'gdrive':   return _gdriveList(token);
-    case 'onedrive': return _onedriveList(token);
-    case 'dropbox':  return _dropboxList(token);
-    default: return [];
+async function _ensureFolderPath(token, rootId, dirParts, cache) {
+  let parentId = rootId, acc = '';
+  for (const part of dirParts) {
+    acc = acc ? acc + '/' + part : part;
+    let id = cache.folderId.get(acc);
+    if (!id) {
+      const found = await _findChild(token, part, parentId, true);
+      id = found.length ? found[0].id : await _createFolder(token, part, parentId);
+      cache.folderId.set(acc, id);
+    }
+    parentId = id;
+  }
+  return parentId;
+}
+
+/* Mirror the whole workspace into the Drive folder `rootId`. */
+export async function writeGdriveWorkspaceTree(rootId, store) {
+  const token = _getToken();
+  if (!token) throw new Error('Not authenticated with Google Drive.');
+  const cache = _cacheFor(rootId);
+  const plan = buildFolderPlan(store);
+  const desired = new Map(plan.files.map(f => [f.path, f.text]));
+
+  // delete files no longer present
+  for (const path of [...cache.text.keys()]) {
+    if (!desired.has(path)) {
+      const id = cache.fileId.get(path);
+      if (id) await _deleteFile(token, id);
+      cache.text.delete(path); cache.fileId.delete(path);
+    }
+  }
+  // upsert changed / new files
+  for (const [path, text] of desired) {
+    if (cache.text.get(path) === text) continue;
+    const parts = path.split('/');
+    const name = parts.pop();
+    const parentId = await _ensureFolderPath(token, rootId, parts, cache);
+    const id = await _uploadText(token, parentId, name, text, cache.fileId.get(path));
+    cache.text.set(path, text); cache.fileId.set(path, id);
+  }
+  // reconcile uploads (delete Upload/ files no longer referenced)
+  await _reconcileDriveUploads(token, rootId, plan.uploads, cache).catch(() => {});
+}
+
+async function _reconcileDriveUploads(token, rootId, wantedUploads, cache) {
+  const uploadDirId = cache.folderId.get('Upload');
+  if (!uploadDirId) return;
+  const wanted = new Set((wantedUploads || []).map(u => u.name));
+  const files = await _listChildren(token, uploadDirId);
+  for (const f of files) if (f.mimeType !== FOLDER_MIME && !wanted.has(f.name)) await _deleteFile(token, f.id);
+}
+
+/* Write one uploaded file into the Drive Upload/ folder. Returns its name. */
+export async function writeDriveUpload(rootId, name, blob) {
+  const token = _getToken();
+  if (!token) return null;
+  const cache = _cacheFor(rootId);
+  const parentId = await _ensureFolderPath(token, rootId, ['Upload'], cache);
+  await _uploadBinary(token, parentId, name, blob, null);
+  return name;
+}
+
+async function _collectMd(token, dirId, relPath, out, cache) {
+  const children = await _listChildren(token, dirId);
+  for (const c of children) {
+    const p = relPath + '/' + c.name;
+    if (c.mimeType === FOLDER_MIME) {
+      cache.folderId.set(p, c.id);
+      await _collectMd(token, c.id, p, out, cache);
+    } else if (c.name.toLowerCase().endsWith('.md')) {
+      const text = await _downloadText(token, c.id);
+      out.push({ path: p, text });
+      cache.text.set(p, text); cache.fileId.set(p, c.id);
+    }
   }
 }
 
-/** Return the cached access token for a provider (or null if expired / not authed) */
-export function getProviderToken(providerId) {
-  return _getToken(providerId);
-}
-
-/** Clear the cached token, forcing re-authentication on the next operation */
-export function clearProviderToken(providerId) {
-  sessionStorage.removeItem(TOK_KEY(providerId));
-}
-
-/* ---------------------------------------------------------------- delete helpers */
-async function _gdriveDeleteFile(token, fileId) {
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}`,
-    { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok && res.status !== 204)
-    throw new Error(`Google Drive delete failed ${await _gdriveErrMsg(res)}`);
-}
-
-async function _onedriveDeleteFile(token, itemId) {
-  const res = await fetch(
-    `https://graph.microsoft.com/v1.0/me/drive/items/${itemId}`,
-    { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok && res.status !== 204) {
-    if (res.status === 401) sessionStorage.removeItem(TOK_KEY('onedrive'));
-    throw new Error(`OneDrive delete failed (${res.status})`);
-  }
-}
-
-async function _dropboxDeleteFile(token, wsId) {
-  const res = await fetch('https://api.dropboxapi.com/2/files/delete_v2', {
-    method:  'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ path: _dbxFilePath(wsId) }),
+function _hydrateBlocks(blocks, map) {
+  return (blocks || []).map(b => {
+    let nb = b;
+    if (b.localName && map[b.localName]) nb = { ...b, url: map[b.localName] };
+    if (nb.children) nb = { ...nb, children: _hydrateBlocks(nb.children, map) };
+    return nb;
   });
-  if (!res.ok) {
-    if (res.status === 401) sessionStorage.removeItem(TOK_KEY('dropbox'));
-    throw new Error(`Dropbox delete failed (${res.status})`);
-  }
 }
 
-/**
- * Permanently delete a workspace file from the cloud provider.
- * `fileRef` is the provider's file/item ID (GDrive file ID, OneDrive item ID).
- * `wsId`    is the workspace UUID (used for Dropbox path derivation).
- */
-export async function deleteCloudWorkspace(providerId, fileRef, wsId) {
-  const token = _getToken(providerId);
-  if (!token) throw new Error('Not authenticated — call authenticateProvider() first.');
+/* Read the whole Drive workspace back → { nodes, favorites, currentId, uploads }. */
+export async function readGdriveWorkspaceTree(rootId) {
+  const token = _getToken();
+  if (!token) throw new Error('Not authenticated with Google Drive.');
+  revokeDriveURLs(rootId);
+  const cache = _cacheFor(rootId);
+  cache.text.clear(); cache.fileId.clear(); cache.folderId.clear();
 
-  switch (providerId) {
-    case 'gdrive':   return _gdriveDeleteFile(token, fileRef);
-    case 'onedrive': return _onedriveDeleteFile(token, fileRef || wsId);
-    case 'dropbox':  return _dropboxDeleteFile(token, wsId);
-    default: throw new Error(`Unknown provider: "${providerId}"`);
+  const files = [];
+  const spaceFolders = await _findChild(token, 'Space', rootId, true);
+  if (spaceFolders.length) {
+    cache.folderId.set('Space', spaceFolders[0].id);
+    await _collectMd(token, spaceFolders[0].id, 'Space', files, cache);
   }
+  const trashFolders = await _findChild(token, 'trash', rootId, true);
+  if (trashFolders.length) {
+    cache.folderId.set('trash', trashFolders[0].id);
+    await _collectMd(token, trashFolders[0].id, 'trash', files, cache);
+  }
+  const archiveFolders = await _findChild(token, 'archive', rootId, true);
+  if (archiveFolders.length) {
+    cache.folderId.set('archive', archiveFolders[0].id);
+    await _collectMd(token, archiveFolders[0].id, 'archive', files, cache);
+  }
+  // workspace info.md (root)
+  const infoFiles = await _findChild(token, 'info.md', rootId, false);
+  if (infoFiles.length) {
+    cache.fileId.set('info.md', infoFiles[0].id);
+    const text = await _downloadText(token, infoFiles[0].id);
+    files.push({ path: 'info.md', text });
+    cache.text.set('info.md', text);
+  }
+  const { nodes, favorites, currentId, info } = parseFolderTree(files);
+
+  // uploads
+  const uploads = [];
+  const map = {};
+  const uploadFolders = await _findChild(token, 'Upload', rootId, true);
+  if (uploadFolders.length) {
+    cache.folderId.set('Upload', uploadFolders[0].id);
+    const items = await _listChildren(token, uploadFolders[0].id);
+    for (const it of items) {
+      if (it.mimeType === FOLDER_MIME) continue;
+      try {
+        const blob = await _downloadBlob(token, it.id);
+        const url = URL.createObjectURL(blob);
+        (_objURLs[rootId] || (_objURLs[rootId] = [])).push(url);
+        map[it.name] = url;
+        uploads.push({ id: 'up_' + it.id, name: it.name, type: blob.type || '', size: Number(it.size) || blob.size || 0,
+          uploadedAt: Date.now(), localName: it.name, wsId: rootId, dataUrl: url });
+      } catch (_) {}
+    }
+  }
+  for (const n of Object.values(nodes)) if (n.blocks) n.blocks = _hydrateBlocks(n.blocks, map);
+  if (info && info.pageBg && map[info.pageBg]) info.pageBgUrl = map[info.pageBg];
+
+  return { nodes, favorites, currentId, uploads, info };
+}
+
+/* Permanently delete a whole Drive workspace folder. */
+export async function deleteDriveWorkspace(rootId) {
+  const token = _getToken();
+  if (!token) throw new Error('Not authenticated with Google Drive.');
+  await _deleteFile(token, rootId);
+  delete _cache[rootId];
+  revokeDriveURLs(rootId);
 }

@@ -3,14 +3,14 @@
   "private": true,
   "version": "2.0.0",
   "type": "module",
-  "description": "A Notion-style connected workspace — Vite + React + Firebase",
+  "description": "A Notion-style workspace stored as plain Markdown files — Vite + React",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
-    "firebase": "^11.3.1",
+    "js-yaml": "^4.1.0",
     "lucide-react": "^1.16.0",
     "mammoth": "^1.12.0",
     "react": "^18.3.1",

@@ -1,23 +1,30 @@
 /* =========================================================================
-   localfs.js — local-file workspace storage
+   localfs.js — local-folder workspace storage (File System Access API)
    =========================================================================
-   Uses the File System Access API (showDirectoryPicker) so the workspace
-   is stored as a JSON file in a folder the user chooses.
+   The workspace is stored as a plain folder tree the user chooses:
 
-   FileSystemDirectoryHandle objects are serialised into IndexedDB
-   (localStorage can't hold them) so the same folder is found again on
-   the next visit.  The browser still asks the user to confirm access once
-   per session, but never asks them to pick the folder again.
+     <picked folder>/          ← the workspace (its name = the workspace title)
+     ├── Upload/               ← uploaded files
+     └── Space/                ← pages as Markdown (.md), nested by folders
 
-   Browser support: Chrome 86+, Edge 86+, Opera 72+.
-   Firefox and Safari ≤ 15.1 are NOT supported — isLocalFSSupported()
-   returns false and the caller should hide / disable the option.
+   Serialization to/from this tree lives in ./markdown.js — this module only
+   does the File-System-Access plumbing: directory handles (persisted in
+   IndexedDB, since handles can't live in a cookie), permissions, and reading /
+   writing the tree with minimal churn.
+
+   Browser support: Chromium (Chrome, Edge, Brave, Opera). Firefox and Safari
+   lack showDirectoryPicker — isLocalFSSupported() returns false and callers
+   fall back to Google Drive.
    ========================================================================= */
+import { buildFolderPlan, parseFolderTree, slugifyTitle } from './markdown.js';
 
 const IDB_DB    = 'workspace-localfs';
 const IDB_VER   = 1;
 const IDB_STORE = 'handles';
-const WS_FILE   = 'workspace.json';
+const SPACE_DIR   = 'Space';
+const UPLOAD_DIR  = 'Upload';
+const TRASH_DIR   = 'trash';
+const ARCHIVE_DIR = 'archive';
 
 /* ---------------------------------------------------------------- feature detect */
 export const isLocalFSSupported = () =>
@@ -38,36 +45,32 @@ function openIDB() {
     req.onerror   = e => reject(e.target.error);
   });
 }
-
 async function idbGet(id) {
-  const db  = await openIDB();
+  const db = await openIDB();
   return new Promise((resolve, reject) => {
     const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(id);
     req.onsuccess = () => resolve(req.result ?? null);
     req.onerror   = () => reject(req.error);
   });
 }
-
 async function idbPut(record) {
-  const db  = await openIDB();
+  const db = await openIDB();
   return new Promise((resolve, reject) => {
     const req = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).put(record);
     req.onsuccess = () => resolve();
     req.onerror   = () => reject(req.error);
   });
 }
-
 async function idbGetAll() {
-  const db  = await openIDB();
+  const db = await openIDB();
   return new Promise((resolve, reject) => {
     const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).getAll();
     req.onsuccess = () => resolve(req.result ?? []);
     req.onerror   = () => reject(req.error);
   });
 }
-
 async function idbDelete(id) {
-  const db  = await openIDB();
+  const db = await openIDB();
   return new Promise((resolve, reject) => {
     const req = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).delete(id);
     req.onsuccess = () => resolve();
@@ -83,12 +86,7 @@ async function verifyPermission(dirHandle, write = true) {
   return false;
 }
 
-/**
- * Like verifyPermission but never swallows errors — returns a structured
- * result so callers can tell apart "user clicked Don't Allow" from a thrown
- * exception (e.g. lost user activation, insecure context, stale handle).
- *   { granted: boolean, reason: 'granted'|'denied'|'no-handle'|'<error.name>' }
- */
+/* Structured variant so the UI can tell "Don't Allow" apart from a thrown error. */
 async function verifyPermissionDetailed(dirHandle, write = true) {
   if (!dirHandle) return { granted: false, reason: 'no-handle' };
   const opts = { mode: write ? 'readwrite' : 'read' };
@@ -105,317 +103,338 @@ async function verifyPermissionDetailed(dirHandle, write = true) {
   }
 }
 
-/* ================================================================ PUBLIC API */
-
-/**
- * Open the OS folder-picker, register the chosen directory in IndexedDB,
- * and return the record.  Throws an AbortError if the user cancels.
- */
-export async function pickAndRegisterDirectory(wsId, wsName) {
-  if (!isLocalFSSupported())
-    throw new Error('File System Access API is not supported in this browser.');
-
-  const dirHandle = await window.showDirectoryPicker({
-    id: 'workspace-ws',
-    mode: 'readwrite',
-    startIn: 'documents',
-  });
-
-  const record = {
-    id:        wsId,
-    name:      wsName,
-    dirName:   dirHandle.name,
-    handle:    dirHandle,
-    createdAt: Date.now(),
-  };
-  await idbPut(record);
-  return record;
+/* ================================================================ directory navigation */
+/* Walk (optionally creating) a nested path relative to `root`, returning the
+   leaf directory handle. `parts` excludes the final filename. */
+async function _dir(root, parts, create) {
+  let h = root;
+  for (const p of parts) h = await h.getDirectoryHandle(p, { create });
+  return h;
+}
+async function _writeFileAtPath(root, path, text) {
+  const parts = path.split('/');
+  const name = parts.pop();
+  const dir = await _dir(root, parts, true);
+  const fh = await dir.getFileHandle(name, { create: true });
+  const w = await fh.createWritable();
+  await w.write(text);
+  await w.close();
+}
+async function _deleteFileAtPath(root, path) {
+  const parts = path.split('/');
+  const name = parts.pop();
+  try {
+    const dir = await _dir(root, parts, false);
+    await dir.removeEntry(name);
+  } catch (_) { /* already gone */ }
+}
+/* Recursively remove empty sub-directories under `root/relDir`. Returns true
+   if the directory itself is now empty. */
+async function _pruneEmptyDirs(root, relDir) {
+  let dir;
+  try { dir = await _dir(root, relDir.split('/'), false); } catch { return false; }
+  const subdirs = [];
+  let count = 0;
+  for await (const [name, handle] of dir.entries()) {
+    count++;
+    if (handle.kind === 'directory') subdirs.push(name);
+  }
+  for (const name of subdirs) {
+    const emptied = await _pruneEmptyDirs(root, relDir + '/' + name);
+    if (emptied) { try { await dir.removeEntry(name); count--; } catch (_) {} }
+  }
+  return count === 0;
 }
 
-/**
- * Return the directory handle that actually contains workspace.json — either
- * `dirHandle` itself, or one of its immediate subfolders. Returns null if no
- * workspace.json is found at either level.
- */
-async function locateWorkspaceDir(dirHandle) {
-  // 1) the picked folder itself
-  try {
-    await dirHandle.getFileHandle(WS_FILE);
-    return dirHandle;
-  } catch (e) {
-    if (e.name !== 'NotFoundError') throw e;
-  }
-  // 2) one level of subfolders (e.g. the user picked the parent folder)
+/* ================================================================ pickers */
+/* Does this folder look like a workspace? (has a Space/ sub-folder) */
+async function _looksLikeWorkspace(dirHandle) {
+  try { await dirHandle.getDirectoryHandle(SPACE_DIR); return true; }
+  catch { return false; }
+}
+/* Return the handle that actually contains a workspace — the picked folder or
+   one immediate sub-folder — else null. */
+async function _locateWorkspaceDir(dirHandle) {
+  if (await _looksLikeWorkspace(dirHandle)) return dirHandle;
   try {
     for await (const entry of dirHandle.values()) {
-      if (entry.kind !== 'directory') continue;
-      try {
-        await entry.getFileHandle(WS_FILE);
-        return entry;
-      } catch (_) { /* not in this subfolder */ }
+      if (entry.kind === 'directory' && await _looksLikeWorkspace(entry)) return entry;
     }
-  } catch (_) { /* directory not iterable */ }
+  } catch (_) {}
   return null;
 }
 
-/**
- * Re-pick a folder for an existing workspace whose handle was lost on this
- * device. Searches the chosen folder (and its immediate subfolders) for an
- * existing workspace.json, registers the matching directory in IndexedDB, and
- * returns the record annotated with `foundFile` so the caller can warn the user
- * if no existing workspace file was found.  Throws AbortError if cancelled.
- */
-export async function relinkAndRegisterDirectory(wsId, wsName) {
+/* Create a BRAND-NEW workspace folder. The user picks a LOCATION (parent
+   folder) and gives a workspace NAME; we create "<name>" inside the chosen
+   location and register it. The created folder becomes the workspace root and
+   its name is the workspace title. Returns { alreadyExisted } so the caller can
+   avoid clobbering a folder of the same name that already has content. */
+export async function createLocalWorkspaceFolder(wsId, name) {
   if (!isLocalFSSupported())
     throw new Error('File System Access API is not supported in this browser.');
+  const folderName = slugifyTitle(name) || 'Workspace';
+  const parent = await window.showDirectoryPicker({ id: 'workspace-parent', mode: 'readwrite', startIn: 'documents' });
+  let alreadyExisted = true;
+  try { await parent.getDirectoryHandle(folderName); }        // exists?
+  catch { alreadyExisted = false; }
+  const dirHandle = await parent.getDirectoryHandle(folderName, { create: true });
+  const record = { id: wsId, name: dirHandle.name, dirName: dirHandle.name, handle: dirHandle, createdAt: Date.now() };
+  await idbPut(record);
+  return { ...record, alreadyExisted };
+}
 
-  const picked = await window.showDirectoryPicker({
-    id: 'workspace-ws',
-    mode: 'readwrite',
-    startIn: 'documents',
-  });
-
-  const located  = await locateWorkspaceDir(picked);
+/* Re-pick a folder for an existing workspace whose handle was lost on this
+   device. `foundFile` reports whether an existing Space/ tree was found. */
+export async function relinkAndRegisterDirectory(wsId) {
+  if (!isLocalFSSupported())
+    throw new Error('File System Access API is not supported in this browser.');
+  const picked = await window.showDirectoryPicker({ id: 'workspace-ws', mode: 'readwrite', startIn: 'documents' });
+  const located = await _locateWorkspaceDir(picked);
   const dirHandle = located || picked;
-
-  const record = {
-    id:        wsId,
-    name:      wsName,
-    dirName:   dirHandle.name,
-    handle:    dirHandle,
-    createdAt: Date.now(),
-  };
+  const record = { id: wsId, name: dirHandle.name, dirName: dirHandle.name, handle: dirHandle, createdAt: Date.now() };
   await idbPut(record);
   return { ...record, foundFile: !!located };
 }
 
-/**
- * Connect an EXISTING workspace folder (e.g. one copied from another machine)
- * as a brand-new local workspace under `wsId`. Picks a folder, finds the
- * directory that holds workspace.json (root or one subfolder deep), and
- * registers the handle WITHOUT writing/overwriting anything.
- * Returns { dirName, handle, foundFile }. Throws AbortError if cancelled.
- */
+/* Connect an EXISTING workspace folder as a new workspace WITHOUT writing
+   anything — reads its tree straight away while we hold the located handle. */
 export async function openExistingDirectory(wsId) {
   if (!isLocalFSSupported())
     throw new Error('File System Access API is not supported in this browser.');
+  const picked = await window.showDirectoryPicker({ id: 'workspace-ws', mode: 'readwrite', startIn: 'documents' });
+  const located = await _locateWorkspaceDir(picked);
+  const dirHandle = located || picked;
+  await idbPut({ id: wsId, name: dirHandle.name, dirName: dirHandle.name, handle: dirHandle, createdAt: Date.now() });
 
-  const picked = await window.showDirectoryPicker({
-    id: 'workspace-ws',
-    mode: 'readwrite',
-    startIn: 'documents',
-  });
-
-  const located   = await locateWorkspaceDir(picked);
-  const dirHandle  = located || picked;
-
-  await idbPut({
-    id:        wsId,
-    dirName:   dirHandle.name,
-    handle:    dirHandle,
-    createdAt: Date.now(),
-  });
-
-  // Read workspace.json straight away, while we already hold the located handle
-  // (avoids a second permission/IndexedDB round-trip that can fail silently).
   let data = null;
   if (located) {
-    try {
-      const fh   = await dirHandle.getFileHandle(WS_FILE);
-      const file = await fh.getFile();
-      data = JSON.parse(await file.text());
-    } catch (e) {
-      console.warn('[localfs] openExistingDirectory read failed:', e);
-    }
+    try { data = await _readTreeFromHandle(wsId, dirHandle); } catch (e) { console.warn('[localfs] openExisting read failed:', e); }
   }
-  return { dirName: dirHandle.name, handle: dirHandle, foundFile: !!located, data };
+  return { dirName: dirHandle.name, name: dirHandle.name, handle: dirHandle, foundFile: !!located, data };
 }
 
-/**
- * Return all registered local-workspace records from IndexedDB, each
- * annotated with `accessible: boolean` (true = permission already granted,
- * no prompt needed).
- */
+/* ================================================================ index / records */
 export async function loadLocalWorkspaceIndex() {
   try {
     const all = await idbGetAll();
     return await Promise.all(all.map(async rec => {
       let accessible = false;
-      try {
-        accessible =
-          (await rec.handle.queryPermission({ mode: 'readwrite' })) === 'granted';
-      } catch (_) {}
+      try { accessible = (await rec.handle.queryPermission({ mode: 'readwrite' })) === 'granted'; } catch (_) {}
       return { ...rec, accessible };
     }));
-  } catch (_) {
-    return [];
-  }
+  } catch (_) { return []; }
+}
+export async function getLocalWorkspaceRecord(id) { return idbGet(id); }
+export async function removeLocalWorkspaceRecord(id) {
+  // Cancel any pending debounced write FIRST so a stale write can never fire
+  // for a workspace we're forgetting. Then drop the handle + caches. No file
+  // on disk is ever removed here — this only disconnects.
+  clearTimeout(_writeTimers[id]); delete _writeTimers[id];
+  await idbDelete(id); revokeLocalURLs(id); delete _treeCache[id];
 }
 
-/**
- * Read and parse workspace.json from a stored directory.
- * Returns null if the file doesn't exist yet (brand-new workspace).
- * Throws if permission is denied.
- */
-export async function readLocalWorkspace(id) {
-  const rec = await idbGet(id);
-  if (!rec) throw new Error('Local workspace record not found in IndexedDB');
-  const ok = await verifyPermission(rec.handle, false);
-  if (!ok) throw new Error('Permission denied');
-  try {
-    const fh   = await rec.handle.getFileHandle(WS_FILE);
-    const file = await fh.getFile();
-    return JSON.parse(await file.text());
-  } catch (e) {
-    if (e.name === 'NotFoundError') return null;   // file doesn't exist yet
-    throw e;
-  }
-}
-
-/**
- * Serialise `data` to workspace.json inside the stored directory.
- * Requests write permission if not already granted.
- */
-let _localWriteTimer = {};
-export function writeLocalWorkspaceDebounced(id, data, delayMs = 800) {
-  clearTimeout(_localWriteTimer[id]);
-  _localWriteTimer[id] = setTimeout(() => _doWrite(id, data), delayMs);
-}
-
-async function _doWrite(id, data) {
-  try {
-    const rec = await idbGet(id);
-    if (!rec) return;
-    const ok = await verifyPermission(rec.handle, true);
-    if (!ok) return;
-    const fh       = await rec.handle.getFileHandle(WS_FILE, { create: true });
-    const writable = await fh.createWritable();
-    await writable.write(JSON.stringify(data, null, 2));
-    await writable.close();
-  } catch (e) {
-    console.warn('[localfs] write failed:', e.message);
-  }
-}
-
-/** Immediate (non-debounced) write — used when switching away from a workspace */
-export async function writeLocalWorkspaceNow(id, data) {
-  return _doWrite(id, data);
-}
-
-/**
- * Request readwrite permission for a stored handle — must be called from
- * a user-gesture handler (e.g., a button click).
- * Returns true if permission is now granted.
- *
- * NOTE: this awaits IndexedDB before calling requestPermission(), which can
- * eat the browser's transient user-activation window and silently suppress the
- * permission prompt. Prefer requestPermissionForHandle() with an in-memory
- * handle when you're inside a click handler.
- */
-export async function requestLocalWorkspacePermission(id) {
-  try {
-    const rec = await idbGet(id);
-    if (!rec) return false;
-    return verifyPermission(rec.handle, true);
-  } catch (_) {
-    return false;
-  }
-}
-
-/**
- * Request readwrite permission directly on an already-loaded directory handle.
- * Because there's no async IndexedDB hop before requestPermission(), the
- * browser's transient user-activation is preserved and the permission prompt
- * reliably appears. Call this synchronously from inside a click handler.
- * Returns true if permission is now granted.
- */
-export async function requestPermissionForHandle(handle, write = true) {
-  const { granted } = await verifyPermissionDetailed(handle, write);
-  return granted;
-}
-
-/**
- * Same as requestPermissionForHandle but returns the structured result
- * { granted, reason } so the UI can show a meaningful message.
- */
 export async function requestPermissionForHandleDetailed(handle, write = true) {
   return verifyPermissionDetailed(handle, write);
 }
 
-/** Return the stored record for one workspace (or null) */
-export async function getLocalWorkspaceRecord(id) {
-  return idbGet(id);
+/* ================================================================ blob-URL registry */
+const _objURLs = {}; // id -> [blobURL]
+function _track(id, url) { (_objURLs[id] || (_objURLs[id] = [])).push(url); }
+export function revokeLocalURLs(id) {
+  (_objURLs[id] || []).forEach(u => { try { URL.revokeObjectURL(u); } catch (_) {} });
+  _objURLs[id] = [];
 }
 
-/** Remove a local workspace from IndexedDB (does NOT delete the folder/file) */
-export async function removeLocalWorkspaceRecord(id) {
-  await idbDelete(id);
+/* ================================================================ read tree */
+async function _collectMd(dirHandle, relPath, out) {
+  for await (const [name, handle] of dirHandle.entries()) {
+    if (handle.kind === 'directory') {
+      await _collectMd(handle, relPath + '/' + name, out);
+    } else if (name.toLowerCase().endsWith('.md')) {
+      const file = await handle.getFile();
+      out.push({ path: relPath + '/' + name, text: await file.text() });
+    }
+  }
 }
 
-/**
- * Write an uploaded file into the workspace's `uploads/` sub-folder.
- * Creates the sub-folder if it doesn't exist yet.
- * Returns the unique filename used inside uploads/, or null on failure.
- */
+async function _readUploads(root, id) {
+  const uploads = [];
+  const map = {}; // localName -> blobURL
+  let dir;
+  try { dir = await root.getDirectoryHandle(UPLOAD_DIR); } catch { return { uploads, map }; }
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind !== 'file') continue;
+    try {
+      const file = await handle.getFile();
+      const url = URL.createObjectURL(file);
+      _track(id, url);
+      map[name] = url;
+      uploads.push({ id: 'up_' + name, name, type: file.type || '', size: file.size,
+        uploadedAt: file.lastModified || Date.now(), localName: name, wsId: id, dataUrl: url });
+    } catch (_) {}
+  }
+  return { uploads, map };
+}
+
+/* Fill block.url from the localName→blobURL map (recursing into toggles). */
+function _hydrateBlocks(blocks, map) {
+  return (blocks || []).map(b => {
+    let nb = b;
+    if (b.localName && map[b.localName]) nb = { ...b, url: map[b.localName] };
+    if (nb.children) nb = { ...nb, children: _hydrateBlocks(nb.children, map) };
+    return nb;
+  });
+}
+
+async function _readTreeFromHandle(id, root) {
+  revokeLocalURLs(id);
+  const files = [];
+  try {
+    const space = await root.getDirectoryHandle(SPACE_DIR);
+    await _collectMd(space, SPACE_DIR, files);
+  } catch (_) { /* no Space/ yet */ }
+  try {
+    const trash = await root.getDirectoryHandle(TRASH_DIR);
+    await _collectMd(trash, TRASH_DIR, files);
+  } catch (_) { /* no trash/ yet */ }
+  try {
+    const archive = await root.getDirectoryHandle(ARCHIVE_DIR);
+    await _collectMd(archive, ARCHIVE_DIR, files);
+  } catch (_) { /* no archive/ yet */ }
+  try {
+    const fh = await root.getFileHandle('info.md');
+    files.push({ path: 'info.md', text: await (await fh.getFile()).text() });
+  } catch (_) { /* no info.md yet */ }
+
+  const { nodes, favorites, currentId, info } = parseFolderTree(files);
+  const { uploads, map } = await _readUploads(root, id);
+
+  for (const n of Object.values(nodes)) {
+    if (n.blocks) n.blocks = _hydrateBlocks(n.blocks, map);
+  }
+  // Resolve the page-background image to a displayable blob URL.
+  if (info && info.pageBg && map[info.pageBg]) info.pageBgUrl = map[info.pageBg];
+
+  // Prime the write cache with the ACTUAL on-disk files, so the first save only
+  // writes real differences — and still creates files that don't exist yet (e.g.
+  // info.md in an older workspace).
+  _treeCache[id] = new Map(files.map(f => [f.path, f.text]));
+
+  return { nodes, favorites, currentId, uploads, info };
+}
+
+/* Read a local workspace's full tree → { nodes, favorites, currentId, uploads }.
+   Returns null if the folder has no Space/ yet (brand-new). Throws on denied. */
+export async function readWorkspaceTree(id) {
+  const rec = await idbGet(id);
+  if (!rec) throw new Error('Local workspace record not found in IndexedDB');
+  if (!(await verifyPermission(rec.handle, false))) throw new Error('Permission denied');
+  return _readTreeFromHandle(id, rec.handle);
+}
+
+/* ================================================================ write tree */
+const _treeCache = {};  // id -> Map(path -> lastWrittenText)
+const _writeTimers = {};
+
+async function _doWriteTree(id, store) {
+  try {
+    const rec = await idbGet(id);
+    if (!rec) return;
+    if (!(await verifyPermission(rec.handle, true))) return;
+    const root = rec.handle;
+
+    const plan = buildFolderPlan(store);
+    const desired = new Map(plan.files.map(f => [f.path, f.text]));
+    const prev = _treeCache[id] || new Map();
+
+    // 1) delete files no longer present
+    for (const path of prev.keys()) {
+      if (!desired.has(path)) await _deleteFileAtPath(root, path);
+    }
+    // 2) write new / changed files
+    for (const [path, text] of desired) {
+      if (prev.get(path) === text) continue;
+      try { await _writeFileAtPath(root, path, text); }
+      catch (e) { console.warn('[localfs] write failed:', path, e.message); }
+    }
+    // 3) remove folders that became empty (e.g. a page that lost all children)
+    await _pruneEmptyDirs(root, SPACE_DIR).catch(() => {});
+    // 4) reconcile uploads: delete files no longer referenced
+    await _reconcileUploads(root, plan.uploads).catch(() => {});
+
+    _treeCache[id] = desired;
+  } catch (e) {
+    console.warn('[localfs] writeTree failed:', e.message);
+  }
+}
+
+async function _reconcileUploads(root, wantedUploads) {
+  const wanted = new Set((wantedUploads || []).map(u => u.name));
+  let dir;
+  try { dir = await root.getDirectoryHandle(UPLOAD_DIR); } catch { return; }
+  const names = [];
+  for await (const [name, handle] of dir.entries()) if (handle.kind === 'file') names.push(name);
+  for (const name of names) if (!wanted.has(name)) { try { await dir.removeEntry(name); } catch (_) {} }
+}
+
+export function writeWorkspaceTreeDebounced(id, store, delayMs = 800) {
+  clearTimeout(_writeTimers[id]);
+  _writeTimers[id] = setTimeout(() => _doWriteTree(id, store), delayMs);
+}
+export async function writeWorkspaceTreeNow(id, store) {
+  clearTimeout(_writeTimers[id]);
+  return _doWriteTree(id, store);
+}
+
+/* ================================================================ uploads */
+/* Write an uploaded file into Upload/. Returns the on-disk filename. */
 export async function writeLocalUploadFile(wsId, originalName, dataUrl) {
   try {
     const rec = await idbGet(wsId);
     if (!rec) return null;
-    const ok = await verifyPermission(rec.handle, true);
-    if (!ok) return null;
-    const uploadsDir = await rec.handle.getDirectoryHandle('uploads', { create: true });
-    const safeName = Date.now() + '_' + originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const fh = await uploadsDir.getFileHandle(safeName, { create: true });
-    const writable = await fh.createWritable();
-    const res = await fetch(dataUrl);
-    const blob = await res.blob();
-    await writable.write(blob);
-    await writable.close();
-    return safeName;
+    if (!(await verifyPermission(rec.handle, true))) return null;
+    const dir = await rec.handle.getDirectoryHandle(UPLOAD_DIR, { create: true });
+    const safe = Date.now() + '_' + slugifyTitle(originalName).replace(/\s+/g, '_');
+    const fh = await dir.getFileHandle(safe, { create: true });
+    const w = await fh.createWritable();
+    const blob = await (await fetch(dataUrl)).blob();
+    await w.write(blob);
+    await w.close();
+    return safe;
   } catch (e) {
     console.warn('[localfs] writeLocalUploadFile failed:', e.message);
     return null;
   }
 }
 
-/**
- * Read an upload file from the workspace's `uploads/` sub-folder and return a
- * blob object URL (for display) plus its type. Returns null if the file or the
- * folder is missing. The caller is responsible for URL.revokeObjectURL().
- */
+/* Read one upload from Upload/ as a blob URL. Caller revokes via revokeLocalURLs. */
 export async function readLocalUploadURL(wsId, localName) {
   if (!localName) return null;
   try {
     const rec = await idbGet(wsId);
     if (!rec) return null;
-    const ok = await verifyPermission(rec.handle, false);
-    if (!ok) return null;
-    const uploadsDir = await rec.handle.getDirectoryHandle('uploads', { create: false });
-    const fh   = await uploadsDir.getFileHandle(localName, { create: false });
+    if (!(await verifyPermission(rec.handle, false))) return null;
+    const dir = await rec.handle.getDirectoryHandle(UPLOAD_DIR, { create: false });
+    const fh = await dir.getFileHandle(localName, { create: false });
     const file = await fh.getFile();
-    return { url: URL.createObjectURL(file), type: file.type };
+    const url = URL.createObjectURL(file);
+    _track(wsId, url);
+    return { url, type: file.type };
   } catch (e) {
-    if (e.name !== 'NotFoundError')
-      console.warn('[localfs] readLocalUploadURL failed:', e.message);
+    if (e.name !== 'NotFoundError') console.warn('[localfs] readLocalUploadURL failed:', e.message);
     return null;
   }
 }
 
-/**
- * Delete a previously written upload file from the workspace's `uploads/`
- * sub-folder. `localName` is the value returned by writeLocalUploadFile.
- */
 export async function deleteLocalUploadFile(wsId, localName) {
   if (!localName) return;
   try {
     const rec = await idbGet(wsId);
     if (!rec) return;
-    const ok = await verifyPermission(rec.handle, true);
-    if (!ok) return;
-    const uploadsDir = await rec.handle.getDirectoryHandle('uploads', { create: false });
-    await uploadsDir.removeEntry(localName);
+    if (!(await verifyPermission(rec.handle, true))) return;
+    const dir = await rec.handle.getDirectoryHandle(UPLOAD_DIR, { create: false });
+    await dir.removeEntry(localName);
   } catch (e) {
-    if (e.name !== 'NotFoundError')
-      console.warn('[localfs] deleteLocalUploadFile failed:', e.message);
+    if (e.name !== 'NotFoundError') console.warn('[localfs] deleteLocalUploadFile failed:', e.message);
   }
 }

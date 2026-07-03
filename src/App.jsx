@@ -1,38 +1,25 @@
 /* =========================================================================
    App.jsx — root component
    -------------------------------------------------------------------------
-   Decides what to render:
-     loading      -> spinner
-     no user      -> AuthScreen        (cloud mode only)
-     signed in    -> Workspace         (the full Notion-style app)
-
-   In local mode useAuth() returns a user immediately, so the AuthScreen
-   is skipped and the Workspace opens straight away.
+   No accounts, no auth gate. The Workspace component decides what to show:
+   a homepage when no workspace is connected, otherwise the connected
+   Local / Google Drive workspace. Theme is restored from a cookie so it
+   applies before any workspace loads.
    ========================================================================= */
 import React, { useEffect } from 'react';
-import { useAuth, AuthScreen } from './auth.jsx';
 import Workspace from './workspace.jsx';
+import { readTheme } from './cookies.js';
 
 export default function App() {
-  const { user, loading, signOut, enterLocally } = useAuth();
-
   useEffect(() => {
+    const { theme, accent } = readTheme();
+    document.body.classList.toggle('dark', theme === 'dark');
+    ['indigo', 'blue', 'ocean', 'forest', 'rose', 'sunset', 'violet']
+      .forEach(a => document.body.classList.remove(`t-${a}`));
+    document.body.classList.add(`t-${accent || 'indigo'}`);
     const b = document.getElementById('boot');
     if (b) b.style.display = 'none';
   }, []);
 
-  if (loading) {
-    return (
-      <div className="app-loading">
-        <div className="app-loading-logo">◧</div>
-        <div className="app-loading-bar"><i /></div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return <AuthScreen onEnterLocally={enterLocally} />;
-  }
-
-  return <Workspace user={user} onSignOut={signOut} />;
+  return <Workspace />;
 }

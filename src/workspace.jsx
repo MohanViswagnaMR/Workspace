@@ -1,5 +1,5 @@
 /* =========================================================================
-   NOTION — Connected Workspace  (Vite + Firebase edition)
+   NOTION — Connected Workspace  (Markdown-on-disk edition)
    Block editor, nested pages, multi-view databases, search, trash,
    templates, favorites, dark mode, keyboard shortcuts.
    Persistence is delegated to ./storage (Firestore or localStorage).
@@ -13,35 +13,28 @@ import {
   Filter, ArrowUpDown, Sun, Moon, Menu, ChevronLeft, Maximize2,
   Share2, Users, Archive, Upload, LayoutDashboard, RotateCcw, Download,
   Monitor, CloudCheck, CloudUpload, Key, ExternalLink, Copy, Keyboard,
-  Cloud, HardDrive, Paperclip, Database, Eye, PanelRight,
+  Cloud, HardDrive, Paperclip, Database, Eye, PanelRight, LogOut, Unlink,
 } from 'lucide-react';
 import {
-  loadStore, saveStore,
-  searchUsersByEmail, shareWorkspaceWithUser,
-  loadSharedWorkspaces, loadNotifications, markNotificationRead,
-  deleteSharedWorkspace, transferWorkspaceOwnership,
-} from './storage.js';
-import { writeLocalUploadFile, deleteLocalUploadFile } from './localfs.js';
-import { isFirebaseConfigured } from './firebase.js';
-import {
   isLocalFSSupported,
-  pickAndRegisterDirectory,
+  createLocalWorkspaceFolder,
   relinkAndRegisterDirectory,
   openExistingDirectory,
   loadLocalWorkspaceIndex,
-  readLocalWorkspace,
-  writeLocalWorkspaceDebounced,
-  writeLocalWorkspaceNow,
+  readWorkspaceTree,
+  writeWorkspaceTreeDebounced,
+  writeWorkspaceTreeNow,
   requestPermissionForHandleDetailed,
   getLocalWorkspaceRecord,
   removeLocalWorkspaceRecord,
-  readLocalUploadURL,
+  writeLocalUploadFile,
+  deleteLocalUploadFile,
 } from './localfs.js';
 
 /* Shown when the browser lacks the File System Access API (Firefox/Zen/Safari). */
 const LOCAL_FS_UNSUPPORTED_MSG =
   'Local folders require a Chromium browser (Chrome, Edge, or Brave). '+
-  'In Firefox or Zen, use cloud sync (Firebase or Google Drive) instead.';
+  'In Firefox or Safari, use a Google Drive workspace instead.';
 
 /* Turn a permission-failure reason into a human-readable message. */
 function localPermMessage(reason){
@@ -58,12 +51,17 @@ function localPermMessage(reason){
   }
 }
 import {
-  CLOUD_PROVIDERS,
-  isCloudProviderConfigured, getCloudClientId, setCloudClientId,
-  authenticateProvider, readCloudWorkspace, writeCloudWorkspace,
-  listCloudWorkspaces, deleteCloudWorkspace,
-  getProviderToken, clearProviderToken,
+  GDRIVE,
+  authenticateGoogleDrive, getDriveToken, clearDriveToken,
+  createDriveWorkspace, listDriveWorkspaces,
+  writeGdriveWorkspaceTree, readGdriveWorkspaceTree,
+  writeDriveUpload, deleteDriveWorkspace,
 } from './cloudstorage.js';
+import {
+  readActivePointer, writeActivePointer, clearActivePointer,
+  readTheme, writeTheme, getCookie, setCookie,
+} from './cookies.js';
+import { nodeDiskPath } from './markdown.js';
 
 /* ---------- utils ---------- */
 const nid = () => 'n'+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3);
@@ -156,10 +154,14 @@ const ICON_MAP = {
   key: Key, 'external-link': ExternalLink, copy: Copy, keyboard: Keyboard,
   cloud: Cloud, 'hard-drive': HardDrive,
   paperclip: Paperclip, database: Database, eye: Eye, 'panel-right': PanelRight,
+  'log-out': LogOut, unlink: Unlink,
 };
 
 const DASH_ID='__dashboard__';
 const STORAGE_ID='__storage__';
+const TRASH_ID='__trash__';
+const ARCHIVE_ID='__archive__';
+const TEMPLATES_ID='__templates__';
 
 function Ic({n, style}) {
   const Icon = ICON_MAP[n];
@@ -170,7 +172,7 @@ function Ic({n, style}) {
     {...(Object.keys(rest).length ? {style: rest} : {})}/>;
 }
 
-/* Storage (loadStore / saveStore) is imported from ./storage.js */
+/* Persistence lives in ./localfs.js (folders) and ./cloudstorage.js (Google Drive). */
 
 /* =========================================================================
    DATABASE FACTORY + SEED DATA
@@ -305,71 +307,7 @@ function buildSeed(){
     {id:nid(),type:'text',html:''},
   ]});
 
-  return {nodes,favorites:['n_start','n_tasks'],currentId:'n_start',theme:'light',accent:'indigo',
-    workspaces:[{id:'ws_main',name:'My Workspace',isPersonal:true,members:[]}],
-    activeWorkspaceId:'ws_main',workspaceSnapshots:{},sharedNodes:{},tutorialCompleted:false,uploads:[]};
-}
-
-/* =========================================================================
-   external-workspace helpers
-   -------------------------------------------------------------------------
-   "External" = a local-file or cloud-provider workspace. Its pages and
-   uploads live only in its own backing (workspace.json + uploads/ folder, or
-   the provider file) and must never be written to Firebase. Firebase keeps
-   only the workspace list, settings, and personal/shared content.
-   ========================================================================= */
-const isExternalWs = ws => !!(ws && (ws.isLocalFile || ws.cloudProvider));
-
-/* Replace/insert this workspace's uploads in the global in-memory array. */
-function mergeUploads(existing, wsId, incoming){
-  return [...(existing||[]).filter(u=>u.wsId!==wsId),
-          ...(incoming||[]).map(u=>({...u, wsId}))];
-}
-
-/* Strip everything that belongs to an external workspace before saving to
-   Firebase. setDoc replaces the whole document, so this also purges any data
-   that leaked from earlier (un-sanitised) saves. */
-function toCloudStore(store){
-  const wss = store.workspaces||[];
-  const ext = id => isExternalWs(wss.find(w=>w.id===id));
-  const activeId = store.activeWorkspaceId||'ws_main';
-
-  // keep only non-external workspace snapshots
-  const snaps = {};
-  for(const [id,snap] of Object.entries(store.workspaceSnapshots||{})){
-    if(!ext(id)) snaps[id]=snap;
-  }
-
-  // the top-level active view must reflect a non-external workspace
-  let {nodes,favorites,currentId} = store;
-  if(ext(activeId)){
-    const personal = snaps['ws_main'] || {};
-    nodes     = personal.nodes     || {};
-    favorites = personal.favorites || [];
-    currentId = personal.currentId || null;
-  }
-
-  // drop uploads that belong to external workspaces
-  const uploads = (store.uploads||[]).filter(u=>!ext(u.wsId));
-
-  return {...store, nodes, favorites, currentId, workspaceSnapshots:snaps, uploads};
-}
-
-/* Build the workspace.json payload for a local workspace: strip the transient
-   blob URLs (blocks keep only `localName`; uploads drop `dataUrl`/`wsId`) so the
-   file holds durable references only. `live` = {nodes,favorites,currentId,uploads}. */
-function dehydrateLocalData(name, live){
-  const nodes={};
-  for(const [id,n] of Object.entries(live.nodes||{})){
-    const blocks=(n.blocks||[]).map(b=> b.localName ? {...b, url:''} : b);
-    nodes[id]={...n, blocks};
-  }
-  const uploads=(live.uploads||[]).map(u=>{
-    const {dataUrl, wsId, ...rest}=u;
-    return rest;
-  });
-  return {name, version:2, nodes, favorites:live.favorites||[],
-    currentId:live.currentId, uploads};
+  return {nodes,favorites:['n_start','n_tasks'],currentId:'n_start'};
 }
 
 /* =========================================================================
@@ -2074,35 +2012,18 @@ window.__NOTION_PART4_DONE=true;
    ========================================================================= */
 
 /* ---------------- Workspace Switcher popup ---------------- */
-function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDelete,onClose,rect,onReconnectLocal,onRelinkLocal,onOpenExisting,onBrowseCloud}){
+function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onDelete,onReconnect,onClose,rect}){
   const localSupported=isLocalFSSupported();
   return <Popup rect={rect} onClose={onClose} width={300}>
     <div className="menu">
       <div className="menu-h">Switch workspace</div>
       {(workspaces||[]).map(ws=>{
-        const isLocal=ws.isLocalFile;
-        const prov=ws.cloudProvider?CLOUD_PROVIDERS[ws.cloudProvider]:null;
-        // In Firefox/Zen the File System Access API is missing, so local
-        // workspaces can never be opened here — show an explanatory note
-        // instead of an actionable "reconnect" affordance that only errors.
+        const isLocal=ws.type==='local';
         const localUnavailable=isLocal&&!localSupported;
         const needsAccess=isLocal&&!localUnavailable&&ws.accessible===false;
-        const avatarBg=ws.isPersonal
-          ?'linear-gradient(135deg,#ff9a6b,#e8506e)'
-          :ws.isShared
-            ?'linear-gradient(135deg,#10b981,#059669)'
-            :isLocal
-              ?'linear-gradient(135deg,#7c3aed,#a78bfa)'
-              :prov
-                ?prov.gradient
-                :'linear-gradient(135deg,#5b86e5,#36d1dc)';
-        const subtitle=ws.isPersonal?'Personal'
-          :ws.isShared?`Shared by ${ws.ownerEmail||'someone'}`
-          :isLocal?`💻 Local · ${ws.dirName||'folder'}`
-          :prov?`${prov.emoji} ${prov.name}`
-          :'Shared workspace';
-        const avatarLabel=isLocal?'💻':prov?prov.emoji:ws.name[0].toUpperCase();
-
+        const avatarBg=isLocal?'linear-gradient(135deg,#7c3aed,#a78bfa)':GDRIVE.gradient;
+        const subtitle=isLocal?'💻 Local folder':`${GDRIVE.emoji} Google Drive`;
+        const avatarLabel=isLocal?'💻':GDRIVE.emoji;
         return <div key={ws.id} className={cx('mi',ws.id===activeId&&'hi')} style={{gap:0,paddingRight:6}}>
           <div style={{display:'flex',alignItems:'center',gap:8,flex:1,
             cursor:localUnavailable?'not-allowed':'pointer',minWidth:0,
@@ -2110,391 +2031,37 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onShare,onDele
             onMouseDown={e=>{
               e.preventDefault();
               if(localUnavailable){ alert(LOCAL_FS_UNSUPPORTED_MSG); onClose(); return; }
-              if(needsAccess){ onReconnectLocal&&onReconnectLocal(ws.id); onClose(); return; }
+              if(needsAccess){ onReconnect&&onReconnect(ws.id); onClose(); return; }
               if(ws.id!==activeId) onSwitch(ws.id);
               onClose();
             }}>
-            <div className="mi-ic ws-ic" style={{background:avatarBg,
-              color:'#fff',fontWeight:700,fontSize:prov||isLocal?16:12,border:'none',borderRadius:6,
-              flexShrink:0,position:'relative'}}>
-              {avatarLabel}
-            </div>
+            <div className="mi-ic ws-ic" style={{background:avatarBg,color:'#fff',fontWeight:700,
+              fontSize:16,border:'none',borderRadius:6,flexShrink:0}}>{avatarLabel}</div>
             <div className="mi-tx" style={{minWidth:0}}>{ws.name}
               <small style={{display:'flex',alignItems:'center',gap:4}}>
-                {localUnavailable&&<span style={{color:'#d4894c'}}>💻 Local — needs Chrome / Edge to open</span>}
-                {needsAccess&&<span style={{color:'#d44c47'}}>{ws.unlinked?'🔗 Folder not linked here — click to pick it':'🔒 Needs access — click to reconnect'}</span>}
+                {localUnavailable&&<span style={{color:'#d4894c'}}>💻 Local — needs Chrome / Edge</span>}
+                {needsAccess&&<span style={{color:'#d44c47'}}>🔒 Needs access — click to reconnect</span>}
                 {!needsAccess&&!localUnavailable&&subtitle}
               </small>
             </div>
             {ws.id===activeId&&<Ic n="check" style={{width:14,height:14,color:'var(--accent)',flexShrink:0}}/>}
           </div>
-          {/* action buttons */}
-          {!ws.isPersonal&&!ws.isShared&&!isLocal&&!prov&&
-            <div style={{display:'flex',gap:2,flexShrink:0,marginLeft:4}}>
-              <button className="icon-btn" style={{width:22,height:22}} title="Share workspace"
-                onMouseDown={e=>{e.preventDefault();e.stopPropagation();onShare(ws.id);onClose();}}>
-                <Ic n="users" style={{width:12,height:12,color:'var(--accent)'}}/>
-              </button>
-              <button className="icon-btn" style={{width:22,height:22}} title="Delete workspace"
-                onMouseDown={e=>{e.preventDefault();e.stopPropagation();onDelete(ws.id);onClose();}}>
-                <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
-              </button>
-            </div>}
-          {(isLocal||prov)&&
-            <div style={{display:'flex',gap:2,flexShrink:0,marginLeft:4}}>
-              {isLocal&&!localUnavailable&&
-                <button className="icon-btn" style={{width:22,height:22}}
-                  title="Reconnect / pick the workspace folder again"
-                  onMouseDown={e=>{e.preventDefault();e.stopPropagation();onRelinkLocal&&onRelinkLocal(ws.id);onClose();}}>
-                  <Ic n="link" style={{width:12,height:12,color:'var(--accent)'}}/>
-                </button>}
-              <button className="icon-btn" style={{width:22,height:22}}
-                title={isLocal?'Remove local workspace from list (files are not deleted)':'Remove cloud workspace from list (file is not deleted)'}
-                onMouseDown={e=>{e.preventDefault();e.stopPropagation();onDelete(ws.id);onClose();}}>
-                <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
-              </button>
-            </div>}
+          <button className="icon-btn" style={{width:22,height:22,flexShrink:0,marginLeft:4}}
+            title={isLocal?'Remove local workspace from list (files are not deleted)':'Remove Drive workspace from list (folder is not deleted)'}
+            onMouseDown={e=>{e.preventDefault();e.stopPropagation();onDelete(ws.id);onClose();}}>
+            <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
+          </button>
         </div>;
       })}
       <div className="menu-sep"/>
       <div className="mi" onMouseDown={e=>{e.preventDefault();onCreate();onClose();}}>
         <div className="mi-ic"><Ic n="plus" style={{width:15,height:15}}/></div>
-        <div className="mi-tx">Create workspace</div>
+        <div className="mi-tx">Connect a workspace…</div>
       </div>
-      {onOpenExisting&&<div className="mi" onMouseDown={e=>{e.preventDefault();onOpenExisting();onClose();}}>
-        <div className="mi-ic"><Ic n="import" style={{width:15,height:15}}/></div>
-        <div className="mi-tx">Open existing workspace folder…</div>
-      </div>}
-      {onBrowseCloud&&<div className="mi" onMouseDown={async e=>{
-        e.preventDefault();
-        try{ await onBrowseCloud('gdrive'); onClose(); }
-        catch(err){ alert(`Could not connect to Google Drive: ${err.message}`); }
-      }}>
-        <div className="mi-ic" style={{fontSize:14}}>📁</div>
-        <div className="mi-tx">Browse Drive workspaces…</div>
-      </div>}
     </div>
   </Popup>;
 }
 
-/* ---------------- Share Document Modal ---------------- */
-function ShareDocModal({node,shares,onAdd,onRemove,onClose}){
-  const [email,setEmail]=React.useState('');
-  const [perm,setPerm]=React.useState('view');
-  const [copied,setCopied]=React.useState(false);
-  function add(){
-    const e=email.trim();
-    if(!e||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return;
-    onAdd(e,perm); setEmail('');
-  }
-  function copyLink(){
-    navigator.clipboard?.writeText(location.href+'?page='+node.id);
-    setCopied(true); setTimeout(()=>setCopied(false),2000);
-  }
-  return <div className="overlay" onClick={onClose}>
-    <div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-h">
-        <h3>Share "{node.title||'Untitled'}"</h3>
-        <button className="x" onClick={onClose}><Ic n="x"/></button>
-      </div>
-      <div style={{padding:'16px 20px 20px'}}>
-        <div style={{display:'flex',gap:8,marginBottom:16}}>
-          <input className="fld" placeholder="Invite by email address…" autoFocus
-            value={email} onChange={e=>setEmail(e.target.value)}
-            onKeyDown={e=>e.key==='Enter'&&add()} style={{flex:1}}/>
-          <select value={perm} onChange={e=>setPerm(e.target.value)} className="perm-sel">
-            <option value="view">Can view</option>
-            <option value="edit">Can edit</option>
-          </select>
-          <button className="btn primary" onClick={add} style={{padding:'7px 14px'}}>Invite</button>
-        </div>
-        {(shares||[]).length>0
-          ? <><div className="menu-h" style={{padding:'0 0 8px'}}>SHARED WITH</div>
-            {(shares||[]).map((s,i)=>
-              <div key={i} className="share-person-row">
-                <div className="share-ava">{s.email[0].toUpperCase()}</div>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{fontWeight:500,fontSize:13,whiteSpace:'nowrap',overflow:'hidden',
-                    textOverflow:'ellipsis'}}>{s.email}</div>
-                </div>
-                <span className="share-badge">{s.permission==='edit'?'Can edit':'Can view'}</span>
-                <button className="icon-btn" style={{width:24,height:24}} title="Remove access"
-                  onClick={()=>onRemove(s.email)}>
-                  <Ic n="x" style={{width:12,height:12}}/></button>
-              </div>
-            )}</>
-          : <div className="share-empty-hint">
-              No one invited yet. Add email addresses above to share this page.
-            </div>}
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',
-          marginTop:16,paddingTop:12,borderTop:'1px solid var(--border)'}}>
-          <span style={{fontSize:12,color:'var(--text-3)'}}>Anyone with the link can view</span>
-          <button className="btn ghost" style={{display:'flex',alignItems:'center',gap:6}}
-            onClick={copyLink}>
-            <Ic n="link" style={{width:14,height:14}}/>
-            {copied?'Copied!':'Copy link'}
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>;
-}
-
-/* ---------------- Share Workspace Modal ---------------- */
-function ShareWorkspaceModal({workspace,user,currentSnapshot,onUpdateMembers,onClose}){
-  const [email,setEmail]=React.useState('');
-  const [members,setMembers]=React.useState(workspace.members||[]);
-  const [suggestions,setSuggestions]=React.useState([]);
-  const [busy,setBusy]=React.useState(false);
-  const [err,setErr]=React.useState('');
-  const [ok,setOk]=React.useState('');
-  const debRef=React.useRef(null);
-
-  // live email search
-  React.useEffect(()=>{
-    clearTimeout(debRef.current);
-    if(!email||email.length<2){ setSuggestions([]); return; }
-    debRef.current=setTimeout(async()=>{
-      const res=await searchUsersByEmail(email.toLowerCase(),user?.uid);
-      setSuggestions(res||[]);
-    },300);
-  },[email]);
-
-  async function invite(){
-    const e=email.trim().toLowerCase();
-    if(!e||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)){ setErr('Enter a valid email.'); return; }
-    if(members.find(m=>m.email===e)){ setErr('Already a member.'); return; }
-    setErr(''); setBusy(true);
-    // find the registered user
-    const found=suggestions.find(s=>s.email===e)||(await searchUsersByEmail(e,user?.uid))[0];
-    if(!found||found.email!==e){
-      setErr('No account found for that email. They must sign up first.'); setBusy(false); return;
-    }
-    try{
-      await shareWorkspaceWithUser(
-        {wsId:workspace.id,wsName:workspace.name,ownerId:user.uid,
-          ownerEmail:user.email,ownerDisplayName:user.displayName,
-          snapshot:currentSnapshot},
-        {uid:found.uid,email:found.email,role:'editor'},
-      );
-      const next=[...members,{uid:found.uid,email:found.email,role:'editor',addedAt:Date.now()}];
-      setMembers(next); onUpdateMembers(next);
-      setEmail(''); setSuggestions([]);
-      setOk(`Invite sent to ${found.email}`);
-      setTimeout(()=>setOk(''),3000);
-    }catch(e){ setErr('Failed to share. Try again.'); }
-    setBusy(false);
-  }
-
-  function remove(em){
-    const next=members.filter(m=>m.email!==em);
-    setMembers(next); onUpdateMembers(next);
-  }
-
-  if(!isFirebaseConfigured){
-    return <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()}>
-        <div className="modal-h"><h3>Share workspace</h3>
-          <button className="x" onClick={onClose}><Ic n="x"/></button></div>
-        <div className="empty-state" style={{padding:'32px 24px'}}>
-          <div className="es-em">🔒</div>
-          <b>Cloud sync required</b>
-          <p style={{marginTop:6,fontSize:13,color:'var(--text-3)'}}>
-            Workspace sharing requires Firebase. Configure .env to enable it.
-          </p>
-        </div>
-      </div>
-    </div>;
-  }
-
-  return <div className="overlay" onClick={onClose}>
-    <div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-h">
-        <h3>Share "{workspace.name}"</h3>
-        <button className="x" onClick={onClose}><Ic n="x"/></button>
-      </div>
-      <div style={{padding:'16px 20px 20px'}}>
-        <div style={{marginBottom:16,padding:'10px 14px',borderRadius:8,
-          background:'var(--accent-soft)',fontSize:13,color:'var(--accent)'}}>
-          Members will see this workspace in their workspace menu and receive an inbox notification.
-        </div>
-        <div style={{position:'relative',marginBottom:suggestions.length?0:16}}>
-          <div style={{display:'flex',gap:8}}>
-            <input className="fld" placeholder="Search by email address…" autoFocus
-              value={email} onChange={e=>{setEmail(e.target.value);setErr('');}}
-              onKeyDown={e=>e.key==='Enter'&&invite()} style={{flex:1}}/>
-            <button className="btn primary" onClick={invite} disabled={busy}
-              style={{padding:'7px 14px',flexShrink:0}}>
-              {busy?'…':'Invite'}
-            </button>
-          </div>
-          {suggestions.length>0&&
-            <div className="email-suggest-drop">
-              {suggestions.map(u=>
-                <div key={u.uid} className="email-suggest-item"
-                  onMouseDown={e=>{e.preventDefault();setEmail(u.email);setSuggestions([]);}}>
-                  <div className="share-ava" style={{width:26,height:26,fontSize:11}}>
-                    {u.photoURL
-                      ? <img src={u.photoURL} style={{width:'100%',height:'100%',objectFit:'cover',borderRadius:'50%'}} referrerPolicy="no-referrer"/>
-                      : u.email[0].toUpperCase()}
-                  </div>
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{fontWeight:500,fontSize:13}}>{u.displayName||u.email}</div>
-                    <div style={{fontSize:11,color:'var(--text-3)'}}>{u.email}</div>
-                  </div>
-                </div>
-              )}
-            </div>}
-        </div>
-        {err&&<div className="auth-error" style={{marginBottom:12,marginTop:8}}>{err}</div>}
-        {ok&&<div style={{color:'var(--accent)',fontSize:13,marginBottom:12,marginTop:8}}>{ok}</div>}
-        {members.length>0
-          ? <><div className="menu-h" style={{padding:'8px 0 8px'}}>MEMBERS ({members.length})</div>
-            {members.map((m,i)=>
-              <div key={i} className="share-person-row">
-                <div className="share-ava">{m.email[0].toUpperCase()}</div>
-                <div style={{flex:1}}>
-                  <div style={{fontWeight:500,fontSize:13}}>{m.email}</div>
-                  <div style={{fontSize:11,color:'var(--text-3)'}}>Full editor access</div>
-                </div>
-                <button className="icon-btn" style={{width:24,height:24}} title="Remove member"
-                  onClick={()=>remove(m.email)}>
-                  <Ic n="x" style={{width:12,height:12}}/></button>
-              </div>
-            )}</>
-          : <div className="share-empty-hint">No members yet. Invite people to collaborate.</div>}
-      </div>
-    </div>
-  </div>;
-}
-
-/* ---------------- Delete Workspace Modal ---------------- */
-function DeleteWorkspaceModal({workspace,onDeleteAll,onLeave,onClose}){
-  const [step,setStep]=React.useState('choose'); // 'choose' | 'transfer'
-  const [selected,setSelected]=React.useState(null);
-  const [busy,setBusy]=React.useState(false);
-  const [err,setErr]=React.useState('');
-  const members=workspace.members||[];
-
-  async function handleTransfer(){
-    if(!selected){setErr('Select a member to transfer ownership to.');return;}
-    setBusy(true);setErr('');
-    try{await onLeave(selected);}
-    catch(e){setErr('Transfer failed. Please try again.');setBusy(false);}
-  }
-
-  return <div className="overlay" onClick={onClose}>
-    <div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-h">
-        <h3>{step==='choose'?`Delete "${workspace.name}"`:'Transfer ownership'}</h3>
-        <button className="x" onClick={onClose}><Ic n="x"/></button>
-      </div>
-
-      {step==='choose'
-        ?<div style={{padding:'16px 20px 20px'}}>
-          <div style={{fontSize:13,color:'var(--text-2)',marginBottom:20,lineHeight:1.6}}>
-            This workspace is shared with <strong>{members.length} member{members.length!==1?'s':''}</strong>. How would you like to proceed?
-          </div>
-          <div style={{display:'flex',flexDirection:'column',gap:10}}>
-            <button style={{padding:'12px 16px',textAlign:'left',border:'1.5px solid #ef4444',
-              borderRadius:8,background:'transparent',cursor:'pointer',width:'100%'}}
-              onClick={()=>{onClose();onDeleteAll();}}>
-              <div style={{fontWeight:600,color:'#ef4444',fontSize:13,marginBottom:3}}>Delete for everyone</div>
-              <div style={{fontSize:11,color:'var(--text-3)'}}>Permanently removes this workspace and all its pages for every member</div>
-            </button>
-            <button style={{padding:'12px 16px',textAlign:'left',border:'1.5px solid var(--border)',
-              borderRadius:8,background:'transparent',cursor:'pointer',width:'100%'}}
-              onClick={()=>setStep('transfer')}>
-              <div style={{fontWeight:600,fontSize:13,marginBottom:3}}>Delete only for me</div>
-              <div style={{fontSize:11,color:'var(--text-3)'}}>Transfer ownership to a member and remove from your list</div>
-            </button>
-          </div>
-        </div>
-
-        :<div style={{padding:'16px 20px 20px'}}>
-          <div style={{fontSize:13,color:'var(--text-2)',marginBottom:14,lineHeight:1.5}}>
-            Choose a member to become the new owner of <strong>"{workspace.name}"</strong>:
-          </div>
-          <div style={{display:'flex',flexDirection:'column',gap:6,marginBottom:16,maxHeight:240,overflowY:'auto'}}>
-            {members.map(m=><div key={m.uid||m.email}
-              style={{display:'flex',alignItems:'center',gap:10,padding:'9px 10px',borderRadius:8,
-                cursor:'pointer',
-                border:`1.5px solid ${selected?.uid===m.uid?'var(--accent)':'transparent'}`,
-                background:selected?.uid===m.uid?'var(--accent-soft)':'var(--bg-2)'}}
-              onClick={()=>{setSelected(m);setErr('');}}>
-              <div className="share-ava">{m.email[0].toUpperCase()}</div>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontWeight:500,fontSize:13,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.email}</div>
-                <div style={{fontSize:11,color:'var(--text-3)'}}>Will become new owner</div>
-              </div>
-              {selected?.uid===m.uid&&<Ic n="check" style={{width:14,height:14,color:'var(--accent)',flexShrink:0}}/>}
-            </div>)}
-          </div>
-          {err&&<div className="auth-error" style={{marginBottom:12}}>{err}</div>}
-          <div style={{display:'flex',gap:8,justifyContent:'space-between',alignItems:'center'}}>
-            <button className="btn ghost" onClick={()=>{setStep('choose');setSelected(null);setErr('');}}>← Back</button>
-            <button className="btn primary" onClick={handleTransfer} disabled={busy||!selected}>
-              {busy?'Transferring…':'Transfer & Leave'}
-            </button>
-          </div>
-        </div>}
-    </div>
-  </div>;
-}
-
-/* ---------------- Shared Panel (right side) ---------------- */
-function SharedPanel({nodes,sharedNodes,onOpen,onUnshare,onClose}){
-  const list=Object.entries(sharedNodes||{})
-    .filter(([,shares])=>shares&&shares.length>0)
-    .map(([id,shares])=>({node:nodes[id],id,shares}))
-    .filter(x=>x.node&&!x.node.trashed);
-  return <div className="shared-panel">
-    <div className="shared-panel-h">
-      <div style={{display:'flex',alignItems:'center',gap:7,fontSize:12,fontWeight:650,
-        color:'var(--text-2)',letterSpacing:'.025em'}}>
-        <Ic n="share" style={{width:13,height:13}}/>
-        SHARED
-        {list.length>0&&<span className="shared-count">{list.length}</span>}
-      </div>
-      <button className="icon-btn" style={{width:22,height:22}} onClick={onClose}
-        title="Close shared panel">
-        <Ic n="x" style={{width:13,height:13}}/>
-      </button>
-    </div>
-    {list.length===0
-      ? <div className="shared-panel-empty">
-          <div style={{fontSize:36,marginBottom:10}}>🔗</div>
-          <b>No shared pages yet</b>
-          <p>Click the share icon on any page in the sidebar to share it.</p>
-        </div>
-      : <div style={{overflowY:'auto',flex:1,padding:'6px 8px 20px'}}>
-          {list.map(({node,id,shares})=>
-            <div key={id} className="shared-doc-card">
-              <div className="sdc-top" onClick={()=>onOpen(id)}>
-                <span style={{fontSize:16,flexShrink:0}}>{node.icon||'📄'}</span>
-                <span className="sdc-title">{node.title||'Untitled'}</span>
-              </div>
-              <div className="sdc-people">
-                {shares.map((s,i)=>
-                  <div key={i} className="sdc-person">
-                    <div className="sdc-ava">{s.email[0].toUpperCase()}</div>
-                    <span className="sdc-email">{s.email}</span>
-                    <span className="sdc-perm">{s.permission}</span>
-                    <button className="sdc-rm" onClick={()=>onUnshare(id,s.email)}
-                      title="Remove access">
-                      <Ic n="x" style={{width:9,height:9}}/>
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-    }
-  </div>;
-}
-
-/* ---------------- Sidebar tree item ---------------- */
 function TreeItem({node,nodes,depth,currentId,expanded,toggleExp,openPage,addChild,
   trashNode,archiveNode,onDrop,setModal,favorites,toggleFav,duplicate,exportPage,renameNode}){
   const kids=Object.values(nodes).filter(n=>n.parentId===node.id&&!n.trashed&&!n.archived)
@@ -2524,11 +2091,8 @@ function TreeItem({node,nodes,depth,currentId,expanded,toggleExp,openPage,addChi
     {label:'Export as Markdown',action:()=>exportPage&&exportPage(node.id)},
     {sep:true},
     {label:isFav?'Remove from Favorites':'Add to Favorites',action:()=>toggleFav&&toggleFav(node.id)},
-    ...(isRoot?[{label:node.section==='private'?'Move to Shared':'Move to Private',
-      action:()=>renameNode&&renameNode(node.id,node.title,node.section==='private'?'shared':'private')}]:[]),
     {label:'Copy link',action:()=>navigator.clipboard?.writeText(window.location.href+'#'+node.id)},
     {sep:true},
-    {label:'Share',action:()=>setModal&&setModal({type:'share-doc',nodeId:node.id})},
     {label:'Archive',action:()=>archiveNode&&archiveNode(node.id)},
     {label:'Move to Trash',action:()=>trashNode&&trashNode(node.id),danger:true},
   ];
@@ -2571,17 +2135,15 @@ function TreeItem({node,nodes,depth,currentId,expanded,toggleExp,openPage,addChi
 /* ---------------- Sidebar ---------------- */
 function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,addChild,
   trashNode,archiveNode,onDrop,addTop,setModal,workspaces,activeWorkspaceId,
-  onSwitchWorkspace,onCreateWorkspace,onShareWorkspace,onDeleteWorkspace,onReconnectLocal,onRelinkLocal,
-  onOpenExistingWorkspace,onBrowseCloudWorkspaces,
-  toggleFav,duplicate,exportPage,renameNode,user,notifCount}){
-  const roots=sec=>Object.values(nodes)
-    .filter(n=>n.parentId===null&&n.section===sec&&!n.trashed&&!n.archived)
+  onSwitchWorkspace,onCreateWorkspace,onDeleteWorkspace,onReconnectLocal,
+  toggleFav,duplicate,exportPage,renameNode,onGoHome}){
+  const roots=Object.values(nodes)
+    .filter(n=>n.parentId===null&&!n.trashed&&!n.archived)
     .sort((a,b)=>(a.sort||0)-(b.sort||0));
   const favNodes=favorites.map(id=>nodes[id]).filter(n=>n&&!n.trashed&&!n.archived);
   const [wsPop,setWsPop]=React.useState(null);
-  const activeWs=(workspaces||[]).find(w=>w.id===activeWorkspaceId)||
-    {id:'ws_main',name:'My Workspace',isPersonal:true,members:[]};
-  const memberCount=(activeWs.members||[]).length;
+  const activeWs=(workspaces||[]).find(w=>w.id===activeWorkspaceId)||{id:'',name:'Workspace',type:'local'};
+  const wsSub=activeWs.type==='gdrive'?`${GDRIVE.emoji} Google Drive`:'💻 Local folder';
   const navRow=(icon,label,onClick,kbd,active)=>
     <div className={cx('tree-item',active&&'sel')} onClick={onClick}>
       <span className="tree-emoji" style={{fontSize:14}}><Ic n={icon==='layout'?'template':icon==='edit'?'plus':icon==='close'?'x':icon}/></span>
@@ -2592,34 +2154,22 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
     <div className="ws">
       <div className="ws-btn" onClick={e=>setWsPop(e.currentTarget.getBoundingClientRect())}
         title="Switch workspace">
-        <div className="ws-ava">
-          {user?.photoURL
-            ? <img src={user.photoURL} alt={activeWs.name[0]} referrerPolicy="no-referrer"/>
-            : activeWs.name[0].toUpperCase()}
-        </div>
+        <div className="ws-ava">{(activeWs.name||'W')[0].toUpperCase()}</div>
         <div className="ws-name">{activeWs.name}
-          <small>{activeWs.isLocalFile?`💻 Local · ${activeWs.dirName||'folder'}`:activeWs.cloudProvider?`${CLOUD_PROVIDERS[activeWs.cloudProvider]?.emoji||'☁'} ${CLOUD_PROVIDERS[activeWs.cloudProvider]?.shortName||activeWs.cloudProvider}`:activeWs.isPersonal?'Personal':'Shared'} · {memberCount+1} member{memberCount!==0?'s':''}</small>
+          <small>{wsSub}</small>
         </div>
       </div>
-      <div className="icon-btn" title="New page" onClick={()=>addTop('private')}>
+      <div className="icon-btn" title="New page" onClick={()=>addTop()}>
         <Ic n="plus"/></div>
       {wsPop&&<WorkspaceSwitcher rect={wsPop} workspaces={workspaces||[activeWs]}
         activeId={activeWorkspaceId} onSwitch={onSwitchWorkspace}
-        onCreate={onCreateWorkspace} onShare={onShareWorkspace} onDelete={onDeleteWorkspace}
-        onReconnectLocal={onReconnectLocal} onRelinkLocal={onRelinkLocal}
-        onOpenExisting={onOpenExistingWorkspace} onBrowseCloud={onBrowseCloudWorkspaces}
+        onCreate={onCreateWorkspace} onDelete={onDeleteWorkspace}
+        onReconnect={onReconnectLocal}
         onClose={()=>setWsPop(null)}/>}
     </div>
     <div className="nav">
       {navRow('search','Search',()=>setModal({type:'search'}),'⌘K')}
       {navRow('dashboard','Home',()=>openPage(DASH_ID),null,currentId===DASH_ID)}
-      <div className={cx('tree-item')} onClick={()=>setModal({type:'inbox'})}
-        style={{position:'relative'}}>
-        <span className="tree-emoji" style={{fontSize:14}}><Ic n="inbox"/></span>
-        <span className="tree-label">Inbox</span>
-        {notifCount>0&&<span className="notif-badge">{notifCount}</span>}
-      </div>
-      {navRow('settings','Settings',()=>setModal({type:'settings'}))}
     </div>
     <div className="nav-scroll">
       {favNodes.length>0&&<>
@@ -2635,38 +2185,33 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
         </div>
       </>}
 
-      <div className="sec-title"><span>My Workspace</span>
-        <button title="Add a page" onClick={()=>addTop('private')}><Ic n="plus"/></button>
+      <div className="sec-title"><span>Pages</span>
+        <button title="Add a page" onClick={()=>addTop()}><Ic n="plus"/></button>
       </div>
       <div className="nav">
-        {roots('private').map(n=>
+        {roots.map(n=>
           <TreeItem key={n.id} node={n} nodes={nodes} depth={0} currentId={currentId}
             expanded={expanded} toggleExp={toggleExp} openPage={openPage}
             addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
             setModal={setModal} favorites={favorites} toggleFav={toggleFav}
             duplicate={duplicate} exportPage={exportPage} renameNode={renameNode}/>)}
-        {roots('private').length===0&&<div className="tree-empty">No pages yet</div>}
-      </div>
-
-      <div className="sec-title"><span>Shared</span>
-        <button title="Add a page" onClick={()=>addTop('shared')}><Ic n="plus"/></button>
-      </div>
-      <div className="nav">
-        {roots('shared').map(n=>
-          <TreeItem key={n.id} node={n} nodes={nodes} depth={0} currentId={currentId}
-            expanded={expanded} toggleExp={toggleExp} openPage={openPage}
-            addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
-            setModal={setModal} favorites={favorites} toggleFav={toggleFav}
-            duplicate={duplicate} exportPage={exportPage} renameNode={renameNode}/>)}
-        {roots('shared').length===0&&<div className="tree-empty">No shared pages</div>}
+        {roots.length===0&&<div className="tree-empty">No pages yet</div>}
       </div>
 
       <div className="nav" style={{marginTop:10}}>
-        {navRow('layout','Templates',()=>setModal({type:'templates'}))}
+        {navRow('layout','Templates',()=>openPage(TEMPLATES_ID),null,currentId===TEMPLATES_ID)}
         {navRow('import','Import',()=>setModal({type:'import'}))}
         {navRow('database','Storage',()=>openPage(STORAGE_ID),null,currentId===STORAGE_ID)}
-        {navRow('archive','Archive',()=>setModal({type:'archive'}))}
-        {navRow('trash','Trash',()=>setModal({type:'trash'}))}
+        {navRow('archive','Archive',()=>openPage(ARCHIVE_ID),null,currentId===ARCHIVE_ID)}
+        {navRow('trash','Trash',()=>openPage(TRASH_ID),null,currentId===TRASH_ID)}
+      </div>
+    </div>
+    <div className="sidebar-foot">
+      {navRow('settings','Settings',()=>setModal({type:'settings'}))}
+      <div className="tree-item ws-close" onClick={onGoHome}
+        title="Close this workspace and return to the homepage">
+        <span className="tree-emoji" style={{fontSize:14}}><Ic n="log-out"/></span>
+        <span className="tree-label">Close workspace</span>
       </div>
     </div>
   </div>;
@@ -2971,22 +2516,14 @@ function StoragePage({uploads,activeWorkspace,onDeleteUpload,onUpload}){
   }
 
   let locationIcon,locationLabel,locationDetail,folderPath;
-  if(activeWorkspace?.isLocalFile){
-    locationIcon='💻'; locationLabel='Local folder';
-    folderPath=(activeWorkspace.dirName||'workspace')+' / uploads';
-    locationDetail='Files are stored in your local workspace folder under an uploads/ subfolder.';
-  } else if(activeWorkspace?.cloudProvider==='gdrive'){
+  if(activeWorkspace?.type==='gdrive'){
     locationIcon='📁'; locationLabel='Google Drive';
-    folderPath='Drive app folder / workspace-uploads';
-    locationDetail='Files are embedded in the workspace data saved to Google Drive.';
-  } else if(activeWorkspace?.isShared){
-    locationIcon='👥'; locationLabel='Shared workspace';
-    folderPath='Cloud storage (shared)';
-    locationDetail='Files are stored in the shared workspace cloud data.';
+    folderPath=(activeWorkspace.name||'Workspace')+' / Upload';
+    locationDetail='Files are stored in your Google Drive workspace under an Upload/ folder.';
   } else {
-    locationIcon='☁️'; locationLabel='Cloud storage';
-    folderPath='Firebase cloud workspace data';
-    locationDetail='Files are embedded in workspace cloud data as encoded content.';
+    locationIcon='💻'; locationLabel='Local folder';
+    folderPath=(activeWorkspace?.name||'Workspace')+' / Upload';
+    locationDetail='Files are stored in your local workspace folder under an Upload/ subfolder.';
   }
 
   const VIEW_BTNS=[
@@ -3102,34 +2639,13 @@ function StoragePage({uploads,activeWorkspace,onDeleteUpload,onUpload}){
 }
 
 /* ---------------- Storage location badge ---------------- */
-function StorageBadge({ws, onCreateWorkspace}) {
+function StorageBadge({ws, onCreateWorkspace, onGoHome}) {
   const [pop, setPop] = useState(null);
   if (!ws) return null;
-  const prov = ws.cloudProvider ? CLOUD_PROVIDERS[ws.cloudProvider] : null;
-
-  let BIcon, label, detail, subDetail;
-  if (ws.isLocalFile) {
-    BIcon = <HardDrive size={12}/>;
-    label = 'Local';
-    detail = 'Saved on this computer';
-    subDetail = ws.dirName || 'Local folder';
-  } else if (prov) {
-    BIcon = <span style={{fontSize:11,lineHeight:1}}>{prov.emoji}</span>;
-    label = prov.shortName;
-    detail = `Saved to ${prov.name}`;
-    subDetail = null;
-  } else if (ws.isShared) {
-    BIcon = <Users size={12}/>;
-    label = 'Shared';
-    detail = 'Shared workspace';
-    subDetail = ws.ownerEmail ? `Owner: ${ws.ownerEmail}` : null;
-  } else {
-    BIcon = <Cloud size={12}/>;
-    label = 'Cloud';
-    detail = 'Saved to Firebase';
-    subDetail = null;
-  }
-
+  const isLocal = ws.type === 'local';
+  const label = isLocal ? 'Local' : GDRIVE.shortName;
+  const detail = isLocal ? 'Saved on this computer' : `Saved to ${GDRIVE.name}`;
+  const BIcon = isLocal ? <HardDrive size={12}/> : <span style={{fontSize:11,lineHeight:1}}>{GDRIVE.emoji}</span>;
   return <>
     <div className="storage-badge" onClick={e=>setPop(e.currentTarget.getBoundingClientRect())}
       title={`Storage: ${detail}`}>
@@ -3143,36 +2659,43 @@ function StorageBadge({ws, onCreateWorkspace}) {
         <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:12}}>
           <div style={{width:40,height:40,borderRadius:10,flexShrink:0,display:'flex',
             alignItems:'center',justifyContent:'center',fontSize:22,
-            background: ws.isLocalFile?'linear-gradient(135deg,#7c3aed,#a78bfa)'
-              :prov?prov.gradient
-              :ws.isShared?'linear-gradient(135deg,#10b981,#059669)'
-              :'linear-gradient(135deg,#5b86e5,#36d1dc)'}}>
-            {ws.isLocalFile?'💻':prov?prov.emoji:ws.isShared?'👥':'☁'}
+            background: isLocal?'linear-gradient(135deg,#7c3aed,#a78bfa)':GDRIVE.gradient}}>
+            {isLocal?'💻':GDRIVE.emoji}
           </div>
           <div style={{minWidth:0}}>
             <div style={{fontWeight:600,fontSize:14,whiteSpace:'nowrap',overflow:'hidden',
               textOverflow:'ellipsis'}}>{detail}</div>
-            {subDetail&&<div style={{fontSize:11,color:'var(--text-3)',marginTop:2,
-              whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{subDetail}</div>}
+            <div style={{fontSize:11,color:'var(--text-3)',marginTop:2,whiteSpace:'nowrap',
+              overflow:'hidden',textOverflow:'ellipsis'}}>{ws.name}</div>
           </div>
         </div>
         <div className="menu-sep"/>
         <div className="mi" style={{borderRadius:7,marginTop:4}}
           onMouseDown={e=>{e.preventDefault();setPop(null);onCreateWorkspace();}}>
           <div className="mi-ic"><Plus size={14}/></div>
-          <div className="mi-tx">Save to a different location…</div>
+          <div className="mi-tx">Connect another workspace…</div>
         </div>
+        {onGoHome&&<div className="mi" style={{borderRadius:7}}
+          onMouseDown={e=>{e.preventDefault();setPop(null);onGoHome();}}>
+          <div className="mi-ic"><Home size={14}/></div>
+          <div className="mi-tx">Close &amp; go to homepage</div>
+        </div>}
       </div>
     </Popup>}
   </>;
 }
 
+
+
 /* ---------------- Topbar ---------------- */
 function Topbar({node,nodes,openPage,toggleSidebar,sidebarOpen,toggleFav,isFav,setModal,
-  sharedCount,onToggleSharedPanel,notifCount,downloadPage,activeWorkspace}){
+  downloadPage,activeWorkspace,onGoHome}){
   const chain=[]; let c=node;
   while(c){ chain.unshift(c); c=c.parentId?nodes[c.parentId]:null; }
   const [dlMenu,setDlMenu]=useState(null);
+  // On-disk location of the current page within the local workspace folder.
+  const diskPath=activeWorkspace?.type==='local'&&node
+    ? `${activeWorkspace.name}/${nodeDiskPath({nodes},node.id)}` : null;
   return <div className="topbar">
     {!sidebarOpen&&<div className="tb-btn" title="Open sidebar" onClick={toggleSidebar}>
       <Ic n="menu" style={{width:17,height:17}}/></div>}
@@ -3185,19 +2708,17 @@ function Topbar({node,nodes,openPage,toggleSidebar,sidebarOpen,toggleFav,isFav,s
         </div>
       </React.Fragment>)}
     </div>
-    <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}/>
+    {diskPath&&<div className="file-loc" title={"Location inside your workspace folder:\n"+diskPath}
+      onClick={()=>navigator.clipboard?.writeText(diskPath)}
+      style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'var(--text-3)',
+        fontFamily:'ui-monospace,SFMono-Regular,Menlo,monospace',cursor:'copy',
+        maxWidth:340,minWidth:0,marginLeft:6}}>
+      <HardDrive size={12} style={{flexShrink:0}}/>
+      <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{diskPath}</span>
+    </div>}
+    <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
+      onGoHome={onGoHome}/>
     <div className="topbar-actions">
-      <div className="tb-btn" onClick={()=>setModal({type:'share-doc',nodeId:node.id})}>Share</div>
-      <div className="tb-btn" title="Shared documents" style={{position:'relative'}}
-        onClick={onToggleSharedPanel}>
-        <Ic n="share" style={{width:17,height:17}}/>
-        {sharedCount>0&&<span className="tb-badge">{sharedCount}</span>}
-      </div>
-      <div className="tb-btn" title="Inbox" onClick={()=>setModal({type:'inbox'})}
-        style={{position:'relative'}}>
-        <Ic n="inbox" style={{width:17,height:17}}/>
-        {notifCount>0&&<span className="tb-badge">{notifCount}</span>}
-      </div>
       <div className="tb-btn" title={isFav?'Favorited':'Add to Favorites'}
         onClick={()=>toggleFav(node.id)} style={{color:isFav?'#eab308':undefined}}>
         <Ic n="star" style={{width:17,height:17}}/></div>
@@ -3519,57 +3040,50 @@ function SearchModal({nodes,openPage,onClose}){
 }
 
 /* ---------------- Trash modal ---------------- */
-function TrashModal({nodes,restore,deleteForever,onClose}){
+/* Full-page list of trashed / archived pages (shared layout). */
+function BinPage({emoji,title,subtitle,folder,rows,searchLabel,emptyText,onPrimary,primaryLabel,onDelete}){
   const [q,setQ]=React.useState('');
-  const trashed=Object.values(nodes).filter(n=>n.trashed)
-    .filter(n=>(n.title||'').toLowerCase().includes(q.toLowerCase()));
-  return <div className="overlay" onClick={onClose}>
-    <div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-h"><h3>Trash</h3>
-        <div className="x" onClick={onClose}><Ic n="x"/></div></div>
-      <div className="search-in" style={{borderBottom:'1px solid var(--border)'}}>
-        <Ic n="search"/>
-        <input placeholder="Search in Trash…" value={q} onChange={e=>setQ(e.target.value)}/>
-      </div>
-      <div className="search-res">
-        {trashed.length===0&&<div className="search-empty">Trash is empty</div>}
-        {trashed.map(n=>
-          <div key={n.id} className="sr">
-            <span className="sr-em">{n.icon||'📄'}</span>
-            <div className="sr-tx"><b>{n.title||'Untitled'}</b></div>
-            <button className="btn ghost" onClick={()=>restore(n.id)}>Restore</button>
-            <button className="btn ghost" style={{color:'#d44c47'}} onClick={()=>deleteForever(n.id)}>Delete</button>
-          </div>)}
-      </div>
+  const list=rows.filter(n=>(n.title||'').toLowerCase().includes(q.toLowerCase()));
+  return <div className="binpage">
+    <div className="binpage-head">
+      <div className="binpage-title"><span className="binpage-em">{emoji}</span>{title}</div>
+      <div className="binpage-sub">{subtitle} Kept in the <code>{folder}/</code> folder.</div>
     </div>
+    <div className="binpage-tools">
+      <div className="search-in"><Ic n="search"/>
+        <input placeholder={searchLabel} value={q} onChange={e=>setQ(e.target.value)}/></div>
+      <span className="binpage-count">{list.length} item{list.length!==1?'s':''}</span>
+    </div>
+    {list.length===0
+      ? <div className="binpage-empty"><div className="bpe-em">{emoji}</div><b>{emptyText}</b></div>
+      : <div className="binpage-list">
+          {list.map(n=>
+            <div key={n.id} className="bp-row">
+              <span className="bp-em">{n.icon||(n.kind==='database'?'🗄️':'📄')}</span>
+              <div className="bp-tx"><b>{n.title||'Untitled'}</b>
+                <small>{n.kind==='database'?'Database':'Page'}</small></div>
+              <button className="btn ghost" onClick={()=>onPrimary(n.id)}>{primaryLabel}</button>
+              <button className="btn ghost" style={{color:'#d44c47'}} onClick={()=>onDelete(n.id)}>Delete</button>
+            </div>)}
+        </div>}
   </div>;
 }
 
+function TrashPage({nodes,restore,deleteForever}){
+  return <BinPage emoji="🗑️" title="Trash" folder="trash"
+    subtitle="Deleted pages you can restore or remove permanently."
+    searchLabel="Search in Trash…" emptyText="Trash is empty"
+    rows={Object.values(nodes).filter(n=>n.trashed)}
+    primaryLabel="Restore" onPrimary={restore} onDelete={deleteForever}/>;
+}
+
 /* ---------------- Archive modal ---------------- */
-function ArchiveModal({nodes,unarchiveNode,deleteForever,onClose}){
-  const [q,setQ]=React.useState('');
-  const archived=Object.values(nodes).filter(n=>n.archived&&!n.trashed)
-    .filter(n=>(n.title||'').toLowerCase().includes(q.toLowerCase()));
-  return <div className="overlay" onClick={onClose}>
-    <div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-h"><h3>Archive</h3>
-        <div className="x" onClick={onClose}><Ic n="x"/></div></div>
-      <div className="search-in" style={{borderBottom:'1px solid var(--border)'}}>
-        <Ic n="search"/>
-        <input placeholder="Search in Archive…" value={q} onChange={e=>setQ(e.target.value)}/>
-      </div>
-      <div className="search-res">
-        {archived.length===0&&<div className="search-empty">Archive is empty</div>}
-        {archived.map(n=>
-          <div key={n.id} className="sr">
-            <span className="sr-em">{n.icon||'📄'}</span>
-            <div className="sr-tx"><b>{n.title||'Untitled'}</b></div>
-            <button className="btn ghost" onClick={()=>{unarchiveNode(n.id);}} title="Restore to workspace">Restore</button>
-            <button className="btn ghost" style={{color:'#d44c47'}} onClick={()=>deleteForever(n.id)}>Delete</button>
-          </div>)}
-      </div>
-    </div>
-  </div>;
+function ArchivePage({nodes,unarchiveNode,deleteForever}){
+  return <BinPage emoji="📦" title="Archive" folder="archive"
+    subtitle="Archived pages you can restore to your workspace."
+    searchLabel="Search in Archive…" emptyText="Archive is empty"
+    rows={Object.values(nodes).filter(n=>n.archived&&!n.trashed)}
+    primaryLabel="Restore" onPrimary={unarchiveNode} onDelete={deleteForever}/>;
 }
 
 /* ---------------- Templates modal ---------------- */
@@ -3831,57 +3345,44 @@ const TAG_COLORS={
   divider:'#94a3b8',
 };
 
-function TemplatesModal({create,onClose}){
+function TemplatesPage({create}){
   const [cat,setCat]=useState('all');
   const filtered=cat==='all'?TEMPLATES:TEMPLATES.filter(t=>t.cat===cat);
-  return <div className="overlay" onClick={onClose}>
-    <div className="modal" style={{width:780,maxHeight:'90vh',display:'flex',flexDirection:'column'}}
-      onClick={e=>e.stopPropagation()}>
-      <div className="modal-h">
-        <h3>Templates</h3>
-        <button className="x" onClick={onClose}><Ic n="x"/></button>
-      </div>
+  return <div className="binpage">
+    <div className="binpage-head">
+      <div className="binpage-title"><span className="binpage-em">🧩</span>Templates</div>
+      <div className="binpage-sub">Start a new page from a ready-made template — it’s added to your workspace.</div>
+    </div>
 
-      {/* ── Category pills ── */}
-      <div style={{display:'flex',gap:6,padding:'0 24px 16px',flexWrap:'wrap',flexShrink:0}}>
-        {TEMPLATE_CATS.map(c=>(
-          <button key={c.id}
-            style={{fontSize:12,padding:'5px 14px',borderRadius:20,border:'none',cursor:'pointer',
-              fontWeight:600,transition:'background .13s,color .13s',
-              background:cat===c.id?'var(--accent)':'var(--bg-3)',
-              color:cat===c.id?'#fff':'var(--text-2)'}}
-            onClick={()=>setCat(c.id)}>{c.label}
-          </button>
-        ))}
-      </div>
+    {/* ── Category pills ── */}
+    <div className="tpl-cats">
+      {TEMPLATE_CATS.map(c=>(
+        <button key={c.id} className={cx('tpl-cat',cat===c.id&&'sel')}
+          onClick={()=>setCat(c.id)}>{c.label}</button>
+      ))}
+    </div>
 
-      {/* ── Template grid ── */}
-      <div style={{overflowY:'auto',flex:1,padding:'0 24px 24px'}}>
-        <div className="tpl-grid-new">
-          {filtered.map(t=>(
-            <div key={t.id} className="tpl-card-new"
-              onClick={()=>{ create(t); onClose(); }}>
-              {/* coloured header */}
-              <div className="tpl-card-hd" style={{'--tpl-col':t.color}}>
-                <span className="tpl-card-em">{t.icon}</span>
-              </div>
-              {/* body */}
-              <div className="tpl-card-bd">
-                <div className="tpl-card-nm">{t.name}</div>
-                <div className="tpl-card-ds">{t.desc}</div>
-                {t.tags&&<div className="tpl-tags">
-                  {t.tags.map(tag=>(
-                    <span key={tag} className="tpl-tag"
-                      style={{'--tag-col':TAG_COLORS[tag]||'#94a3b8'}}>
-                      {tag}
-                    </span>
-                  ))}
-                </div>}
-              </div>
-              <div className="tpl-card-use">Use template →</div>
+    {/* ── Template grid ── */}
+    <div className="tpl-page-grid">
+      <div className="tpl-grid-new">
+        {filtered.map(t=>(
+          <div key={t.id} className="tpl-card-new" onClick={()=>create(t)}>
+            <div className="tpl-card-hd" style={{'--tpl-col':t.color}}>
+              <span className="tpl-card-em">{t.icon}</span>
             </div>
-          ))}
-        </div>
+            <div className="tpl-card-bd">
+              <div className="tpl-card-nm">{t.name}</div>
+              <div className="tpl-card-ds">{t.desc}</div>
+              {t.tags&&<div className="tpl-tags">
+                {t.tags.map(tag=>(
+                  <span key={tag} className="tpl-tag"
+                    style={{'--tag-col':TAG_COLORS[tag]||'#94a3b8'}}>{tag}</span>
+                ))}
+              </div>}
+            </div>
+            <div className="tpl-card-use">Use template →</div>
+          </div>
+        ))}
       </div>
     </div>
   </div>;
@@ -3929,264 +3430,94 @@ function PromptModal({title,placeholder,onConfirm,onClose}){
 }
 
 /* ---------------- Create Workspace Modal (cloud vs local) ---------------- */
-function CreateWorkspaceModal({onCreateCloud,onCreateLocal,onCreateCloudProvider,onOpenExisting,onClose}){
-  const [name,setName]=useState('');
-  const [type,setType]=useState('cloud'); // 'cloud' | 'local' | 'gdrive'
+function CreateWorkspaceModal({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,onClose}){
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState('');
-  const inputRef=useRef();
-  const localSupported=isLocalFSSupported();
-
-  useEffect(()=>{ setTimeout(()=>inputRef.current?.focus(),50); },[]);
-
-  async function submit(e){
-    e.preventDefault();
-    const n=name.trim(); if(!n) return;
-    setErr('');
-
-    if(type==='local'){
-      if(!localSupported){ setErr(LOCAL_FS_UNSUPPORTED_MSG); return; }
-      setBusy(true);
-      try{ await onCreateLocal(n); onClose(); }
-      catch(ex){ if(ex.name!=='AbortError') setErr(ex.message||'Could not access the folder.'); }
-      finally{ setBusy(false); }
-      return;
-    }
-
-    if(type==='gdrive'){
-      setBusy(true);
-      try{ await onCreateCloudProvider('gdrive',n); onClose(); }
-      catch(ex){ setErr(ex.message||'Failed to create workspace on Google Drive.'); }
-      finally{ setBusy(false); }
-      return;
-    }
-
-    // Firebase / local-browser cloud
-    onCreateCloud(n); onClose();
-  }
-
-  const label=(txt,upper)=>(
-    <div style={{fontSize:12,fontWeight:600,color:'var(--text-3)',marginBottom:8,
-      textTransform:upper?'uppercase':'none',letterSpacing:upper?'.04em':'normal'}}>{txt}</div>
-  );
-
-  const card=(t,icon,title,desc,badge,disabled)=>{
-    const sel=type===t;
-    return <div onClick={()=>!disabled&&setType(t)}
-      style={{flex:1,minWidth:'calc(33% - 6px)',
-        border:`2px solid ${sel?'var(--accent)':'var(--border)'}`,borderRadius:10,
-        padding:'12px 14px',cursor:disabled?'not-allowed':'pointer',transition:'border-color .15s',
-        background:sel?'var(--accent-soft)':'var(--bg-2)',opacity:disabled?.55:1,
-        boxSizing:'border-box'}}>
-      <div style={{fontSize:26,marginBottom:6,lineHeight:1}}>{icon}</div>
-      <div style={{fontWeight:600,fontSize:13,marginBottom:3}}>{title}</div>
-      <div style={{fontSize:11,color:'var(--text-3)',lineHeight:1.5}}>{desc}</div>
-      {badge&&<div style={{marginTop:6,fontSize:10,color:'var(--text-3)'}}>{badge}</div>}
-    </div>;
-  };
-
+  const wrap=fn=>async(...a)=>{ setErr('');setBusy(true);
+    try{ await fn(...a); }catch(e){ if(e?.name!=='AbortError') setErr(e?.message||'Something went wrong.'); }
+    finally{ setBusy(false); } };
   return <div className="overlay" onClick={onClose}>
-    <div className="modal" style={{width:540,maxHeight:'90vh',overflowY:'auto'}}
+    <div className="modal" style={{width:640,maxHeight:'90vh',overflowY:'auto'}}
       onClick={e=>e.stopPropagation()}>
       <div className="modal-h">
-        <h3>Create new workspace</h3>
+        <h3>Connect a workspace</h3>
         <button className="x" onClick={onClose}><Ic n="x"/></button>
       </div>
-      <form onSubmit={submit} style={{padding:'18px 24px 24px',display:'flex',flexDirection:'column',gap:16}}>
-
-        {/* ── Name ── */}
-        <div>
-          {label('Workspace name',true)}
-          <input ref={inputRef} className="fld" value={name} onChange={e=>setName(e.target.value)}
-            placeholder="e.g. Personal, Work, Research…"
-            style={{fontSize:15,width:'100%',boxSizing:'border-box'}}/>
-        </div>
-
-        {/* ── Storage row 1: Firebase + Local ── */}
-        <div>
-          {label('Where to save it',true)}
-          <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-            {card('cloud','☁️','Firebase Cloud',
-              isFirebaseConfigured?'Synced to all devices.':'Browser only (no Firebase).',
-              isFirebaseConfigured?null:'⚠ No Firebase')}
-            {card('local','💻','This Computer',
-              'JSON file in a folder you choose.',
-              localSupported?'Chrome / Edge required.':'⚠ Not available in this browser',
-              !localSupported)}
-          </div>
-          {!localSupported&&<div style={{marginTop:8,fontSize:12,color:'var(--text-2)',
-            background:'var(--bg-2)',borderRadius:8,padding:'10px 14px',display:'flex',
-            gap:8,alignItems:'flex-start'}}>
-            <span style={{fontSize:16}}>ℹ️</span>
-            <span>{LOCAL_FS_UNSUPPORTED_MSG}</span>
-          </div>}
-        </div>
-
-        {/* ── Storage row 2: Google Drive ── */}
-        <div>
-          {label('Or save to Google Drive',true)}
-          {card('gdrive','📁','Google Drive',
-            'Stored in your Drive app folder — never clutters your Drive.',
-            <span style={{color:'#10b981',fontWeight:600}}>✓ Ready to use</span>)}
-        </div>
-
-        {/* ── Context hints ── */}
-        {type==='local'&&localSupported&&<div style={{fontSize:12,color:'var(--text-2)',
-          background:'var(--bg-2)',borderRadius:8,padding:'10px 14px',display:'flex',
-          gap:8,alignItems:'flex-start'}}>
-          <span style={{fontSize:16}}>📂</span>
-          <span>Your OS file picker will open after clicking Create.
-          Choose any folder — a <code>workspace.json</code> file will be created inside it.
-          The app remembers the folder automatically.</span>
-        </div>}
-
-        {type==='gdrive'&&<div style={{fontSize:12,color:'var(--text-2)',
-          background:'var(--bg-2)',borderRadius:8,padding:'10px 14px',display:'flex',
-          gap:8,alignItems:'flex-start'}}>
-          <span style={{fontSize:16}}>📁</span>
-          <span>Since you're already signed in with Google, no extra login will appear.
-          On first use a brief <em>Drive access consent</em> prompt will pop up.
-          Your workspace file is saved in a hidden app folder and won't appear in
-          your regular Drive files.</span>
-        </div>}
-
-        {err&&<div style={{color:'#d44c47',fontSize:13,background:'#fff0f0',borderRadius:6,
-          padding:'8px 12px'}}>{err}</div>}
-
-        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:4}}>
-          {onOpenExisting&&localSupported&&
-            <button type="button" className="btn ghost"
-              title="Connect a workspace folder that already exists (e.g. copied from another machine)"
-              onClick={()=>{onOpenExisting();onClose();}} disabled={busy}>
-              📂 Open existing folder…
-            </button>}
-          <div style={{flex:1}}/>
-          <button type="button" className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="submit" className="btn primary"
-            disabled={!name.trim()||busy||(type==='local'&&!localSupported)}>
-            {busy
-              ?(type==='gdrive'?'Connecting to Google Drive…'
-                :type==='local'?'Opening folder picker…'
-                :'Creating…')
-              :'Create workspace →'}
-          </button>
-        </div>
-      </form>
+      <div style={{padding:'18px 24px 24px'}}>
+        <ConnectPanel
+          onLocalNew={wrap(async (n,d)=>{ await onLocalNew(n,d); })}
+          onLocalExisting={wrap(async()=>{ await onLocalExisting(); })}
+          onDriveNew={wrap(async (n,d)=>{ await onDriveNew(n,d); })}
+          onDriveExisting={wrap(async()=>{ await onDriveExisting(); })}
+          busy={busy} error={err}/>
+      </div>
     </div>
   </div>;
 }
 
+
+
 /* ---------------- Cloud Workspaces Browser Modal ---------------- */
-function CloudWorkspacesModal({providerId,connectedWorkspaces,onReconnect,onDeleteFromCloud,onClose}){
-  const prov=CLOUD_PROVIDERS[providerId];
-  const [files,setFiles]=useState(null);
+function CloudWorkspacesModal({connectedWorkspaces,onReconnect,onClose}){
+  const [folders,setFolders]=useState(null);
   const [error,setError]=useState('');
   const [busyId,setBusyId]=useState(null);
-
   useEffect(()=>{
     let cancelled=false;
-    listCloudWorkspaces(providerId)
-      .then(list=>{ if(!cancelled) setFiles(list); })
+    listDriveWorkspaces()
+      .then(list=>{ if(!cancelled) setFolders(list); })
       .catch(e=>{ if(!cancelled) setError(e.message); });
     return ()=>{ cancelled=true; };
-  },[providerId]);
-
-  const connectedByRef={};
-  const connectedByWsId={};
-  (connectedWorkspaces||[]).forEach(ws=>{
-    if(ws.cloudProvider===providerId){
-      if(ws.cloudFileRef) connectedByRef[ws.cloudFileRef]=ws;
-      connectedByWsId[ws.id]=ws;
-    }
-  });
-
-  const getWsId=file=>file.name.replace('workspace-ws-','').replace('.json','');
-
-  const handleReconnect=async file=>{
-    setBusyId(file.id);
-    try{
-      const wsId=getWsId(file);
-      await onReconnect(providerId,wsId,file.id,file.appProperties?.wsName||null);
-      onClose();
-    }catch(e){ alert(e.message); }
+  },[]);
+  const connectedIds=new Set((connectedWorkspaces||[]).filter(w=>w.type==='gdrive').map(w=>w.id));
+  const open=async f=>{
+    setBusyId(f.id);
+    try{ await onReconnect(f.id,f.name); onClose(); }
+    catch(e){ alert(e.message); }
     finally{ setBusyId(null); }
   };
-
-  const handleDelete=async file=>{
-    const wsId=getWsId(file);
-    const name=file.appProperties?.wsName||connectedByRef[file.id]?.name||connectedByWsId[wsId]?.name||'this workspace';
-    if(!confirm(`Permanently delete "${name}" from ${prov.name}?\n\nThis action cannot be undone.`)) return;
-    setBusyId(file.id);
-    try{
-      await onDeleteFromCloud(providerId,file.id,wsId);
-      setFiles(f=>f.filter(x=>x.id!==file.id));
-    }catch(e){ alert(e.message); }
-    finally{ setBusyId(null); }
-  };
-
   return <div className="overlay" onClick={onClose}>
     <div className="modal" style={{width:500,maxHeight:'90vh',overflowY:'auto'}}
       onClick={e=>e.stopPropagation()}>
       <div className="modal-h">
-        <h3>{prov.emoji} {prov.name} Workspaces</h3>
+        <h3>{GDRIVE.emoji} {GDRIVE.name} workspaces</h3>
         <button className="x" onClick={onClose}><Ic n="x"/></button>
       </div>
       <div style={{padding:'4px 24px 24px'}}>
-        {!error&&files===null&&
+        {!error&&folders===null&&
           <div style={{textAlign:'center',padding:'40px 0',color:'var(--text-3)',fontSize:14}}>
-            Loading from {prov.name}…
+            Loading from {GDRIVE.name}…
           </div>}
         {error&&
           <div style={{color:'#d44c47',fontSize:13,background:'#fff0f0',borderRadius:6,
             padding:'10px 14px',marginBottom:12}}>{error}</div>}
-        {files?.length===0&&
+        {folders?.length===0&&
           <div style={{textAlign:'center',padding:'40px 0',color:'var(--text-3)',fontSize:14}}>
-            No workspaces found in {prov.name}.
+            No workspaces found in {GDRIVE.name}.
           </div>}
-        {files?.length>0&&<>
+        {folders?.length>0&&<>
           <div style={{fontSize:11,color:'var(--text-3)',marginBottom:10}}>
-            {files.length} workspace{files.length!==1?'s':''} found in {prov.name}
+            {folders.length} workspace{folders.length!==1?'s':''} found
           </div>
           <div style={{display:'flex',flexDirection:'column',gap:8}}>
-            {files.map(file=>{
-              const wsId=getWsId(file);
-              const connected=connectedByRef[file.id]||connectedByWsId[wsId];
-              const name=file.appProperties?.wsName||connected?.name;
-              const modDate=new Date(file.modifiedTime).toLocaleDateString(undefined,
-                {month:'short',day:'numeric',year:'numeric'});
-              const isBusy=busyId===file.id;
-              return <div key={file.id} style={{display:'flex',alignItems:'center',gap:10,
+            {folders.map(f=>{
+              const connected=connectedIds.has(f.id);
+              const isBusy=busyId===f.id;
+              return <div key={f.id} style={{display:'flex',alignItems:'center',gap:10,
                 padding:'10px 12px',borderRadius:8,
                 border:`1px solid ${connected?'var(--accent)':'var(--border)'}`,
                 background:connected?'var(--accent-soft)':'var(--bg-2)'}}>
-                <div style={{width:38,height:38,borderRadius:8,flexShrink:0,
-                  background:prov.gradient,display:'flex',alignItems:'center',
-                  justifyContent:'center',fontSize:20}}>{prov.emoji}</div>
+                <div style={{width:38,height:38,borderRadius:8,flexShrink:0,background:GDRIVE.gradient,
+                  display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>{GDRIVE.emoji}</div>
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{fontWeight:600,fontSize:13,overflow:'hidden',
-                    textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                    {name||<span style={{color:'var(--text-3)',fontStyle:'italic'}}>Untitled Workspace</span>}
-                  </div>
-                  <div style={{fontSize:11,color:'var(--text-3)',marginTop:2,display:'flex',alignItems:'center',gap:6}}>
-                    <span>Modified {modDate}</span>
-                    {connected&&<span style={{color:'var(--accent)',fontWeight:600}}>● Connected</span>}
-                  </div>
+                    textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{f.name}</div>
+                  {connected&&<div style={{fontSize:11,color:'var(--accent)',fontWeight:600,marginTop:2}}>● Connected</div>}
                 </div>
-                <div style={{display:'flex',gap:6,flexShrink:0,alignItems:'center'}}>
-                  {connected
-                    ?<span style={{fontSize:11,color:'var(--accent)',padding:'3px 10px',borderRadius:12,
-                        background:'var(--accent-soft)',fontWeight:600,
-                        border:'1px solid var(--accent)',whiteSpace:'nowrap'}}>✓ Connected</span>
-                    :<button className="btn primary" style={{fontSize:12,padding:'5px 12px',whiteSpace:'nowrap'}}
-                        onClick={()=>handleReconnect(file)} disabled={isBusy}>
-                        {isBusy?'…':'↩ Reconnect'}
-                      </button>}
-                  <button className="icon-btn" style={{width:28,height:28,flexShrink:0}}
-                    title={`Delete from ${prov.name}`}
-                    onClick={()=>handleDelete(file)} disabled={isBusy}>
-                    <Ic n="trash" style={{width:13,height:13,color:'#d44c47'}}/>
-                  </button>
-                </div>
+                <button className="btn primary" style={{fontSize:12,padding:'5px 12px',whiteSpace:'nowrap'}}
+                  onClick={()=>open(f)} disabled={isBusy}>
+                  {isBusy?'…':connected?'Open':'↩ Open'}
+                </button>
               </div>;
             })}
           </div>
@@ -4195,6 +3526,8 @@ function CloudWorkspacesModal({providerId,connectedWorkspaces,onReconnect,onDele
     </div>
   </div>;
 }
+
+
 
 /* ---------------- Custom select dropdown ---------------- */
 function CustomSelect({value,onChange,options}){
@@ -4239,28 +3572,23 @@ const ACCENT_COLORS=[
   {id:'violet', label:'Violet',  light:'#8b5cf6', dark:'#c084fc'},
 ];
 
+/* Workspace font choices (applied to page content, saved in info.md). */
+const FONT_OPTIONS=[
+  {id:'default', label:'Default (Sans)', stack:"'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif"},
+  {id:'serif',   label:'Serif',          stack:"Georgia,'Iowan Old Style','Times New Roman',serif"},
+  {id:'mono',    label:'Monospace',      stack:"'JetBrains Mono','SFMono-Regular',Menlo,Consolas,monospace"},
+];
+const fontStack=id=>(FONT_OPTIONS.find(f=>f.id===id)||FONT_OPTIONS[0]).stack;
+
 /* ---------------- Settings modal ---------------- */
-function SettingsModal({theme,setTheme,accent,setAccent,nodeCount,onClose,user,onSignOut,onRestartTutorial}){
-  const initial=(user?.displayName||user?.email||'?').trim().charAt(0).toUpperCase();
+function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description,setDescription,
+  pageBgUrl,onUploadBg,onClearBg,nodeCount,activeWorkspace,onGoHome,onClose,onRestartTutorial}){
+  const bgInput=React.useRef();
   return <div className="overlay" onClick={onClose}>
     <div className="modal" onClick={e=>e.stopPropagation()}>
       <div className="modal-h"><h3>Settings</h3>
         <div className="x" onClick={onClose}><Ic n="x"/></div></div>
       <div className="set-body">
-        <div className="set-row account-row">
-          <div className="account-id">
-            <div className="account-ava">
-              {user?.photoURL
-                ? <img src={user.photoURL} alt={initial} referrerPolicy="no-referrer"/>
-                : initial}
-            </div>
-            <div className="sr-l">
-              <b>{user?.displayName||'Your account'}</b>
-              <small>{user?.email||'Signed in'}</small>
-            </div>
-          </div>
-          <button className="btn ghost" onClick={onSignOut}>Sign out</button>
-        </div>
         <div className="set-row">
           <div className="sr-l"><b>Mode</b><small>Switch between light and dark interface.</small></div>
           <CustomSelect value={theme} onChange={setTheme} options={[
@@ -4281,12 +3609,43 @@ function SettingsModal({theme,setTheme,accent,setAccent,nodeCount,onClose,user,o
           </div>
         </div>
         <div className="set-row">
+          <div className="sr-l"><b>Font</b><small>Typeface used for your page content.</small></div>
+          <CustomSelect value={font||'default'} onChange={setFont}
+            options={FONT_OPTIONS.map(f=>({value:f.id,label:f.label}))}/>
+        </div>
+        <div className="set-row set-row-col">
+          <div className="sr-l"><b>Page background</b><small>Upload a photo to show behind your pages. Stored in the workspace’s Upload/ folder.</small></div>
+          <div style={{display:'flex',alignItems:'center',gap:12,marginTop:8}}>
+            <div style={{width:88,height:56,borderRadius:8,flexShrink:0,border:'1px solid var(--border)',
+              background:pageBgUrl?`center/cover no-repeat url("${pageBgUrl}")`:'var(--bg-input)',
+              display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-3)',fontSize:11}}>
+              {pageBgUrl?'':'None'}
+            </div>
+            <input ref={bgInput} type="file" accept="image/*" style={{display:'none'}}
+              onChange={e=>{const f=e.target.files?.[0]; if(f) onUploadBg(f); e.target.value='';}}/>
+            <button className="btn ghost" onClick={()=>bgInput.current?.click()}>
+              {pageBgUrl?'Change…':'Upload…'}
+            </button>
+            {pageBgUrl&&<button className="btn ghost" onClick={onClearBg}>Remove</button>}
+          </div>
+        </div>
+        <div className="set-row set-row-col">
+          <div className="sr-l"><b>Description</b><small>A short note about this workspace (saved in info.md).</small></div>
+          <input className="fld" style={{width:'100%',boxSizing:'border-box',marginTop:8}}
+            placeholder="Description (optional)" value={description||''}
+            onChange={e=>setDescription(e.target.value)}/>
+        </div>
+        <div className="set-row">
           <div className="sr-l"><b>Pages</b><small>Total pages & databases in this workspace.</small></div>
           <span>{nodeCount}</span>
         </div>
         <div className="set-row">
-          <div className="sr-l"><b>Storage</b><small>{user?.isLocal?'Saved locally in this browser.':'Synced to the cloud for your account.'}</small></div>
-          <span style={{color:'var(--text-3)'}}>{user?.isLocal?'Local':'Cloud'}</span>
+          <div className="sr-l"><b>Storage</b><small>{activeWorkspace?.type==='gdrive'?'Mirrored to your Google Drive as Markdown files.':'Saved on this computer as Markdown files.'}</small></div>
+          <span style={{color:'var(--text-3)'}}>{activeWorkspace?.type==='gdrive'?'Google Drive':'Local'}</span>
+        </div>
+        <div className="set-row">
+          <div className="sr-l"><b>Workspace</b><small>Close this workspace and return to the homepage.</small></div>
+          <button className="btn ghost" onClick={onGoHome}>Close workspace</button>
         </div>
         <div className="set-row">
           <div className="sr-l"><b>Tutorial</b><small>Replay the guided tour of the workspace.</small></div>
@@ -4294,80 +3653,21 @@ function SettingsModal({theme,setTheme,accent,setAccent,nodeCount,onClose,user,o
         </div>
         <div className="set-row" style={{borderBottom:'none'}}>
           <div className="sr-l"><b>About</b></div>
-          <span style={{color:'var(--text-3)'}}>v2.0</span>
+          <span style={{color:'var(--text-3)'}}>v2.0.0</span>
         </div>
       </div>
     </div>
   </div>;
 }
 
-/* ---------------- Inbox Modal ---------------- */
-function InboxModal({notifications,onMarkRead,onSwitchWorkspace,onClose}){
-  const unread=(notifications||[]).filter(n=>!n.read);
-  function fmtTime(ts){
-    if(!ts) return '';
-    const d=new Date(ts); const now=Date.now();
-    const diff=now-d.getTime();
-    if(diff<60000) return 'just now';
-    if(diff<3600000) return Math.floor(diff/60000)+'m ago';
-    if(diff<86400000) return Math.floor(diff/3600000)+'h ago';
-    return d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
-  }
-  return <div className="overlay" onClick={onClose}>
-    <div className="modal" style={{maxWidth:440}} onClick={e=>e.stopPropagation()}>
-      <div className="modal-h">
-        <h3>Inbox {unread.length>0&&<span style={{fontSize:12,background:'var(--accent)',
-          color:'#fff',borderRadius:10,padding:'1px 7px',marginLeft:6}}>{unread.length}</span>}</h3>
-        <button className="x" onClick={onClose}><Ic n="x"/></button>
-      </div>
-      <div style={{maxHeight:420,overflowY:'auto'}}>
-        {(notifications||[]).length===0
-          ? <div className="empty-state" style={{padding:'40px 24px'}}>
-              <div className="es-em">📬</div>
-              <b>All caught up</b>
-              <p style={{marginTop:4,fontSize:13,color:'var(--text-3)'}}>
-                Workspace invitations and mentions will appear here.
-              </p>
-            </div>
-          : (notifications||[]).map(n=>
-            <div key={n.id} className={cx('notif-row',!n.read&&'unread')}
-              onClick={()=>{ if(!n.read) onMarkRead(n.id); }}>
-              <div className="notif-icon">
-                {n.type==='workspace_invite'?'🏢':'🔔'}
-              </div>
-              <div style={{flex:1,minWidth:0}}>
-                {n.type==='workspace_invite'
-                  ? <>
-                      <div className="notif-msg">
-                        <b>{n.fromName||n.fromEmail}</b> shared workspace{' '}
-                        <b>"{n.wsName}"</b> with you
-                      </div>
-                      <div style={{marginTop:6}}>
-                        <button className="btn primary" style={{fontSize:12,padding:'4px 12px'}}
-                          onClick={e=>{e.stopPropagation();onSwitchWorkspace(n.wsId);onClose();if(!n.read)onMarkRead(n.id);}}>
-                          Open workspace
-                        </button>
-                      </div>
-                    </>
-                  : <div className="notif-msg">{n.body||'New notification'}</div>}
-                <div className="notif-time">{fmtTime(n.at)}</div>
-              </div>
-              {!n.read&&<div className="notif-dot"/>}
-            </div>
-          )}
-      </div>
-    </div>
-  </div>;
-}
 
 /* ---------------- Dashboard ---------------- */
-function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace,sharedNodes}){
+function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace}){
   const allNodes=Object.values(nodes).filter(n=>!n.trashed&&!n.archived);
   const pageCount=allNodes.filter(n=>n.kind==='page').length;
   const dbCount=allNodes.filter(n=>n.kind==='database').length;
-  const sharedCount=Object.values(sharedNodes||{}).filter(s=>s&&s.length>0).length;
   const favNodes=favorites.map(id=>nodes[id]).filter(n=>n&&!n.trashed&&!n.archived);
-  const privatePages=allNodes.filter(n=>n.section==='private'&&n.parentId===null)
+  const privatePages=allNodes.filter(n=>n.parentId===null)
     .sort((a,b)=>(a.sort||0)-(b.sort||0)).slice(0,6);
   const hour=new Date().getHours();
   const greeting=hour<12?'Good morning':hour<17?'Good afternoon':'Good evening';
@@ -4379,14 +3679,13 @@ function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace,sha
     <div className="dash-stats">
       <div className="dash-stat"><span className="dash-stat-n">{pageCount}</span><span className="dash-stat-l">Pages</span></div>
       <div className="dash-stat"><span className="dash-stat-n">{dbCount}</span><span className="dash-stat-l">Databases</span></div>
-      <div className="dash-stat"><span className="dash-stat-n">{sharedCount}</span><span className="dash-stat-l">Shared docs</span></div>
       <div className="dash-stat"><span className="dash-stat-n">{favNodes.length}</span><span className="dash-stat-l">Favorites</span></div>
     </div>
     <div className="dash-actions">
       <button className="dash-action-btn" onClick={()=>addTop('private')}>
         <Ic n="plus" style={{width:18,height:18}}/><span>New page</span>
       </button>
-      <button className="dash-action-btn" onClick={()=>setModal({type:'templates'})}>
+      <button className="dash-action-btn" onClick={()=>openPage(TEMPLATES_ID)}>
         <Ic n="template" style={{width:18,height:18}}/><span>Templates</span>
       </button>
       <button className="dash-action-btn" onClick={()=>setModal({type:'search'})}>
@@ -4460,175 +3759,258 @@ function PageMenu({node,nodes,onClose,trashNode,duplicate,setModal,downloadPage}
 /* =========================================================================
    WORKSPACE  (the authenticated app surface)
    ========================================================================= */
-function Workspace({ user, onSignOut }){
-  const [store,setStore]=React.useState(null);
+/* =========================================================================
+   HOME SCREEN — shown when no workspace is connected
+   ========================================================================= */
+function ConnectPanel({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,busy,error}){
+  const localOK=isLocalFSSupported();
+  const [name,setName]=useState('');
+  const [desc,setDesc]=useState('');
+  const named=!!name.trim();
+  return <div className="connect">
+    <div className="connect-block">
+      <div className="cb-fields">
+        <label className="cb-field">
+          <span className="cb-field-ic">◧</span>
+          <input className="cb-input" placeholder="Workspace name" value={name}
+            onChange={e=>setName(e.target.value)} autoFocus/>
+        </label>
+        <label className="cb-field">
+          <span className="cb-field-ic">✎</span>
+          <input className="cb-input" placeholder="Description (optional)" value={desc}
+            onChange={e=>setDesc(e.target.value)}/>
+        </label>
+      </div>
+
+      <div className="cb-choose">Create it in</div>
+      <div className="cb-tiles">
+        <button className="cb-tile local" disabled={!localOK||busy||!named}
+          onClick={()=>onLocalNew(name.trim(),desc.trim())}>
+          <span className="cb-tile-ic">💻</span>
+          <span className="cb-tile-tx">
+            <span className="cb-tile-t">Local folder</span>
+            <span className="cb-tile-s">Saved on this computer</span>
+          </span>
+        </button>
+        <button className="cb-tile drive" disabled={busy||!named}
+          onClick={()=>onDriveNew(name.trim(),desc.trim())}>
+          <span className="cb-tile-ic">📁</span>
+          <span className="cb-tile-tx">
+            <span className="cb-tile-t">Google Drive</span>
+            <span className="cb-tile-s">Synced across devices</span>
+          </span>
+        </button>
+      </div>
+
+      <div className="cb-existing">
+        <span>Already have a workspace?</span>
+        <button className="cb-link" disabled={!localOK||busy} onClick={onLocalExisting}>Open a folder</button>
+        <span className="cb-dot">·</span>
+        <button className="cb-link" disabled={busy} onClick={onDriveExisting}>Open from Drive</button>
+      </div>
+      {!localOK&&<div className="cc-warn">Local folders need Chrome, Edge or Brave — Google Drive works everywhere.</div>}
+    </div>
+    {error&&<div className="connect-error">{error}</div>}
+    {busy&&<div className="connect-busy"><span className="spin"/> Working…</div>}
+  </div>;
+}
+
+function HomeScreen({pointer,list,busy,error,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
+  const known=list||[];
+  const lastId=pointer?pointer.id:null;
+  return <div className="home-screen">
+    <div className="home-aurora" aria-hidden="true">
+      <span className="orb o1"/><span className="orb o2"/><span className="orb o3"/><span className="orb o4"/>
+      <span className="home-grid"/>
+    </div>
+    <div className="home-inner">
+      <div className="home-brand home-rise" style={{animationDelay:'0ms'}}>
+        <span className="home-mark">◧</span>
+        <span className="home-word">Workspace</span>
+      </div>
+      <h1 className="home-title home-rise" style={{animationDelay:'60ms'}}>
+        Your notes, as plain&nbsp;<span className="grad">Markdown</span>.
+      </h1>
+      <p className="home-sub home-rise" style={{animationDelay:'120ms'}}>
+        {known.length?'Open a workspace you’ve connected before, or start a new one.'
+          :'Connect a workspace to get started.'} Everything you write is saved as ordinary
+        folders and <code>.md</code> files — readable and usable even if this app goes away.
+      </p>
+
+      <div className={cx('home-columns',known.length>0&&'two-col')}>
+        {known.length>0&&<div className="home-col home-rise" style={{animationDelay:'180ms'}}>
+          <div className="home-label">Your workspaces</div>
+          <div className="home-ws-list">
+            {known.map(ws=>{
+              const isLocal=ws.type==='local';
+              const isLast=ws.id===lastId;
+              return <div key={ws.id} className={cx('home-ws-row',isLast&&'last')}
+                onClick={()=>!busy&&onOpen(ws)}>
+                <div className={cx('home-ws-ava',isLocal?'local':'drive')}>{isLocal?'💻':GDRIVE.emoji}</div>
+                <div className="home-ws-meta">
+                  <div className="home-ws-name">{ws.name}
+                    {isLast&&<span className="home-ws-badge">Last used</span>}
+                  </div>
+                  <div className="home-ws-type">
+                    {isLocal?'Local folder':'Google Drive'}
+                    {isLocal&&ws.accessible===false?' · needs access':''}
+                  </div>
+                </div>
+                <button className="btn primary sm" disabled={busy}
+                  onClick={e=>{e.stopPropagation();onOpen(ws);}}>Open</button>
+                <button className="btn ghost sm home-ws-unlink"
+                  title="Unlink — remove from this list (your files are NOT deleted)"
+                  disabled={busy} onClick={e=>{e.stopPropagation();onRemove(ws);}}>
+                  <Ic n="unlink" style={{width:13,height:13}}/> Unlink
+                </button>
+              </div>;
+            })}
+          </div>
+          {error&&<div className="connect-error" style={{marginTop:10}}>{error}</div>}
+        </div>}
+
+        <div className="home-col home-rise" style={{animationDelay:'240ms'}}>
+          <div className="home-label">{known.length?'Connect another':'Connect a workspace'}</div>
+          <ConnectPanel onLocalNew={onLocalNew} onLocalExisting={onLocalExisting}
+            onDriveNew={onDriveNew} onDriveExisting={onDriveExisting} busy={busy}
+            error={known.length?'':error}/>
+        </div>
+      </div>
+
+      <div className="home-foot home-rise" style={{animationDelay:'300ms'}}>
+        Local folders need a Chromium browser. Google Drive works everywhere.
+      </div>
+    </div>
+  </div>;
+}
+
+
+/* =========================================================================
+   WORKSPACE  (the app surface)
+   ========================================================================= */
+function Workspace(){
+  const [store,setStore]=React.useState(null);   // connected workspace, or null → home
+  const [booting,setBooting]=React.useState(true);
+  const [home,setHome]=React.useState({pointer:null,list:[],busy:false,error:''});
   const [expanded,setExpanded]=React.useState({});
   const [sidebarOpen,setSidebarOpen]=React.useState(true);
   const [modal,setModal]=React.useState(null);
   const [peek,setPeek]=React.useState(null); // {dbHostId, rowId}
-  const [sharedPanelOpen,setSharedPanelOpen]=React.useState(false);
   const [showTutorial,setShowTutorial]=React.useState(false);
-  const [notifications,setNotifications]=React.useState([]);
+  const driveTimer=React.useRef(null);
+  const tutorialShown=React.useRef(false);
 
-  /* ---- local-file workspace ---- */
-  const [localWsIndex,setLocalWsIndex]=React.useState([]); // [{id,name,dirName,accessible},…]
-  const localWsData=React.useRef({});  // {[wsId]: {nodes,favorites,currentId}} — in-memory cache
-  const localObjURLs=React.useRef({}); // {[wsId]: [blobURL,…]} — transient upload URLs to revoke
-  // Local workspaces whose data we've actually read from disk (or created) this
-  // session. We ONLY write a local workspace.json for ids in this set — this is
-  // the safeguard against clobbering a real folder with placeholder/seed content
-  // when the active id and the in-memory content briefly disagree (e.g. boot).
-  const loadedLocalWs=React.useRef(new Set());
+  /* ---- build the switcher list from local index + the active workspace ---- */
+  const buildWsList=(localList,active)=>{
+    const list=(localList||[]).map(l=>({...l}));
+    if(active&&active.type==='gdrive'&&!list.some(w=>w.id===active.id))
+      list.push({id:active.id,name:active.name,type:'gdrive',folderId:active.folderId});
+    if(active&&active.type==='local'&&!list.some(w=>w.id===active.id))
+      list.push({id:active.id,name:active.name,type:'local',accessible:true});
+    return list;
+  };
 
-  /* ---- cloud-provider workspaces ---- */
-  const cloudWsData=React.useRef({});      // {[wsId]: {nodes,favorites,currentId}} — session cache
-  const cloudWriteTimers=React.useRef({}); // {[wsId]: timerId} — debounce per workspace
+  /* ---- known workspaces to offer on the homepage (locals + last Drive) ---- */
+  const homeList=(localList,ptr)=>{
+    const list=(localList||[]).map(l=>({...l}));
+    if(ptr&&ptr.type==='gdrive'&&ptr.folderId&&!list.some(w=>w.id===ptr.folderId))
+      list.push({id:ptr.folderId,name:ptr.name||'Drive workspace',type:'gdrive',folderId:ptr.folderId});
+    return list;
+  };
 
-  /* ---- load (per-user) ---- */
+  /* ---- assemble store from freshly-loaded data + activate ---- */
+  const mountStore=(data,active,theme,accent,localList)=>{
+    const info=data.info||{};   // workspace-level appearance (info.md)
+    setStore({
+      nodes:data.nodes||{},favorites:data.favorites||[],
+      currentId:data.currentId||Object.keys(data.nodes||{})[0]||DASH_ID,
+      uploads:data.uploads||[],
+      theme:info.theme||theme, accent:info.accent||accent,
+      font:info.font||'default', description:info.description||'',
+      pageBg:info.pageBg||null, pageBgUrl:info.pageBgUrl||null,
+      active, localList:localList||[],
+      tutorialCompleted:getCookie('ws_tutorial')==='1',
+    });
+    writeActivePointer(active.type==='gdrive'
+      ?{type:'gdrive',name:active.name,folderId:active.folderId,id:active.id}
+      :{type:'local',name:active.name,id:active.id});
+  };
+
+  /* ---- boot: read cookie pointer, list local workspaces, try to reconnect ---- */
   React.useEffect(()=>{
     let alive=true;
     (async()=>{
-      const [saved, sharedList, notifs] = await Promise.all([
-        loadStore(user.uid),
-        loadSharedWorkspaces(user.uid),
-        loadNotifications(user.uid),
-      ]);
-      if(!alive) return;
-      let init=saved||buildSeed();
-      // migrate old combined theme values → split into theme + accent
-      const OLD_MAP={ocean:'ocean',forest:'forest',rose:'rose',sunset:'sunset',midnight:'blue'};
-      if(init.theme&&OLD_MAP[init.theme]){
-        init={...init,accent:OLD_MAP[init.theme],theme:'light'};
-      }
-      if(!init.accent) init={...init,accent:'indigo'};
-      // merge shared workspaces into workspaces list
-      if(sharedList.length){
-        const existing=(init.workspaces||[]).map(w=>w.id);
-        const toAdd=sharedList.filter(sw=>!existing.includes(sw.id));
-        if(toAdd.length){
-          init={...init,
-            workspaces:[...(init.workspaces||[]),...toAdd.map(sw=>({
-              id:sw.id,name:sw.wsName,isPersonal:false,isShared:true,
-              ownerEmail:sw.ownerEmail,members:sw.members||[],
-            }))],
-            workspaceSnapshots:{...(init.workspaceSnapshots||{}),
-              ...Object.fromEntries(toAdd.map(sw=>[sw.id,sw.snapshot||{}]))},
-          };
-        }
-      }
-      // External workspaces need a permission prompt / re-auth before their
-      // content can be loaded, and their pages must never be shown under the
-      // personal id. So always boot on the personal workspace, rebuilding its
-      // view from the ws_main snapshot (also fixes any leaked external nodes
-      // that an older build may have stored as the top-level content).
-      if(isExternalWs((init.workspaces||[]).find(w=>w.id===(init.activeWorkspaceId||'ws_main')))){
-        const personal=(init.workspaceSnapshots||{})['ws_main'];
-        const fbId=nid();const fbBlk=nid();
-        init={...init,activeWorkspaceId:'ws_main',
-          nodes:personal?.nodes||{[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
-            parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}},
-          favorites:personal?.favorites||[],
-          currentId:personal?.currentId||fbId};
-      }
-      setStore(init);
-      setNotifications(notifs||[]);
-      if(!init.tutorialCompleted) setShowTutorial(true);
-      const b=document.getElementById('boot'); if(b) b.style.display='none';
-    })();
-    return ()=>{ alive=false; };
-  },[user.uid]);
-
-  /* ---- load local-file workspaces from IndexedDB on startup ---- */
-  React.useEffect(()=>{
-    if(!isLocalFSSupported()) return;
-    let alive=true;
-    (async()=>{
-      const index=await loadLocalWorkspaceIndex();
-      if(!alive) return;
-      setLocalWsIndex(index);
-      // eagerly cache data for workspaces where permission is already granted
-      for(const entry of index){
-        if(!entry.accessible) continue;
-        try{
-          let data=await readLocalWorkspace(entry.id);
-          if(data){
-            data=await hydrateLocalData(entry.id,data);
-            loadedLocalWs.current.add(entry.id);
-            await upgradeLocalFolderIfNeeded(entry.id,entry.name,data);
-            localWsData.current[entry.id]=data;
-            if(data.uploads?.length)
-              setStore(s=>s?{...s,uploads:mergeUploads(s.uploads,entry.id,data.uploads)}:s);
+      const {theme,accent}=readTheme();
+      const localIndex=isLocalFSSupported()?await loadLocalWorkspaceIndex():[];
+      const localList=localIndex.map(l=>({id:l.id,name:l.name||l.dirName,type:'local',accessible:l.accessible}));
+      const ptr=readActivePointer();
+      const goHome=extra=>{ if(alive){ setHome(h=>({...h,pointer:ptr,list:homeList(localList,ptr),...extra})); setBooting(false); } };
+      if(!ptr){ goHome(); return; }
+      try{
+        if(ptr.type==='local'){
+          const entry=localIndex.find(l=>l.id===ptr.id);
+          if(entry&&entry.accessible){
+            const data=await readWorkspaceTree(ptr.id);
+            if(alive){ mountStore(data,{id:ptr.id,name:ptr.name||entry.name,type:'local'},theme,accent,localList); setBooting(false); }
+            return;
           }
-        }catch(_){}
-      }
+          goHome(); return; // needs a click to grant folder permission
+        }
+        if(ptr.type==='gdrive'){
+          if(getDriveToken()){
+            const data=await readGdriveWorkspaceTree(ptr.folderId);
+            if(alive){ mountStore(data,{id:ptr.folderId,name:ptr.name,type:'gdrive',folderId:ptr.folderId},theme,accent,localList); setBooting(false); }
+            return;
+          }
+          goHome(); return; // needs a click to re-authenticate
+        }
+      }catch(e){ goHome({error:e.message}); return; }
+      goHome();
     })();
     return ()=>{ alive=false; };
   },[]);
 
-  /* ---- persist + theme ---- */
+  /* ---- persist on change: write the Markdown tree + theme cookie ---- */
   React.useEffect(()=>{
     if(!store) return;
-    // External (local/cloud) workspace data is stripped out — only the
-    // workspace list, settings and personal/shared content reach Firebase.
-    saveStore(user.uid,toCloudStore(store));
+    writeTheme({theme:store.theme,accent:store.accent});
+    document.body.classList.toggle('dark',store.theme==='dark');
+    ['indigo','blue','ocean','forest','rose','sunset','violet'].forEach(a=>document.body.classList.remove(`t-${a}`));
+    document.body.classList.add(`t-${store.accent||'indigo'}`);
 
-    const activeWs=(store.workspaces||[]).find(w=>w.id===(store.activeWorkspaceId||'ws_main'));
-
-    // write to local file if the active workspace is a local-file workspace
-    // (only once its real content has been loaded/created this session)
-    if(activeWs?.isLocalFile&&loadedLocalWs.current.has(activeWs.id)){
-      const live={nodes:store.nodes,favorites:store.favorites,currentId:store.currentId,
-        uploads:(store.uploads||[]).filter(u=>u.wsId===activeWs.id),name:activeWs.name};
-      localWsData.current[activeWs.id]=live;                  // hydrated in-memory cache
-      writeLocalWorkspaceDebounced(activeWs.id,dehydrateLocalData(activeWs.name,live)); // lean on-disk
-    }
-
-    // write to cloud provider if the active workspace has one
-    if(activeWs?.cloudProvider){
-      const wsId=activeWs.id;
-      const snapshot={nodes:store.nodes,favorites:store.favorites,currentId:store.currentId,wsName:activeWs.name,
-        uploads:(store.uploads||[]).filter(u=>u.wsId===wsId)};
-      cloudWsData.current[wsId]=snapshot;
-      // debounced write: 1.5 s
-      clearTimeout(cloudWriteTimers.current[wsId]);
-      cloudWriteTimers.current[wsId]=setTimeout(async()=>{
-        try{
-          const newRef=await writeCloudWorkspace(
-            activeWs.cloudProvider, wsId, snapshot, activeWs.cloudFileRef||null);
-          // update stored file reference if it changed (e.g. first GDrive write)
-          if(newRef&&newRef!==activeWs.cloudFileRef){
-            setStore(s=>({...s,workspaces:(s.workspaces||[]).map(w=>
-              w.id===wsId?{...w,cloudFileRef:newRef}:w)}));
-          }
-        }catch(e){ console.warn('[cloudstorage] write failed:',e.message); }
+    const active=store.active;
+    const info={theme:store.theme,accent:store.accent,font:store.font,description:store.description,pageBg:store.pageBg};
+    const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
+    if(active?.type==='local'){
+      writeWorkspaceTreeDebounced(active.id,payload);
+    }else if(active?.type==='gdrive'){
+      clearTimeout(driveTimer.current);
+      driveTimer.current=setTimeout(()=>{
+        writeGdriveWorkspaceTree(active.folderId,payload).catch(e=>console.warn('[drive] write failed:',e.message));
       },1500);
     }
+  },[store]);
 
-    document.body.classList.toggle('dark',store.theme==='dark');
-    ['indigo','blue','ocean','forest','rose','sunset','violet']
-      .forEach(a=>document.body.classList.remove(`t-${a}`));
-    document.body.classList.add(`t-${store.accent||'indigo'}`);
+  /* ---- kick off the tutorial once, on first connect ---- */
+  React.useEffect(()=>{
+    if(store&&!store.tutorialCompleted&&!tutorialShown.current){ tutorialShown.current=true; setShowTutorial(true); }
   },[store]);
 
   /* ---- global keyboard (declared before early return to keep hook order stable) ---- */
   React.useEffect(()=>{
     const h=e=>{
       const meta=e.metaKey||e.ctrlKey;
-      if(meta&&e.key==='k'){e.preventDefault();
-        setModal(m=>m&&m.type==='search'?null:{type:'search'});}
+      if(meta&&e.key==='k'){e.preventDefault();setModal(m=>m&&m.type==='search'?null:{type:'search'});}
       else if(meta&&e.key==='\\'){e.preventDefault();setSidebarOpen(o=>!o);}
       else if(meta&&e.shiftKey&&(e.key==='l'||e.key==='L')){e.preventDefault();
         setStore(s=>s?{...s,theme:s.theme==='dark'?'light':'dark'}:s);}
-      else if(meta&&(e.key==='/'||e.key==='?')){e.preventDefault();
-        setModal({type:'shortcuts'});}
+      else if(meta&&(e.key==='/'||e.key==='?')){e.preventDefault();setModal({type:'shortcuts'});}
       else if(meta&&e.key==='n'){e.preventDefault();
         setStore(s=>{
           if(!s) return s;
           const id=nid();
-          const sort=Object.values(s.nodes)
-            .filter(n=>n.parentId===null&&n.section==='private'&&!n.trashed).length;
-          const nn={id,kind:'page',title:'',icon:'',cover:'',parentId:null,
-            section:'private',sort,blocks:[{id:nid(),type:'text',html:''}]};
+          const sort=Object.values(s.nodes).filter(n=>n.parentId===null&&!n.trashed).length;
+          const nn={id,kind:'page',title:'',icon:'',cover:'',parentId:null,sort,blocks:[{id:nid(),type:'text',html:''}]};
           return {...s,nodes:{...s.nodes,[id]:nn},currentId:id};
         });
         setModal(null);}
@@ -4638,18 +4020,194 @@ function Workspace({ user, onSignOut }){
     return()=>window.removeEventListener('keydown',h);
   },[]);
 
-  if(!store) return <div className="app-loading"><div className="app-loading-logo">◧</div><div className="app-loading-bar"><i /></div></div>;
+  /* =================== connect / reconnect handlers =================== */
+  const finishConnect=async(data,active)=>{
+    const {theme,accent}=readTheme();
+    const localIndex=isLocalFSSupported()?await loadLocalWorkspaceIndex():[];
+    const localList=localIndex.map(l=>({id:l.id,name:l.name||l.dirName,type:'local',accessible:l.accessible}));
+    mountStore(data,active,theme,accent,localList);
+    setModal(null); setBooting(false);
+    setHome(h=>({...h,pointer:null,busy:false,error:''}));
+    setExpanded({});
+  };
+
+  const connectLocalNew=async(name,description)=>{
+    if(!name||!name.trim()) return;
+    const id=nid();
+    try{
+      // User picks a LOCATION; we create the "<name>" folder inside it.
+      const rec=await createLocalWorkspaceFolder(id,name.trim());
+      let data=null;
+      try{ data=await readWorkspaceTree(id); }catch(_){}
+      const hasContent=data&&Object.keys(data.nodes||{}).length;
+      // If a folder of that name already existed WITH content, open it as-is
+      // instead of overwriting it.
+      if(rec.alreadyExisted&&hasContent){
+        await finishConnect(data,{id,name:rec.name,type:'local'});
+        return;
+      }
+      const seed=buildSeed();
+      const info={...readTheme(),font:'default',pageBg:null,description:(description||'').trim()};
+      data={nodes:seed.nodes,favorites:seed.favorites,currentId:seed.currentId,uploads:[],info};
+      await writeWorkspaceTreeNow(id,{nodes:data.nodes,favorites:data.favorites,uploads:[],info});
+      await finishConnect(data,{id,name:rec.name,type:'local'});
+    }catch(e){ if(e?.name!=='AbortError') alert('Could not create the workspace: '+(e?.message||e)); }
+  };
+
+  const connectLocalExisting=async()=>{
+    const id=nid();
+    try{
+      const rec=await openExistingDirectory(id);
+      if(!rec.foundFile){
+        alert('That folder is not a workspace.\n\nPick a folder that contains a “Space” sub-folder (or its parent).');
+        try{ await removeLocalWorkspaceRecord(id); }catch(_){}
+        return;
+      }
+      const data=rec.data||await readWorkspaceTree(id);
+      await finishConnect(data,{id,name:rec.name,type:'local'});
+    }catch(e){ if(e?.name!=='AbortError') alert('Could not open the folder: '+(e?.message||e)); }
+  };
+
+  const connectDriveNew=async(name,description)=>{
+    setHome(h=>({...h,busy:true,error:''}));
+    try{
+      const folderId=await createDriveWorkspace(name);
+      const seed=buildSeed();
+      const info={...readTheme(),font:'default',pageBg:null,description:(description||'').trim()};
+      await writeGdriveWorkspaceTree(folderId,{nodes:seed.nodes,favorites:seed.favorites,uploads:[],info});
+      await finishConnect({nodes:seed.nodes,favorites:seed.favorites,currentId:seed.currentId,uploads:[],info},
+        {id:folderId,name,type:'gdrive',folderId});
+    }catch(e){ setHome(h=>({...h,busy:false,error:e.message||'Could not create the Drive workspace.'})); }
+  };
+
+  const connectDriveExisting=async(folderId,name)=>{
+    setHome(h=>({...h,busy:true,error:''}));
+    try{
+      await authenticateGoogleDrive();
+      if(folderId){
+        const data=await readGdriveWorkspaceTree(folderId);
+        await finishConnect(data,{id:folderId,name:name||'Drive workspace',type:'gdrive',folderId});
+      }else{
+        setModal({type:'browse-cloud'});
+        setHome(h=>({...h,busy:false}));
+      }
+    }catch(e){ setHome(h=>({...h,busy:false,error:e.message||'Could not connect to Google Drive.'})); }
+  };
+
+  /* Open a workspace the user has already connected before (from the homepage
+     list). Local needs a permission gesture; Drive needs a token. */
+  const openKnownWorkspace=async entry=>{
+    if(!entry) return;
+    setHome(h=>({...h,busy:true,error:''}));
+    try{
+      if(entry.type==='local'){
+        let handle=(await getLocalWorkspaceRecord(entry.id))?.handle;
+        if(!handle){ const rec=await relinkAndRegisterDirectory(entry.id); handle=rec.handle; }
+        const {granted,reason}=await requestPermissionForHandleDetailed(handle,true);
+        if(!granted){ setHome(h=>({...h,busy:false,error:localPermMessage(reason)})); return; }
+        const data=await readWorkspaceTree(entry.id);
+        await finishConnect(data,{id:entry.id,name:entry.name,type:'local'});
+      }else{
+        await authenticateGoogleDrive();
+        const data=await readGdriveWorkspaceTree(entry.folderId);
+        await finishConnect(data,{id:entry.folderId,name:entry.name,type:'gdrive',folderId:entry.folderId});
+      }
+    }catch(e){ if(e?.name==='AbortError') setHome(h=>({...h,busy:false})); else setHome(h=>({...h,busy:false,error:e.message})); }
+  };
+
+  const reconnectActive=()=>openKnownWorkspace(home.pointer);
+
+  /* Disconnect a known workspace from the homepage list. This ONLY forgets the
+     connection — the folder and its Markdown files are never touched. */
+  const removeKnownWorkspace=async entry=>{
+    if(!entry) return;
+    const where=entry.type==='gdrive'?'in Google Drive':'on your computer';
+    if(!confirm(`Unlink “${entry.name}”?\n\nThis just removes it from this list — the folder and its Markdown files ${where} are NOT deleted. You can add it back anytime with “Open existing…”.`)) return;
+    if(entry.type==='local') await removeLocalWorkspaceRecord(entry.id).catch(()=>{});
+    if(home.pointer&&home.pointer.id===entry.id){ clearActivePointer(); }
+    setHome(h=>({...h,
+      list:(h.list||[]).filter(w=>w.id!==entry.id),
+      pointer:h.pointer&&h.pointer.id===entry.id?null:h.pointer}));
+  };
+
+  const goHome=async()=>{
+    if(store) await flushCurrent();
+    clearActivePointer();
+    const localIndex=isLocalFSSupported()?await loadLocalWorkspaceIndex():[];
+    const localList=localIndex.map(l=>({id:l.id,name:l.name||l.dirName,type:'local',accessible:l.accessible}));
+    setStore(null);
+    setHome({pointer:readActivePointer(),list:homeList(localList,readActivePointer()),busy:false,error:''});
+    setModal(null); setExpanded({});
+  };
+
+  /* =================== workspace switching / deletion =================== */
+  const flushCurrent=async()=>{
+    if(!store) return;
+    const a=store.active;
+    const info={theme:store.theme,accent:store.accent,font:store.font,description:store.description,pageBg:store.pageBg};
+    const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
+    try{
+      if(a?.type==='local') await writeWorkspaceTreeNow(a.id,payload);
+      else if(a?.type==='gdrive'){ clearTimeout(driveTimer.current); await writeGdriveWorkspaceTree(a.folderId,payload); }
+    }catch(_){}
+  };
+
+  const switchWorkspace=async wsId=>{
+    if(!store||store.active.id===wsId) return;
+    const target=(store.localList||[]).find(w=>w.id===wsId)
+      ||(store.active.type==='gdrive'&&store.active.id===wsId?store.active:null);
+    if(!target) return;
+    await flushCurrent();
+    try{
+      if(target.type==='local'){
+        let handle=(store.localList.find(l=>l.id===wsId)||{}).handle||(await getLocalWorkspaceRecord(wsId))?.handle;
+        const {granted,reason}=await requestPermissionForHandleDetailed(handle,true);
+        if(!granted){ alert(localPermMessage(reason)); return; }
+        const data=await readWorkspaceTree(wsId);
+        mountStore(data,{id:wsId,name:target.name,type:'local'},store.theme,store.accent,store.localList);
+      }else{
+        await authenticateGoogleDrive();
+        const data=await readGdriveWorkspaceTree(target.folderId);
+        mountStore(data,{id:target.folderId,name:target.name,type:'gdrive',folderId:target.folderId},store.theme,store.accent,store.localList);
+      }
+      setExpanded({});
+    }catch(e){ alert('Could not switch workspace: '+(e?.message||e)); }
+  };
+
+  const deleteWorkspace=async wsId=>{
+    if(!store) return;
+    const list=buildWsList(store.localList,store.active);
+    const target=list.find(w=>w.id===wsId); if(!target) return;
+    const isActive=store.active.id===wsId;
+    const msg=target.type==='local'
+      ? `Remove “${target.name}” from the list?\n\nThe folder and its Markdown files on your computer are NOT deleted — you can open it again anytime.`
+      : `Remove “${target.name}” from the list?\n\nThe folder in Google Drive is NOT deleted — you can reconnect it anytime.`;
+    if(!confirm(msg)) return;
+    if(target.type==='local') await removeLocalWorkspaceRecord(wsId).catch(()=>{});
+    const newLocal=(store.localList||[]).filter(l=>l.id!==wsId);
+    if(isActive){
+      clearActivePointer();
+      setStore(null);
+      setHome({pointer:null,list:homeList(newLocal,null),busy:false,error:''});
+      setModal(null); setExpanded({});
+    }else{
+      setStore(s=>({...s,localList:newLocal}));
+    }
+  };
+
+  if(booting) return <div className="app-loading"><div className="app-loading-logo">◧</div><div className="app-loading-bar"><i /></div></div>;
+
+  if(!store) return <HomeScreen pointer={home.pointer} list={home.list} busy={home.busy} error={home.error}
+    onOpen={openKnownWorkspace} onRemove={removeKnownWorkspace} onReconnect={reconnectActive}
+    onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
+    onDriveNew={connectDriveNew} onDriveExisting={()=>connectDriveExisting(null)}/>;
+
   const {nodes,favorites,currentId,theme,accent='indigo'}=store;
   const node=currentId===DASH_ID?null:nodes[currentId]||nodes[Object.keys(nodes)[0]]||null;
-  const workspaces=store.workspaces||[{id:'ws_main',name:'My Workspace',isPersonal:true,members:[]}];
-  const activeWorkspaceId=store.activeWorkspaceId||'ws_main';
-  const activeWorkspace=workspaces.find(w=>w.id===activeWorkspaceId)||workspaces[0];
-  // uploads scoped to the active workspace (legacy untagged uploads count as personal)
-  const scopedUploads=(store.uploads||[]).filter(u=>
-    u.wsId===activeWorkspaceId||(!u.wsId&&activeWorkspaceId==='ws_main'));
-  const sharedNodes=store.sharedNodes||{};
-  const sharedCount=Object.values(sharedNodes).filter(s=>s&&s.length>0).length;
-  const notifCount=notifications.filter(n=>!n.read).length;
+  const workspaces=buildWsList(store.localList,store.active);
+  const activeWorkspaceId=store.active.id;
+  const activeWorkspace=workspaces.find(w=>w.id===activeWorkspaceId)||store.active;
+  const scopedUploads=store.uploads||[];
 
   /* ---- helpers ---- */
   const patch=p=>setStore(s=>({...s,...p}));
@@ -4658,18 +4216,16 @@ function Workspace({ user, onSignOut }){
   const openPage=id=>{setStore(s=>({...s,currentId:id}));setPeek(null);setModal(null);};
   const toggleExp=(id,force)=>setExpanded(e=>({...e,[id]:force!==undefined?force:!e[id]}));
 
-  const addNode=(parentId,section,extra={})=>{
+  const addNode=(parentId,extra={})=>{
     const id=nid();
     const sibs=Object.values(nodes).filter(n=>n.parentId===parentId&&!n.trashed);
     const nn={id,kind:'page',title:'',icon:'',cover:'',parentId,
-      section:parentId?nodes[parentId].section:section,
       sort:sibs.length,blocks:[{id:nid(),type:'text',html:''}],...extra};
     setNodes(n=>({...n,[id]:nn}));
     return id;
   };
-  const addTop=section=>{const id=addNode(null,section);openPage(id);};
-  const addChild=parentId=>{const id=addNode(parentId);
-    setExpanded(e=>({...e,[parentId]:true}));openPage(id);};
+  const addTop=()=>{const id=addNode(null);openPage(id);};
+  const addChild=parentId=>{const id=addNode(parentId);setExpanded(e=>({...e,[parentId]:true}));openPage(id);};
   const createChild=parentId=>addNode(parentId); // for subpage blocks (no nav)
 
   const collectDesc=(id,acc)=>{acc.push(id);
@@ -4678,7 +4234,7 @@ function Workspace({ user, onSignOut }){
     const acc=[];collectDesc(id,acc);
     setNodes(n=>{const m={...n};acc.forEach(x=>m[x]={...m[x],trashed:true});return m;});
     setStore(s=>({...s,favorites:s.favorites.filter(f=>!acc.includes(f)),
-      currentId:acc.includes(s.currentId)?'n_start':s.currentId}));
+      currentId:acc.includes(s.currentId)?DASH_ID:s.currentId}));
   };
   const restore=id=>{
     const acc=[];const walk=x=>{acc.push(x);
@@ -4694,9 +4250,8 @@ function Workspace({ user, onSignOut }){
   };
   const moveNode=(id,newParent)=>{
     if(id===newParent) return;
-    // prevent moving into own descendant
     let c=newParent;while(c){if(c===id) return;c=nodes[c]?nodes[c].parentId:null;}
-    updateNode(id,{parentId:newParent,section:nodes[newParent].section});
+    updateNode(id,{parentId:newParent});
     setExpanded(e=>({...e,[newParent]:true}));
   };
   const toggleFav=id=>setStore(s=>({...s,
@@ -4711,9 +4266,7 @@ function Workspace({ user, onSignOut }){
         currentId:acc.includes(s.currentId)?fallback||DASH_ID:s.currentId};
     });
   };
-  const unarchiveNode=id=>{
-    setNodes(n=>({...n,[id]:{...n[id],archived:false}}));
-  };
+  const unarchiveNode=id=>setNodes(n=>({...n,[id]:{...n[id],archived:false}}));
 
   const duplicate=id=>{
     const src=nodes[id];if(!src) return;
@@ -4730,12 +4283,10 @@ function Workspace({ user, onSignOut }){
   const downloadPage=(id,format,withSubPages=false)=>{
     const n=nodes[id];if(!n) return;
     let content,type,ext;
-
     if(withSubPages){
-      const tree=collectPageTree(id,nodes); // [{node,depth},…]
-      if(format==='html'){
-        content=mergePagesToHTML(tree);type='text/html';ext='.html';
-      } else if(format==='txt'){
+      const tree=collectPageTree(id,nodes);
+      if(format==='html'){ content=mergePagesToHTML(tree);type='text/html';ext='.html'; }
+      else if(format==='txt'){
         content=tree.map(({node,depth},i)=>{
           const sep=i>0?'\n\n'+'━'.repeat(60)+'\n\n':'';
           const indent=depth>0?'  '.repeat(depth):'';
@@ -4744,27 +4295,20 @@ function Workspace({ user, onSignOut }){
         }).join('');
         type='text/plain';ext='.txt';
       } else {
-        // markdown
         content=tree.map(({node,depth},i)=>{
           if(i===0) return blocksToMarkdown(node);
           const hashes='#'.repeat(Math.min(depth+1,6));
           const subTitle=`${hashes} ${node.icon||''}${node.icon?' ':''}${node.title||'Untitled'}`;
-          // omit the auto-generated title line from blocksToMarkdown (first line)
           const body=blocksToMarkdown(node).split('\n').slice(2).join('\n');
           return `\n\n---\n\n<!-- depth ${depth} -->\n${subTitle}\n\n${body}`;
         }).join('');
         type='text/markdown';ext='.md';
       }
     } else {
-      if(format==='txt'){
-        content=pageToText(n);type='text/plain';ext='.txt';
-      } else if(format==='html'){
-        content=pageToHTML(n);type='text/html';ext='.html';
-      } else {
-        content=blocksToMarkdown(n);type='text/markdown';ext='.md';
-      }
+      if(format==='txt'){ content=pageToText(n);type='text/plain';ext='.txt'; }
+      else if(format==='html'){ content=pageToHTML(n);type='text/html';ext='.html'; }
+      else { content=blocksToMarkdown(n);type='text/markdown';ext='.md'; }
     }
-
     const blob=new Blob([content],{type});
     const a=document.createElement('a');
     a.href=URL.createObjectURL(blob);
@@ -4773,510 +4317,58 @@ function Workspace({ user, onSignOut }){
 
   const importPage=({title,blocks})=>{
     const id=nid();
-    const sort=Object.values(nodes).filter(n=>n.parentId===null&&n.section==='private'&&!n.trashed).length;
+    const sort=Object.values(nodes).filter(n=>n.parentId===null&&!n.trashed).length;
     setNodes(n=>({...n,[id]:{id,kind:'page',title:title||'Imported',icon:'📄',cover:'',
-      parentId:null,section:'private',sort,blocks}}));
+      parentId:null,sort,blocks}}));
     openPage(id);
   };
 
-  /* ---- file uploads ---- */
-  const trackLocalURL=(wsId,url)=>{
-    (localObjURLs.current[wsId]||(localObjURLs.current[wsId]=[])).push(url);
-  };
-  /* Central upload entry-point. Takes a File, stores it according to the active
-     workspace type, adds the record to store.uploads, and returns
-     { id, name, type, size, url, localName } for the caller to put on its block.
-     - local  → file written to ./uploads (referenced by `localName`); `url` is a
-                transient blob URL for display, never persisted.
-     - others → base64 data URL (kept inline, as before). */
+  /* ---- file uploads (written into Upload/ for both Local and Drive) ---- */
   const uploadFile=async file=>{
     const id=nid();
     const base={id,name:file.name,type:file.type||'application/octet-stream',
       size:file.size,uploadedAt:Date.now()};
-    if(activeWorkspace?.isLocalFile){
+    const active=store.active;
+    const url=URL.createObjectURL(file);
+    let localName=null;
+    if(active.type==='local'){
       const dataUrl=await readAsDataUrl(file);
-      const localName=await writeLocalUploadFile(activeWorkspace.id,file.name,dataUrl).catch(()=>null);
-      const url=URL.createObjectURL(file);
-      trackLocalURL(activeWorkspace.id,url);
-      const rec={...base,localName,wsId:activeWorkspace.id,dataUrl:url};
-      setStore(s=>({...s,uploads:[...(s.uploads||[]),rec]}));
-      return {...base,url,localName};
+      localName=await writeLocalUploadFile(active.id,file.name,dataUrl).catch(()=>null);
+    }else if(active.type==='gdrive'){
+      const safe=Date.now()+'_'+(file.name||'file').replace(/[^a-zA-Z0-9._-]/g,'_');
+      localName=await writeDriveUpload(active.folderId,safe,file).catch(()=>null);
     }
-    const dataUrl=await readAsDataUrl(file);
-    const rec={...base,dataUrl,wsId:activeWorkspaceId};
+    const rec={...base,localName,wsId:active.id,dataUrl:url};
     setStore(s=>({...s,uploads:[...(s.uploads||[]),rec]}));
-    return {...base,url:dataUrl};
+    return {...base,url,localName};
   };
 
-  /* Turn the on-disk workspace.json (file references only) into something
-     renderable: rebuild a blob URL for every uploaded file from ./uploads and
-     plug it into the upload records and the blocks that reference them. Also
-     migrates legacy workspaces that still embed base64 (writes those bytes out
-     to ./uploads and assigns a localName so the next save is lean). */
-  const hydrateLocalData=async(wsId,data)=>{
-    if(!data) return data;
-    // revoke any prior URLs for this workspace before making new ones
-    (localObjURLs.current[wsId]||[]).forEach(u=>{try{URL.revokeObjectURL(u);}catch{}});
-    localObjURLs.current[wsId]=[];
-
-    // anything below schema v2 (no version field, base64 inline) is "old format"
-    let migrated=(data.version||0)<2;
-
-    const uploads=[...(data.uploads||[])];
-    const map={}; // localName -> blob URL
-    for(let i=0;i<uploads.length;i++){
-      let u=uploads[i];
-      // migrate a legacy base64 upload into ./uploads
-      if(!u.localName && typeof u.dataUrl==='string' && u.dataUrl.startsWith('data:')){
-        const localName=await writeLocalUploadFile(wsId,u.name||'file',u.dataUrl).catch(()=>null);
-        if(localName){ u={...u,localName}; uploads[i]=u; migrated=true; }
-      }
-      if(u.localName && !map[u.localName]){
-        const res=await readLocalUploadURL(wsId,u.localName);
-        if(res){ map[u.localName]=res.url; trackLocalURL(wsId,res.url); }
-      }
-    }
-
-    // uploadId -> localName, to migrate base64 image/file blocks
-    const idToLocal={};
-    for(const u of uploads) if(u.id&&u.localName) idToLocal[u.id]=u.localName;
-
-    const nodes={};
-    for(const [id,n] of Object.entries(data.nodes||{})){
-      const blocks=(n.blocks||[]).map(b=>{
-        let localName=b.localName;
-        if(!localName && b.uploadId && idToLocal[b.uploadId]) localName=idToLocal[b.uploadId];
-        if(localName && map[localName]) return {...b,localName,url:map[localName]};
-        return localName?{...b,localName}:b;
-      });
-      nodes[id]={...n,blocks};
-    }
-
-    const hydratedUploads=uploads.map(u=>
-      u.localName&&map[u.localName] ? {...u,dataUrl:map[u.localName]} : u);
-
-    return {...data,nodes,uploads:hydratedUploads,migrated};
-  };
-
-  /* If hydrateLocalData reported the folder was in the old format, rewrite
-     workspace.json in the new (v2, file-reference) format immediately so the
-     folder is upgraded on disk on first open — not only after the next edit. */
-  const upgradeLocalFolderIfNeeded=async(wsId,name,data)=>{
-    if(!data?.migrated) return;
-    try{
-      await writeLocalWorkspaceNow(wsId,dehydrateLocalData(name||data.name||'Workspace',
-        {nodes:data.nodes,favorites:data.favorites,currentId:data.currentId,uploads:data.uploads}));
-    }catch(_){}
-  };
   const deleteUpload=id=>{
     const rec=(store.uploads||[]).find(u=>u.id===id);
-    if(rec?.localName){
-      const ws=workspaces.find(w=>w.id===rec.wsId);
-      if(ws?.isLocalFile) deleteLocalUploadFile(rec.wsId,rec.localName).catch(()=>{});
-    }
+    if(rec?.localName&&store.active.type==='local')
+      deleteLocalUploadFile(store.active.id,rec.localName).catch(()=>{});
+    // Drive uploads are pruned by the next tree write (reconcile).
     setStore(s=>({...s,uploads:(s.uploads||[]).filter(u=>u.id!==id)}));
   };
 
-  const createFromTemplate=t=>{
-    const id=addNode(null,'private',{title:t.name,icon:t.icon});
-    if(t.db){
-      updateNode(id,{kind:'database',db:newDB('table'),blocks:undefined});
-    }else{
-      updateNode(id,{blocks:t.blocks.map(b=>({id:nid(),...b}))});
-    }
-    setModal(null);openPage(id);
-  };
-
-
-
-  /* ---- workspace management ---- */
-  const switchWorkspace=async wsId=>{
-    if(!store||store.activeWorkspaceId===wsId) return;
-    const targetWs=(store.workspaces||[]).find(w=>w.id===wsId);
-
-    /* helper: flush current ws to its persistent store before switching */
-    const flushCurrent=async()=>{
-      const curWs=(store.workspaces||[]).find(w=>w.id===(store.activeWorkspaceId||'ws_main'));
-      if(curWs?.isLocalFile&&loadedLocalWs.current.has(curWs.id)){
-        await writeLocalWorkspaceNow(curWs.id,dehydrateLocalData(curWs.name,
-          {nodes:store.nodes,favorites:store.favorites,currentId:store.currentId,
-           uploads:(store.uploads||[]).filter(u=>u.wsId===curWs.id)}));
-      }
-      if(curWs?.cloudProvider){
-        clearTimeout(cloudWriteTimers.current[curWs.id]);
-        try{
-          await writeCloudWorkspace(curWs.cloudProvider,curWs.id,
-            {nodes:store.nodes,favorites:store.favorites,currentId:store.currentId},
-            curWs.cloudFileRef||null);
-        }catch(_){}
-      }
-    };
-
-    /* ── local-file workspace ── */
-    if(targetWs?.isLocalFile){
-      await flushCurrent();
-      let data=localWsData.current[wsId];
-      if(!data){
-        let handle=localWsIndex.find(l=>l.id===wsId)?.handle;
-        if(!handle){ const rec=await getLocalWorkspaceRecord(wsId); handle=rec?.handle; }
-        const {granted,reason}=await requestPermissionForHandleDetailed(handle,true);
-        if(!granted){ alert(localPermMessage(reason)); return; }
-        try{ data=await readLocalWorkspace(wsId); }catch(_){ data=null; }
-        if(data){ data=await hydrateLocalData(wsId,data); await upgradeLocalFolderIfNeeded(wsId,targetWs?.name,data); }
-        setLocalWsIndex(prev=>prev.map(l=>l.id===wsId?{...l,accessible:true}:l));
-      }
-      const fbId=nid();const fbBlk=nid();
-      const fallback={[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
-        parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}};
-      const ws=data||{nodes:fallback,favorites:[],currentId:fbId};
-      // Only cache + allow writes when we actually read real data from disk.
-      // If the read failed/was empty we show a transient fallback but DON'T
-      // cache it or mark it loaded — otherwise a later switch would treat the
-      // empty fallback as real and autosave it over the folder (a wipe).
-      if(data){ localWsData.current[wsId]=ws; loadedLocalWs.current.add(wsId); }
-      setStore(s=>({...s,
-        nodes:ws.nodes||fallback,favorites:ws.favorites||[],currentId:ws.currentId||fbId,
-        activeWorkspaceId:wsId,
-        uploads:mergeUploads(s.uploads,wsId,ws.uploads||[]),
-        workspaceSnapshots:{...(s.workspaceSnapshots||{}),
-          [s.activeWorkspaceId||'ws_main']:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}},
-      }));
-      setExpanded({});
-      return;
-    }
-
-    /* ── third-party cloud provider workspace ── */
-    if(targetWs?.cloudProvider){
-      await flushCurrent();
-      // try in-memory cache first; otherwise authenticate + fetch
-      let data=cloudWsData.current[wsId];
-      if(!data){
-        let token=getProviderToken(targetWs.cloudProvider);
-        if(!token){
-          try{ token=await authenticateProvider(targetWs.cloudProvider,{loginHint:user?.email||undefined}); }
-          catch(e){ alert(`Could not connect to ${CLOUD_PROVIDERS[targetWs.cloudProvider]?.name||targetWs.cloudProvider}: ${e.message}`); return; }
-        }
-        try{
-          data=await readCloudWorkspace(targetWs.cloudProvider,wsId,targetWs.cloudFileRef||null);
-        }catch(e){ alert(`Failed to load workspace from ${CLOUD_PROVIDERS[targetWs.cloudProvider]?.name||targetWs.cloudProvider}: ${e.message}`); return; }
-      }
-      const fbId=nid();const fbBlk=nid();
-      const fallback={[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
-        parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}};
-      const ws=data||{nodes:fallback,favorites:[],currentId:fbId};
-      cloudWsData.current[wsId]=ws;
-      setStore(s=>({...s,
-        nodes:ws.nodes||fallback,favorites:ws.favorites||[],currentId:ws.currentId||fbId,
-        activeWorkspaceId:wsId,
-        uploads:mergeUploads(s.uploads,wsId,ws.uploads||[]),
-        workspaceSnapshots:{...(s.workspaceSnapshots||{}),
-          [s.activeWorkspaceId||'ws_main']:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}},
-      }));
-      setExpanded({});
-      return;
-    }
-
-    /* ── Firebase / in-memory workspace ── */
-    await flushCurrent();
-    const fbId=nid(); const fbBlk=nid();
-    const fallbackNodes={[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
-      parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}};
-    setStore(s=>{
-      if(!s||s.activeWorkspaceId===wsId) return s;
-      const curId=s.activeWorkspaceId||'ws_main';
-      const updatedSnap={...(s.workspaceSnapshots||{}),
-        [curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}};
-      const target=updatedSnap[wsId];
-      if(!target){
-        return {...s,nodes:fallbackNodes,favorites:[],currentId:fbId,
-          activeWorkspaceId:wsId,workspaceSnapshots:updatedSnap};
-      }
-      return {...s,nodes:target.nodes,favorites:target.favorites,currentId:target.currentId,
-        activeWorkspaceId:wsId,workspaceSnapshots:updatedSnap};
-    });
-    setExpanded({});
-  };
-  const createWorkspace=(name)=>{
-    if(!name?.trim()) return;
-    const id=nid(); const startId=nid(); const startBlk=nid();
-    const emptyNodes={[startId]:{id:startId,kind:'page',title:'',icon:'',cover:'',
-      parentId:null,section:'private',sort:0,blocks:[{id:startBlk,type:'text',html:''}]}};
-    const newWs={id,name:name.trim(),isPersonal:false,members:[]};
-    setStore(s=>{
-      const curId=s.activeWorkspaceId||'ws_main';
-      const snap=s.workspaceSnapshots||{};
-      return {...s,workspaces:[...(s.workspaces||[]),newWs],
-        nodes:emptyNodes,favorites:[],currentId:startId,activeWorkspaceId:id,
-        workspaceSnapshots:{...snap,[curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
-    });
-    setExpanded({});
-  };
-
-  const createLocalWorkspace=async(name)=>{
-    // throws AbortError if user cancels the folder picker — caller handles it
-    const id=nid(); const startId=nid(); const startBlk=nid();
-    const emptyNodes={[startId]:{id:startId,kind:'page',title:'',icon:'',cover:'',
-      parentId:null,section:'private',sort:0,blocks:[{id:startBlk,type:'text',html:''}]}};
-    const initialData={name:name.trim(),version:2,nodes:emptyNodes,favorites:[],currentId:startId,uploads:[]};
-
-    // open OS folder picker + register in IndexedDB
-    const rec=await pickAndRegisterDirectory(id,name.trim());
-
-    // NEVER clobber an existing workspace: if the chosen folder already has a
-    // workspace.json, open that instead of overwriting it with an empty one.
-    let existing=null;
-    try{ existing=await readLocalWorkspace(id); }catch(_){}
-    if(existing){
-      const ok=window.confirm(
-        'This folder already contains a workspace ("'+(existing.name||rec.dirName)+'").\n\n'+
-        'Open it as-is? (Cancel to pick a different, empty folder — your data will NOT be touched.)');
-      if(!ok){ try{ await removeLocalWorkspaceRecord(id); }catch(_){} return; }
-      const data=await hydrateLocalData(id,existing);
-      const wsName=(data.name||rec.dirName||name.trim()).toString();
-      const fbId=nid();
-      const ws=data;
-      localWsData.current[id]=ws;
-      loadedLocalWs.current.add(id);
-      const newWs={id,name:wsName,isPersonal:false,isLocalFile:true,dirName:rec.dirName,members:[]};
-      setLocalWsIndex(prev=>[...prev,{id,name:wsName,dirName:rec.dirName,
-        handle:rec.handle,accessible:true,createdAt:Date.now()}]);
-      setStore(s=>{
-        const curId=s.activeWorkspaceId||'ws_main';
-        const snap=s.workspaceSnapshots||{};
-        return {...s,workspaces:[...(s.workspaces||[]),newWs],
-          nodes:ws.nodes||emptyNodes,favorites:ws.favorites||[],currentId:ws.currentId||startId,
-          activeWorkspaceId:id,
-          uploads:mergeUploads(s.uploads,id,ws.uploads||[]),
-          workspaceSnapshots:{...snap,[curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
-      });
-      setExpanded({});
-      return;
-    }
-
-    // folder is empty → safe to write the fresh workspace
-    await writeLocalWorkspaceNow(id,initialData);
-
-    const newWs={id,name:name.trim(),isPersonal:false,isLocalFile:true,
-      dirName:rec.dirName,members:[]};
-    localWsData.current[id]=initialData;
-    loadedLocalWs.current.add(id);
-    setLocalWsIndex(prev=>[...prev,{id,name:name.trim(),dirName:rec.dirName,
-      handle:rec.handle,accessible:true,createdAt:Date.now()}]);
-    setStore(s=>{
-      const curId=s.activeWorkspaceId||'ws_main';
-      const snap=s.workspaceSnapshots||{};
-      return {...s,workspaces:[...(s.workspaces||[]),newWs],
-        nodes:emptyNodes,favorites:[],currentId:startId,activeWorkspaceId:id,
-        workspaceSnapshots:{...snap,[curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
-    });
-    setExpanded({});
-  };
-
-  /* Connect an EXISTING workspace folder (e.g. one copied from another machine)
-     as a new local workspace — reads its workspace.json without overwriting. */
-  const openExistingLocalWorkspace=async()=>{
-    const id=nid();
-    let rec;
-    try{ rec=await openExistingDirectory(id); }
-    catch(e){ if(e?.name!=='AbortError') alert('Could not open the folder: '+(e?.message||e)); return; }
-    if(!rec.foundFile){
-      alert('No workspace.json was found in “'+rec.dirName+'” or its subfolders.\n\n'+
-        'Pick the folder that directly contains workspace.json (it must be at the top '+
-        'of the chosen folder, or one subfolder deep).');
-      return;
-    }
-    // workspace.json was already read by openExistingDirectory while it held the handle
-    let data=rec.data||null;
-    if(!data){ try{ data=await readLocalWorkspace(id); }catch(_){} }
-    if(!data){ alert('Found workspace.json in “'+rec.dirName+'” but could not read it (it may be corrupted or empty).'); return; }
-    data=await hydrateLocalData(id,data);
-    const name=(data?.name||rec.dirName||'Workspace').toString();
-    await upgradeLocalFolderIfNeeded(id,name,data);
-    const fbId=nid();const fbBlk=nid();
-    const fallback={[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
-      parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}};
-    const ws=data||{nodes:fallback,favorites:[],currentId:fbId};
-    localWsData.current[id]=ws;
-    loadedLocalWs.current.add(id);
-    const newWs={id,name,isPersonal:false,isLocalFile:true,dirName:rec.dirName,members:[]};
-    setLocalWsIndex(prev=>[...prev,{id,name,dirName:rec.dirName,
-      handle:rec.handle,accessible:true,createdAt:Date.now()}]);
-    setStore(s=>{
-      const curId=s.activeWorkspaceId||'ws_main';
-      const snap=s.workspaceSnapshots||{};
-      return {...s,workspaces:[...(s.workspaces||[]),newWs],
-        nodes:ws.nodes||fallback,favorites:ws.favorites||[],currentId:ws.currentId||fbId,
-        activeWorkspaceId:id,
-        uploads:mergeUploads(s.uploads,id,ws.uploads||[]),
-        workspaceSnapshots:{...snap,[curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
-    });
-    setExpanded({});
-  };
-
-  /* Create a workspace stored on a third-party cloud provider */
-  const createCloudProviderWorkspace=async(providerId,name)=>{
-    // 1. Authenticate (opens OAuth popup — must happen on user gesture)
-    let token;
-    try{ token=await authenticateProvider(providerId,{loginHint:user?.email||undefined}); }
-    catch(e){ throw new Error(`Sign-in failed: ${e.message}`); }
-
-    const id=nid(); const startId=nid(); const startBlk=nid();
-    const emptyNodes={[startId]:{id:startId,kind:'page',title:'',icon:'',cover:'',
-      parentId:null,section:'private',sort:0,blocks:[{id:startBlk,type:'text',html:''}]}};
-    const initialData={nodes:emptyNodes,favorites:[],currentId:startId};
-
-    // 2. Write the initial workspace file to the provider
-    let fileRef=null;
-    try{ fileRef=await writeCloudWorkspace(providerId,id,initialData,null); }
-    catch(e){ throw new Error(`Could not create workspace file: ${e.message}`); }
-
-    const prov=CLOUD_PROVIDERS[providerId];
-    const newWs={id,name:name.trim(),isPersonal:false,
-      cloudProvider:providerId,cloudFileRef:fileRef,members:[]};
-    cloudWsData.current[id]=initialData;
-    setStore(s=>{
-      const curId=s.activeWorkspaceId||'ws_main';
-      const snap=s.workspaceSnapshots||{};
-      return {...s,workspaces:[...(s.workspaces||[]),newWs],
-        nodes:emptyNodes,favorites:[],currentId:startId,activeWorkspaceId:id,
-        workspaceSnapshots:{...snap,[curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
-    });
-    setExpanded({});
-  };
-
-  /* Reconnect a workspace that exists in the cloud but was removed locally */
-  const reconnectCloudWorkspace=async(providerId,wsId,fileRef,wsName)=>{
-    let data;
+  /* Upload / set / clear the workspace page-background image (saved in info.md). */
+  const setPageBackground=async file=>{
     try{
-      data=await readCloudWorkspace(providerId,wsId,fileRef);
-    }catch(e){ throw new Error(`Failed to load workspace: ${e.message}`); }
-    const fbId=nid();const fbBlk=nid();
-    const fallback={[fbId]:{id:fbId,kind:'page',title:'',icon:'',cover:'',
-      parentId:null,section:'private',sort:0,blocks:[{id:fbBlk,type:'text',html:''}]}};
-    const ws=data||{nodes:fallback,favorites:[],currentId:fbId};
-    const name=wsName||ws.wsName
-      ||Object.values(ws.nodes||{}).filter(n=>!n.parentId&&!n.trashed).sort((a,b)=>(a.sort||0)-(b.sort||0))[0]?.title
-      ||'Reconnected Workspace';
-    const newWs={id:wsId,name,isPersonal:false,cloudProvider:providerId,cloudFileRef:fileRef,members:[]};
-    cloudWsData.current[wsId]=ws;
-    setStore(s=>{
-      if((s.workspaces||[]).some(w=>w.id===wsId)) return s;
-      const curId=s.activeWorkspaceId||'ws_main';
-      return {...s,workspaces:[...(s.workspaces||[]),newWs],
-        nodes:ws.nodes||fallback,favorites:ws.favorites||[],currentId:ws.currentId||fbId,
-        activeWorkspaceId:wsId,
-        workspaceSnapshots:{...(s.workspaceSnapshots||{}),
-          [curId]:{nodes:s.nodes,favorites:s.favorites,currentId:s.currentId}}};
-    });
-    setExpanded({});
+      const rec=await uploadFile(file);
+      if(rec?.localName) setStore(s=>({...s,pageBg:rec.localName,pageBgUrl:rec.url}));
+    }catch(e){ alert('Could not set the background: '+(e?.message||e)); }
   };
+  const clearPageBackground=()=>setStore(s=>({...s,pageBg:null,pageBgUrl:null}));
 
-  /* Permanently delete a workspace file from the cloud, and remove locally if connected */
-  const deleteWorkspaceFromCloud=async(providerId,fileRef,wsId)=>{
-    await deleteCloudWorkspace(providerId,fileRef,wsId);
-    const connected=(store.workspaces||[]).find(w=>
-      w.cloudProvider===providerId&&(w.cloudFileRef===fileRef||w.id===wsId));
-    if(connected) deleteWorkspace(connected.id,{skipConfirm:true});
-  };
-
-  const deleteWorkspace=(wsId,opts={})=>{
-    if(!wsId||wsId==='ws_main') return;
-    const targetWs=(store.workspaces||[]).find(w=>w.id===wsId);
-    const prov=targetWs?.cloudProvider?CLOUD_PROVIDERS[targetWs.cloudProvider]:null;
-    // For Firebase workspaces with shared members, show the two-option modal
-    if(!opts.skipConfirm&&!targetWs?.isLocalFile&&!targetWs?.cloudProvider&&!targetWs?.isShared){
-      const members=targetWs?.members||[];
-      if(members.length>0){ setModal({type:'delete-workspace',wsId}); return; }
-    }
-    const msg=targetWs?.isLocalFile
-      ?`Remove "${targetWs.name}" from the workspace list?\n\nThe folder and workspace.json file on your computer will NOT be deleted — you can add it back at any time.`
-      :targetWs?.cloudProvider
-        ?`Remove "${targetWs.name}" from the workspace list?\n\nThe file stored in ${prov?.name||'the cloud provider'} will NOT be deleted — you can reconnect it at any time.`
-        :`Delete this workspace? Its pages will be lost.`;
-    if(!opts.skipConfirm&&!confirm(msg)) return;
-    if(targetWs?.isLocalFile){
-      removeLocalWorkspaceRecord(wsId).catch(()=>{});
-      setLocalWsIndex(prev=>prev.filter(l=>l.id!==wsId));
-      delete localWsData.current[wsId];
-    }
-    if(targetWs?.cloudProvider){
-      delete cloudWsData.current[wsId];
-      clearTimeout(cloudWriteTimers.current[wsId]);
-      delete cloudWriteTimers.current[wsId];
-    }
-    // owner deleting a Firebase workspace — remove its sharedWorkspaces doc so
-    // collaborators lose access on their next load
-    if(!targetWs?.isLocalFile&&!targetWs?.cloudProvider&&!targetWs?.isShared){
-      deleteSharedWorkspace(wsId).catch(()=>{});
-    }
-    // pre-build fallback seed outside setStore to avoid double invocation in strict mode
-    const fallbackSeed=buildSeed();
-    setStore(s=>{
-      const newSnap={...(s.workspaceSnapshots||{})};
-      delete newSnap[wsId];
-      const newWorkspaces=(s.workspaces||[]).filter(w=>w.id!==wsId);
-      if(s.activeWorkspaceId!==wsId) return {...s,workspaces:newWorkspaces,workspaceSnapshots:newSnap};
-      const mainTarget=newSnap['ws_main'];
-      if(mainTarget){
-        return {...s,workspaces:newWorkspaces,nodes:mainTarget.nodes,
-          favorites:mainTarget.favorites,currentId:mainTarget.currentId,
-          activeWorkspaceId:'ws_main',workspaceSnapshots:newSnap};
-      }
-      return {...s,workspaces:newWorkspaces,nodes:fallbackSeed.nodes,
-        favorites:fallbackSeed.favorites,currentId:fallbackSeed.currentId,
-        activeWorkspaceId:'ws_main',workspaceSnapshots:newSnap};
-    });
-    setExpanded({});
-  };
-  const leaveWorkspace=async(wsId,newOwner)=>{
-    await transferWorkspaceOwnership(wsId,newOwner,user.uid);
-    const fallbackSeed=buildSeed();
-    setStore(s=>{
-      const newSnap={...(s.workspaceSnapshots||{})};
-      delete newSnap[wsId];
-      const newWorkspaces=(s.workspaces||[]).filter(w=>w.id!==wsId);
-      if(s.activeWorkspaceId!==wsId) return {...s,workspaces:newWorkspaces,workspaceSnapshots:newSnap};
-      const mainTarget=newSnap['ws_main'];
-      if(mainTarget){
-        return {...s,workspaces:newWorkspaces,nodes:mainTarget.nodes,
-          favorites:mainTarget.favorites,currentId:mainTarget.currentId,
-          activeWorkspaceId:'ws_main',workspaceSnapshots:newSnap};
-      }
-      return {...s,workspaces:newWorkspaces,nodes:fallbackSeed.nodes,
-        favorites:fallbackSeed.favorites,currentId:fallbackSeed.currentId,
-        activeWorkspaceId:'ws_main',workspaceSnapshots:newSnap};
-    });
-    setExpanded({});
-    setModal(null);
-  };
-
-  const updateWorkspaceMembers=(wsId,members)=>{
-    setStore(s=>({...s,workspaces:(s.workspaces||[]).map(w=>w.id===wsId?{...w,members}:w)}));
-  };
-
-  /* ---- node sharing ---- */
-  const shareNode=(nodeId,email,permission)=>{
-    setStore(s=>{
-      const cur=(s.sharedNodes||{})[nodeId]||[];
-      const filtered=cur.filter(x=>x.email!==email);
-      return {...s,sharedNodes:{...s.sharedNodes,[nodeId]:[...filtered,
-        {email,permission,sharedAt:new Date().toISOString()}]}};
-    });
-    setSharedPanelOpen(true);
-  };
-  const unshareNode=(nodeId,email)=>{
-    setStore(s=>{
-      const cur=(s.sharedNodes||{})[nodeId]||[];
-      const next=cur.filter(x=>x.email!==email);
-      const sharedNodes={...s.sharedNodes};
-      if(next.length) sharedNodes[nodeId]=next; else delete sharedNodes[nodeId];
-      return {...s,sharedNodes};
-    });
+  const createFromTemplate=t=>{
+    const id=addNode(null,{title:t.name,icon:t.icon});
+    if(t.db){ updateNode(id,{kind:'database',db:newDB('table'),blocks:undefined}); }
+    else{ updateNode(id,{blocks:t.blocks.map(b=>({id:nid(),...b}))}); }
+    setModal(null);openPage(id);
   };
 
   /* ---- row peek (database row as page) ---- */
   const openRow=(dbHostId,rowId)=>setPeek({dbHostId,rowId});
-  // find the db object given host (page-as-database OR a block)
   const getPeekData=()=>{
     if(!peek) return null;
     const host=nodes[peek.dbHostId];
@@ -5295,113 +4387,41 @@ function Workspace({ user, onSignOut }){
     return {db,setDb,row};
   };
   const peekData=getPeekData();
-
-  /* ---- editor openRow wrapper: host is current node ---- */
   const editorOpenRow=(db,rowId)=>openRow(currentId,rowId);
-
   const lookupNode=id=>nodes[id];
   const isDashboard=currentId===DASH_ID;
   const isStoragePage=currentId===STORAGE_ID;
+  const isTrashPage=currentId===TRASH_ID;
+  const isArchivePage=currentId===ARCHIVE_ID;
+  const isTemplatesPage=currentId===TEMPLATES_ID;
+  const renameNode=(id,title)=>updateNode(id,{...(title!==undefined?{title}:{})});
 
-  const renameNode=(id,title,section)=>updateNode(id,{
-    ...(title!==undefined?{title}:{}),
-    ...(section!==undefined?{section}:{}),
-  });
+  /* simple full-page topbar (Home / Storage / Trash / Archive) */
+  const pageTopbar=(emoji,label)=>
+    <div className="topbar">
+      {!sidebarOpen&&<div className="tb-btn" title="Open sidebar" onClick={()=>setSidebarOpen(o=>!o)}>
+        <Ic n="menu" style={{width:17,height:17}}/></div>}
+      <div className="crumbs"><div className="crumb"><span>{emoji}</span><span>{label}</span></div></div>
+      <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})} onGoHome={goHome}/>
+      <div className="topbar-actions"/>
+    </div>;
 
-  // enrich workspaces with live accessibility info from localWsIndex
-  const enrichedWorkspaces=workspaces.map(ws=>{
-    if(!ws.isLocalFile) return ws;
-    const local=localWsIndex.find(l=>l.id===ws.id);
-    // No local handle on this device (e.g. opened in another browser or after
-    // clearing site data): mark it as needing reconnect so the user can re-pick
-    // the folder instead of hitting a dead end.
-    if(!local) return {...ws,accessible:false,unlinked:true};
-    return {...ws,accessible:local.accessible,dirName:local.dirName||ws.dirName};
-  });
-
-  // Re-pick the OS folder for a local workspace whose handle is missing on this
-  // device, register it under the same id, then switch to it. Must run inside a
-  // user gesture (the folder picker requires user activation).
-  const relinkLocalWorkspace=async wsId=>{
-    if(!isLocalFSSupported()){ alert(LOCAL_FS_UNSUPPORTED_MSG); return; }
-    const ws=(workspaces||[]).find(w=>w.id===wsId);
-    try{
-      const rec=await relinkAndRegisterDirectory(wsId,ws?.name||'Workspace');
-      const entry={id:wsId,name:ws?.name||rec.dirName,dirName:rec.dirName,
-        handle:rec.handle,accessible:true,createdAt:Date.now()};
-      setLocalWsIndex(prev=>prev.some(l=>l.id===wsId)
-        ?prev.map(l=>l.id===wsId?entry:l)
-        :[...prev,entry]);
-      if(!rec.foundFile){
-        alert('No existing workspace.json was found in “'+rec.dirName+'” or its subfolders. '+
-          'This workspace will start empty here and save into that folder. '+
-          'If your content is elsewhere, pick the exact folder that contains workspace.json.');
-      }
-      // drop any stale cached blank so the new folder is re-read from disk
-      delete localWsData.current[wsId];
-      if((store?.activeWorkspaceId||'ws_main')===wsId){
-        // Already the active workspace — switchWorkspace would no-op, so load
-        // the freshly linked folder's content into the current view directly.
-        let data=null;
-        try{ data=await readLocalWorkspace(wsId); }catch(_){}
-        if(data){ data=await hydrateLocalData(wsId,data); await upgradeLocalFolderIfNeeded(wsId,ws?.name,data); }
-        if(data){
-          loadedLocalWs.current.add(wsId);
-          localWsData.current[wsId]=data;
-          const fbId=nid();
-          setStore(s=>({...s,
-            nodes:data.nodes||{},favorites:data.favorites||[],
-            currentId:data.currentId||Object.keys(data.nodes||{})[0]||fbId,
-            uploads:mergeUploads(s.uploads,wsId,data.uploads||[])}));
-          setExpanded({});
-        }
-      }else{
-        await switchWorkspace(wsId);
-      }
-    }catch(e){
-      if(e?.name!=='AbortError') alert('Could not link the folder: '+(e?.message||e));
-    }
-  };
-
-  const handleReconnectLocal=async wsId=>{
-    if(!isLocalFSSupported()){ alert(LOCAL_FS_UNSUPPORTED_MSG); return; }
-    // Use the in-memory directory handle so requestPermission() runs inside the
-    // click's user-activation window (no IndexedDB await first) — otherwise the
-    // browser silently suppresses the permission prompt.
-    let handle=localWsIndex.find(l=>l.id===wsId)?.handle;
-    if(!handle){ const rec=await getLocalWorkspaceRecord(wsId); handle=rec?.handle; }
-    // Folder link lost on this device — let the user re-pick the folder.
-    if(!handle){ await relinkLocalWorkspace(wsId); return; }
-    const {granted,reason}=await requestPermissionForHandleDetailed(handle,true);
-    if(!granted){ alert(localPermMessage(reason)); return; }
-    setLocalWsIndex(prev=>prev.map(l=>l.id===wsId?{...l,accessible:true}:l));
-    // now switch to it
-    await switchWorkspace(wsId);
-  };
-
-  const handleBrowseCloudWorkspaces=async(providerId)=>{
-    // Authenticate while still inside the user-gesture window
-    await authenticateProvider(providerId,{loginHint:user?.email||undefined});
-    setModal({type:'browse-cloud',providerId});
-  };
-
-  return <div className={cx('app',theme==='dark'&&'dark',`t-${accent}`)}>
+  return <div className={cx('app',theme==='dark'&&'dark',`t-${accent}`)}
+    style={{'--ws-font':fontStack(store.font)}}>
     <Sidebar open={sidebarOpen} nodes={nodes} favorites={favorites} currentId={currentId}
       expanded={expanded} toggleExp={toggleExp} openPage={openPage}
       addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={moveNode}
       addTop={addTop} setModal={setModal}
-      workspaces={enrichedWorkspaces} activeWorkspaceId={activeWorkspaceId}
+      workspaces={workspaces} activeWorkspaceId={activeWorkspaceId}
       onSwitchWorkspace={switchWorkspace}
       onCreateWorkspace={()=>setModal({type:'create-workspace'})}
-      onShareWorkspace={wsId=>setModal({type:'share-workspace',wsId})}
       onDeleteWorkspace={deleteWorkspace}
-      onReconnectLocal={handleReconnectLocal} onRelinkLocal={relinkLocalWorkspace}
-      onOpenExistingWorkspace={isLocalFSSupported()?openExistingLocalWorkspace:undefined}
-      onBrowseCloudWorkspaces={handleBrowseCloudWorkspaces}
+      onReconnectLocal={switchWorkspace}
       toggleFav={toggleFav} duplicate={duplicate} exportPage={exportPage}
-      renameNode={renameNode} user={user} notifCount={notifCount}/>
+      renameNode={renameNode} onGoHome={goHome}/>
 
-    <div className="main">
+    <div className={cx('main',store.pageBgUrl&&'has-page-bg')}
+      style={store.pageBgUrl?{'--page-bg':`url("${store.pageBgUrl}")`}:undefined}>
       {isStoragePage
         ? <>
             <div className="topbar">
@@ -5411,8 +4431,8 @@ function Workspace({ user, onSignOut }){
               <div className="crumbs">
                 <div className="crumb"><span>📦</span><span>Storage</span></div>
               </div>
-              <StorageBadge ws={activeWorkspace}
-                onCreateWorkspace={()=>setModal({type:'create-workspace'})}/>
+              <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
+                onGoHome={goHome}/>
               <div className="topbar-actions"/>
             </div>
             <StoragePage uploads={scopedUploads} activeWorkspace={activeWorkspace}
@@ -5427,27 +4447,27 @@ function Workspace({ user, onSignOut }){
               <div className="crumbs">
                 <div className="crumb"><span>🏠</span><span>Home</span></div>
               </div>
-              <StorageBadge ws={activeWorkspace}
-                onCreateWorkspace={()=>setModal({type:'create-workspace'})}/>
-              <div className="topbar-actions">
-                <div className="tb-btn" title="Shared documents" style={{position:'relative'}}
-                  onClick={()=>setSharedPanelOpen(o=>!o)}>
-                  <Ic n="share" style={{width:17,height:17}}/>
-                  {sharedCount>0&&<span className="tb-badge">{sharedCount}</span>}
-                </div>
-              </div>
+              <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
+                onGoHome={goHome}/>
+              <div className="topbar-actions"/>
             </div>
             <Dashboard nodes={nodes} favorites={favorites} openPage={openPage}
-              addTop={addTop} setModal={setModal}
-              activeWorkspace={activeWorkspace} sharedNodes={sharedNodes}/>
+              addTop={addTop} setModal={setModal} activeWorkspace={activeWorkspace}/>
           </>
+        : isTrashPage
+        ? <>{pageTopbar('🗑️','Trash')}
+            <TrashPage nodes={nodes} restore={restore} deleteForever={deleteForever}/></>
+        : isArchivePage
+        ? <>{pageTopbar('📦','Archive')}
+            <ArchivePage nodes={nodes} unarchiveNode={unarchiveNode} deleteForever={deleteForever}/></>
+        : isTemplatesPage
+        ? <>{pageTopbar('🧩','Templates')}
+            <TemplatesPage create={createFromTemplate}/></>
         : <>
             <Topbar node={node} nodes={nodes} openPage={openPage}
               toggleSidebar={()=>setSidebarOpen(o=>!o)} sidebarOpen={sidebarOpen}
               toggleFav={toggleFav} isFav={node&&favorites.includes(node.id)} setModal={setModal}
-              sharedCount={sharedCount} onToggleSharedPanel={()=>setSharedPanelOpen(o=>!o)}
-              notifCount={notifCount} downloadPage={downloadPage}
-              activeWorkspace={activeWorkspace}/>
+              downloadPage={downloadPage} activeWorkspace={activeWorkspace} onGoHome={goHome}/>
             {node&&<Editor key={node.id} node={node} update={updateNode}
               createChild={createChild} openPage={openPage}
               lookupNode={lookupNode} openRow={editorOpenRow}
@@ -5457,18 +4477,11 @@ function Workspace({ user, onSignOut }){
           </>}
     </div>
 
-    {sharedPanelOpen&&
-      <SharedPanel nodes={nodes} sharedNodes={sharedNodes}
-        onOpen={id=>{openPage(id);}}
-        onUnshare={unshareNode}
-        onClose={()=>setSharedPanelOpen(false)}/>}
-
     {showTutorial&&
       <TutorialOverlay
-        onComplete={()=>{patch({tutorialCompleted:true});setShowTutorial(false);}}
-        onSkip={()=>{patch({tutorialCompleted:true});setShowTutorial(false);}}/>}
+        onComplete={()=>{setCookie('ws_tutorial','1');patch({tutorialCompleted:true});setShowTutorial(false);}}
+        onSkip={()=>{setCookie('ws_tutorial','1');patch({tutorialCompleted:true});setShowTutorial(false);}}/>}
 
-    {/* row peek */}
     {peekData&&
       <RowPeek db={peekData.db} row={peekData.row}
         onChange={updatedRow=>peekData.setDb({...peekData.db,
@@ -5480,77 +4493,34 @@ function Workspace({ user, onSignOut }){
       <ImportModal onImport={importPage} onClose={()=>setModal(null)}/>}
     {modal&&modal.type==='search'&&
       <SearchModal nodes={nodes} openPage={openPage} onClose={()=>setModal(null)}/>}
-    {modal&&modal.type==='trash'&&
-      <TrashModal nodes={nodes} restore={restore} deleteForever={deleteForever}
-        onClose={()=>setModal(null)}/>}
-    {modal&&modal.type==='archive'&&
-      <ArchiveModal nodes={nodes} unarchiveNode={unarchiveNode} deleteForever={deleteForever}
-        onClose={()=>setModal(null)}/>}
     {modal&&modal.type==='create-workspace'&&
       <CreateWorkspaceModal
-        onCreateCloud={name=>{createWorkspace(name);}}
-        onCreateLocal={createLocalWorkspace}
-        onCreateCloudProvider={createCloudProviderWorkspace}
-        onOpenExisting={isLocalFSSupported()?openExistingLocalWorkspace:undefined}
+        onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
+        onDriveNew={connectDriveNew} onDriveExisting={()=>connectDriveExisting(null)}
         onClose={()=>setModal(null)}/>}
-    {modal&&modal.type==='templates'&&
-      <TemplatesModal create={createFromTemplate} onClose={()=>setModal(null)}/>}
     {modal&&modal.type==='shortcuts'&&
       <ShortcutsModal onClose={()=>setModal(null)}/>}
     {modal&&modal.type==='settings'&&
       <SettingsModal theme={theme} setTheme={t=>patch({theme:t})}
         accent={accent} setAccent={a=>patch({accent:a})}
+        font={store.font} setFont={f=>patch({font:f})}
+        description={store.description} setDescription={d=>patch({description:d})}
+        pageBgUrl={store.pageBgUrl} onUploadBg={setPageBackground} onClearBg={clearPageBackground}
         nodeCount={Object.values(nodes).filter(n=>!n.trashed&&!n.archived).length}
+        activeWorkspace={activeWorkspace} onGoHome={goHome}
         onClose={()=>setModal(null)}
-        user={user} onSignOut={onSignOut}
         onRestartTutorial={()=>{setModal(null);setShowTutorial(true);}}/>}
-    {modal&&modal.type==='inbox'&&
-      <InboxModal
-        notifications={notifications}
-        onMarkRead={async id=>{
-          setNotifications(prev=>prev.map(n=>n.id===id?{...n,read:true}:n));
-          await markNotificationRead(user.uid,id);
-        }}
-        onSwitchWorkspace={wsId=>switchWorkspace(wsId)}
-        onClose={()=>setModal(null)}/>}
-    {modal&&modal.type==='share-doc'&&node&&
-      <ShareDocModal
-        node={nodes[modal.nodeId]||node}
-        shares={(sharedNodes)[modal.nodeId]||[]}
-        onAdd={(email,perm)=>shareNode(modal.nodeId,email,perm)}
-        onRemove={email=>unshareNode(modal.nodeId,email)}
-        onClose={()=>setModal(null)}/>}
-    {modal&&modal.type==='share-workspace'&&(()=>{
-      const targetWs=workspaces.find(w=>w.id===modal.wsId)||activeWorkspace;
-      if(targetWs.isPersonal) return null;
-      return <ShareWorkspaceModal
-        workspace={targetWs}
-        user={user}
-        currentSnapshot={{nodes,favorites,currentId}}
-        onUpdateMembers={members=>updateWorkspaceMembers(targetWs.id,members)}
-        onClose={()=>setModal(null)}/>;
-    })()}
-    {modal&&modal.type==='delete-workspace'&&(()=>{
-      const targetWs=workspaces.find(w=>w.id===modal.wsId);
-      if(!targetWs) return null;
-      return <DeleteWorkspaceModal
-        workspace={targetWs}
-        onDeleteAll={()=>deleteWorkspace(modal.wsId,{skipConfirm:true})}
-        onLeave={newOwner=>leaveWorkspace(modal.wsId,newOwner)}
-        onClose={()=>setModal(null)}/>;
-    })()}
     {modal&&modal.type==='page-menu'&&node&&
       <PageMenu node={node} nodes={nodes} onClose={()=>setModal(null)} trashNode={trashNode}
         duplicate={duplicate} setModal={setModal} downloadPage={downloadPage}/>}
     {modal&&modal.type==='browse-cloud'&&
       <CloudWorkspacesModal
-        providerId={modal.providerId}
-        connectedWorkspaces={store.workspaces||[]}
-        onReconnect={reconnectCloudWorkspace}
-        onDeleteFromCloud={deleteWorkspaceFromCloud}
+        connectedWorkspaces={workspaces}
+        onReconnect={(folderId,name)=>connectDriveExisting(folderId,name)}
         onClose={()=>setModal(null)}/>}
   </div>;
 }
+
 
 /* ---- collect node + all non-trashed descendants, depth-first ---- */
 function collectPageTree(rootId, allNodes){

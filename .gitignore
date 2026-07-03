@@ -7,7 +7,7 @@ upcoming_upgrades
 dist
 dist-ssr
 
-# local env files — NEVER commit your real Firebase keys
+# local env files
 .env
 .env.local
 .env.*.local

@@ -1,138 +1,162 @@
-# Workspace — Notion-style Connected Workspace
+# Workspace — Notes & databases as plain Markdown
 
-A fast, block-based workspace app built with **Vite + React 18 + Firebase**. Works instantly in your browser with no setup required, and optionally syncs to the cloud.
+**Version 2.0.0**
 
----
-
-## Features
-
-- **Block editor** — text, headings (H1–H3), to-do lists, bullet lists, numbered lists, toggles, quotes, callouts, dividers, code blocks (with language selection), and image blocks
-- **Nested pages** — infinite page hierarchy in the sidebar
-- **Multi-view databases** — table, kanban board, gallery, and calendar views with filtering and sorting
-- **Slash commands** — type `/` anywhere to insert any block type
-- **Instant search** — find pages across your entire workspace
-- **Favorites** — pin pages for quick access
-- **Trash & restore** — soft-delete pages and restore them any time
-- **Templates** — built-in page templates to get started fast
-- **Page customization** — emoji icons, gradient covers, and colored blocks
-- **Dark mode** — full theme toggle
-- **Keyboard shortcuts** — navigate and edit without leaving the keyboard
-- **Two storage modes** — local browser storage (no setup) or Firebase cloud sync
-- **Local filesystem** — save workspaces as files on your machine (via File System Access API)
-- **Cloud storage providers** — connect external cloud providers (Google Drive, etc.)
-- **Sharing** — share workspaces with other users (cloud mode)
-- **Import** — import `.docx` files via mammoth
+A fast, block-based, Notion-style workspace built with **Vite + React 18**. There
+are no accounts and no backend. Everything you write is stored as **ordinary
+folders and Markdown files** — either in a folder on your computer or mirrored to
+your Google Drive — so your data stays readable and usable even if this app goes
+away.
 
 ---
 
-## Quick Start
+## Highlights
+
+- **Your data is just files** — pages are plain `.md` files with a little YAML
+  frontmatter; folders mirror the page hierarchy. Open them in any editor.
+- **No account, no login, no cloud lock-in** — nothing is sent anywhere except
+  (optionally) your own Google Drive.
+- **Two workspace types** — a **Local** folder (via the File System Access API)
+  or **Google Drive** (a real, browsable folder in your Drive).
+- **Block editor** — text, headings, to-dos, lists, toggles, quotes, callouts,
+  dividers, code blocks, images and file attachments.
+- **Nested pages** — infinite page hierarchy, mirrored as nested folders on disk.
+- **Multi-view databases** — table, board, gallery, list and calendar views.
+- **Slash commands, instant search, favorites, trash & archive, templates,
+  dark mode and keyboard shortcuts.**
+- **Import** — bring in `.docx` files via mammoth.
+
+---
+
+## Quick start
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open http://localhost:5173.
+Open http://localhost:5173 and pick **Local folder** or **Google Drive** from the
+homepage. Local folders require a Chromium browser (Chrome, Edge, Brave); Google
+Drive works everywhere.
 
-The app opens immediately in **Local Mode** — no login, data saved to your browser's `localStorage`. To enable accounts and cloud sync, see [SETUP.md](./SETUP.md).
-
----
-
-## Scripts
-
-| Command            | Description                           |
-|--------------------|---------------------------------------|
-| `npm run dev`      | Start dev server with hot reload      |
-| `npm run build`    | Production build into `dist/`         |
-| `npm run preview`  | Preview the production build locally  |
+| Command           | Description                          |
+|-------------------|--------------------------------------|
+| `npm run dev`     | Start dev server with hot reload     |
+| `npm run build`   | Production build into `dist/`        |
+| `npm run preview` | Preview the production build         |
 
 ---
 
-## Storage Modes
+## How your data is stored on disk
 
-The app detects your Firebase configuration and adapts automatically:
-
-|                  | **Local Mode** (default)                    | **Cloud Mode** (after setup)               |
-|------------------|---------------------------------------------|--------------------------------------------|
-| **Trigger**      | `.env` empty or missing                     | Real `VITE_FIREBASE_*` keys present        |
-| **Login**        | None — opens straight to workspace          | Email/password or Google sign-in           |
-| **Storage**      | Browser `localStorage`                      | Cloud Firestore (`workspaces/{uid}`)       |
-| **Devices**      | This browser only                           | Synced across every device you sign in on  |
-
-Switch from Local to Cloud Mode at any time by filling in `.env` — no code changes needed.
-
----
-
-## Firebase Setup (Cloud Mode)
-
-Copy the config template and add your Firebase project keys:
-
-```bash
-cp .env.example .env
-```
-
-```env
-VITE_FIREBASE_API_KEY=
-VITE_FIREBASE_AUTH_DOMAIN=
-VITE_FIREBASE_PROJECT_ID=
-VITE_FIREBASE_STORAGE_BUCKET=
-VITE_FIREBASE_MESSAGING_SENDER_ID=
-VITE_FIREBASE_APP_ID=
-```
-
-See [SETUP.md](./SETUP.md) for the full step-by-step guide covering Firebase Authentication, Firestore security rules, and deployment options (Vercel, Netlify, Firebase Hosting).
-
----
-
-## Project Structure
+Each workspace is a self-describing folder tree. Pages with children become
+folders holding a `master page.md`; leaf pages are single `.md` files. Ordering
+and metadata live in each file's YAML frontmatter.
 
 ```
-index.html              Boot screen and root mount point
-vite.config.js          Vite config (vendor chunk splitting)
-.env.example            Firebase config template — copy to .env
+My Workspace/                 (the folder you picked — its name is the workspace title)
+├── Upload/                   uploaded images & file attachments
+│   └── sunset.jpg
+└── Space/                    all top-level pages
+    ├── Meeting Notes.md      a page with no children
+    └── Homework/             a page WITH children → a folder
+        ├── master page.md    the "Homework" page's own content
+        ├── Essay.md
+        └── Math/
+            ├── master page.md
+            ├── Problem set 1.md
+            └── Problem set 2.md
+```
+
+A page file looks like this — readable on its own, no app required:
+
+```markdown
+---
+id: n_start
+title: Getting Started
+icon: 📓
+order: 0
+type: page
+favorite: true
+---
+
+# 📓 Getting Started
+
+Welcome to your **connected workspace**.
+
+> 💡 Callouts are blockquotes with a leading emoji.
+
+- [x] To-dos are GitHub-style checkboxes
+```
+
+Databases keep their structure (properties, rows and views) in the frontmatter
+`db:` block and render a readable Markdown table in the body.
+
+There is **no JSON** anywhere in your data.
+
+---
+
+## Persistence & local state
+
+- The **active workspace** (its type, name, and Drive folder id) plus your
+  **theme** are remembered in small browser **cookies**, so the app reconnects to
+  the same workspace on your next visit.
+- For a Local workspace, the folder **handle** is kept in the browser's IndexedDB
+  (it can't live in a cookie). Chromium asks you to re-grant access once per
+  session — click **Reconnect** on the homepage.
+- For Google Drive, the OAuth token lives in `sessionStorage`; sign in again if
+  it has expired.
+
+---
+
+## Project structure
+
+```
+index.html          Boot screen and root mount point
+vite.config.js      Vite config (vendor chunk splitting)
 src/
-  main.jsx              Entry point
-  App.jsx               Auth gate: loading → sign-in → workspace
-  auth.jsx              useAuth() hook + sign-in / sign-up screen
-  firebase.js           Firebase init (graceful fallback if unconfigured)
-  storage.js            Persistence layer — Firestore or localStorage
-  workspace.jsx         Full workspace app: editor, databases, modals
-  localfs.js            File System Access API integration
-  cloudstorage.js       External cloud provider integration
-  styles.css            Theme tokens, components, dark mode
-public/
-  oauth-callback.html   OAuth redirect handler for cloud providers
+  main.jsx          Entry point
+  App.jsx           Restores theme, renders the workspace
+  workspace.jsx     The full app: homepage, editor, databases, sidebar, modals
+  markdown.js       Workspace ⇄ folder-of-Markdown serialization (pure)
+  localfs.js        Local folder storage (File System Access API + IndexedDB)
+  cloudstorage.js   Google Drive folder-tree mirror
+  cookies.js        Tiny cookie helpers (active-workspace pointer + theme)
+  styles.css        Theme tokens, components, dark mode
 ```
 
 ---
 
-## How Persistence Works
+## Tech stack
 
-In cloud mode, the entire workspace (`{ nodes, favorites, currentId, theme }`) is stored as a **single Firestore document per user** at `workspaces/{uid}`. Writes are debounced by 700 ms so rapid edits coalesce into one network call.
-
-Firestore documents support up to ~1 MB, which is sufficient for hundreds of pages of text. See [SETUP.md → Going further](./SETUP.md#going-further-optional-improvements) for guidance on scaling beyond that.
-
----
-
-## Tech Stack
-
-| Layer       | Technology                                   |
-|-------------|----------------------------------------------|
-| Build tool  | Vite 6                                       |
-| UI          | React 18                                     |
-| Backend     | Firebase 11 (Authentication + Firestore)     |
-| Icons       | lucide-react                                 |
-| Import      | mammoth (`.docx` → blocks)                   |
-| Fonts       | Fraunces (display) + Hanken Grotesk (UI)     |
+| Layer      | Technology                                    |
+|------------|-----------------------------------------------|
+| Build tool | Vite 6                                        |
+| UI         | React 18                                      |
+| Storage    | File System Access API · Google Drive API     |
+| Frontmatter| js-yaml                                        |
+| Icons      | lucide-react                                   |
+| Import     | mammoth (`.docx` → blocks)                     |
 
 ---
 
 ## Deployment
 
-The built `dist/` folder is a static site that can be hosted anywhere:
+The built `dist/` folder is a static site — host it anywhere (Vercel, Netlify,
+GitHub Pages, any static host). To use Google Drive on a deployed site, add the
+site's origin as an **Authorised JavaScript origin** on the Google Cloud OAuth
+client, and ensure the Google Drive API is enabled.
 
-- **Vercel** — import the repo, set framework to Vite, add env vars
-- **Netlify** — build command `npm run build`, publish dir `dist`, add env vars
-- **Firebase Hosting** — `firebase init hosting && npm run build && firebase deploy`
+---
 
-After deploying, add your live domain to Firebase → Authentication → Authorized Domains so Google sign-in works on the live site.
+## Versions
+
+Current release: **2.0.0**. Full release notes live in the [`versions/`](./versions)
+folder.
+
+| Version | Date       | Highlights                                                        |
+|---------|------------|-------------------------------------------------------------------|
+| [2.0.0](./versions/v2.0.0.md) | 2026-07-03 | Firebase/accounts removed; plain-Markdown storage (Local + Google Drive); `info.md`, `trash/` & `archive/` folders; homepage; Trash/Archive/Templates as full pages |
+| [1.2.0](./versions/v1.2.0.md) | 2026-05-29 | File attachment, storage icons, code-block redesign               |
+| 1.1.0   | 2026-05-28 | Feature-complete initial release                                  |
+| 1.0.0   | —          | Initial commit / project scaffold                                 |

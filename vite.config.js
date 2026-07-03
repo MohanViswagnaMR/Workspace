@@ -16,7 +16,6 @@ export default defineConfig({
         // Split heavy vendors into their own cacheable chunks.
         manualChunks: {
           react: ['react', 'react-dom'],
-          firebase: ['firebase/app', 'firebase/auth', 'firebase/firestore'],
         },
       },
     },
