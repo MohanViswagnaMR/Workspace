@@ -56,6 +56,7 @@ import {
   createDriveWorkspace, listDriveWorkspaces,
   writeGdriveWorkspaceTree, readGdriveWorkspaceTree,
   writeDriveUpload, deleteDriveWorkspace,
+  readDriveWorkspaceMeta, renameDriveWorkspace, updateDriveWorkspaceDescription,
 } from './cloudstorage.js';
 import {
   readActivePointer, writeActivePointer, clearActivePointer,
@@ -125,9 +126,10 @@ const CMDS = [
 ];
 
 const SHORTCUTS = [
-  ['Quick search / open','Ctrl/⌘ + K'],['New page','Ctrl/⌘ + N'],
+  ['Quick search / open','Ctrl/⌘ + K'],['New page','Alt + N'],
   ['Toggle sidebar','Ctrl/⌘ + \\'],['Toggle dark mode','Ctrl/⌘ + Shift + L'],
-  ['Open slash menu','/'],['Bold','Ctrl/⌘ + B'],['Italic','Ctrl/⌘ + I'],
+  ['Open slash menu','/'],['Add a block (block menu)','Ctrl/⌘ + Enter'],
+  ['Bold','Ctrl/⌘ + B'],['Italic','Ctrl/⌘ + I'],
   ['Underline','Ctrl/⌘ + U'],['Strikethrough','Ctrl/⌘ + Shift + S'],['Inline code','Ctrl/⌘ + E'],
   ['Indent block','Tab'],['Outdent block','Shift + Tab'],
   ['New block','Enter'],['Soft line break','Shift + Enter'],
@@ -136,6 +138,21 @@ const SHORTCUTS = [
   ['To-do','[]  + space'],['Toggle','>  + space'],['Divider','---'],
   ['Show shortcuts','Ctrl/⌘ + /'],['Close popup','Esc'],
 ];
+
+/* Is this a Mac / iOS device? Used to show the right modifier symbols. */
+const IS_MAC = typeof navigator!=='undefined' &&
+  /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
+
+/* Render a canonical shortcut string with platform-correct keys, e.g.
+   "Ctrl/⌘ + Shift + L" → "⌘ ⇧ L" on Mac, "Ctrl + Shift + L" elsewhere. */
+function fmtShortcut(s){
+  if(IS_MAC){
+    return s.replace(/Ctrl\/⌘/g,'⌘').replace(/\bCtrl\b/g,'⌘')
+      .replace(/\bAlt\b/g,'⌥').replace(/\bShift\b/g,'⇧')
+      .replace(/\bEnter\b/g,'↵').replace(/ \+ /g,' ');
+  }
+  return s.replace(/Ctrl\/⌘/g,'Ctrl');
+}
 
 /* ---------- Lucide icons ---------- */
 const ICON_MAP = {
@@ -1016,6 +1033,12 @@ function Block(props){
       if(e.key==='/'){
         setTimeout(()=>{ const r=el.getBoundingClientRect();
           onSlash({blockId:block.id,rect:r,el}); },0);
+      }
+      // Ctrl/⌘ + Enter → open the block-insert menu (add a block) without typing "/"
+      if((e.metaKey||e.ctrlKey) && e.key==='Enter'){
+        e.preventDefault(); e.stopPropagation();
+        onSlash({blockId:block.id,rect:el.getBoundingClientRect(),el});
+        return;
       }
       if(e.key==='Enter' && !e.shiftKey){
         e.preventDefault();
@@ -2159,8 +2182,6 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
           <small>{wsSub}</small>
         </div>
       </div>
-      <div className="icon-btn" title="New page" onClick={()=>addTop()}>
-        <Ic n="plus"/></div>
       {wsPop&&<WorkspaceSwitcher rect={wsPop} workspaces={workspaces||[activeWs]}
         activeId={activeWorkspaceId} onSwitch={onSwitchWorkspace}
         onCreate={onCreateWorkspace} onDelete={onDeleteWorkspace}
@@ -2168,7 +2189,12 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
         onClose={()=>setWsPop(null)}/>}
     </div>
     <div className="nav">
-      {navRow('search','Search',()=>setModal({type:'search'}),'⌘K')}
+      <button className="new-page-btn" onClick={()=>addTop()} title={`Create a new page (${fmtShortcut('Alt + N')})`}>
+        <span className="np-ic"><Ic n="plus"/></span>
+        <span className="np-label">New page</span>
+        <span className="np-kbd">{fmtShortcut('Alt + N')}</span>
+      </button>
+      {navRow('search','Search',()=>setModal({type:'search'}),fmtShortcut('Ctrl/⌘ + K'))}
       {navRow('dashboard','Home',()=>openPage(DASH_ID),null,currentId===DASH_ID)}
     </div>
     <div className="nav-scroll">
@@ -2208,6 +2234,7 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
     </div>
     <div className="sidebar-foot">
       {navRow('settings','Settings',()=>setModal({type:'settings'}))}
+      {navRow('keyboard','Keyboard shortcuts',()=>setModal({type:'shortcuts'}),fmtShortcut('Ctrl/⌘ + /'))}
       <div className="tree-item ws-close" onClick={onGoHome}
         title="Close this workspace and return to the homepage">
         <span className="tree-emoji" style={{fontSize:14}}><Ic n="log-out"/></span>
@@ -2639,19 +2666,29 @@ function StoragePage({uploads,activeWorkspace,onDeleteUpload,onUpload}){
 }
 
 /* ---------------- Storage location badge ---------------- */
-function StorageBadge({ws, onCreateWorkspace, onGoHome}) {
+function StorageBadge({ws, onCreateWorkspace, onGoHome, saveState}) {
   const [pop, setPop] = useState(null);
   if (!ws) return null;
   const isLocal = ws.type === 'local';
   const label = isLocal ? 'Local' : GDRIVE.shortName;
   const detail = isLocal ? 'Saved on this computer' : `Saved to ${GDRIVE.name}`;
   const BIcon = isLocal ? <HardDrive size={12}/> : <span style={{fontSize:11,lineHeight:1}}>{GDRIVE.emoji}</span>;
+  const where = isLocal ? 'your local folder' : GDRIVE.name;
   return <>
     <div className="storage-badge" onClick={e=>setPop(e.currentTarget.getBoundingClientRect())}
       title={`Storage: ${detail}`}>
       {BIcon}
       <span>{label}</span>
     </div>
+    {saveState&&<div className={cx('save-pill',saveState)}
+      title={saveState==='saving'?`Saving your changes to ${where}…`
+        :saveState==='error'?`Could not save to ${where} — your changes are still here. Check your connection or reconnect.`
+        :`All changes saved to ${where}.`}>
+      {saveState==='saving'?<span className="save-spin"/>
+        :saveState==='error'?<Ic n="x" style={{width:13,height:13}}/>
+        :<Ic n="check" style={{width:13,height:13}}/>}
+      <span className="save-pill-tx">{saveState==='saving'?'Saving…':saveState==='error'?'Unsaved':'Saved'}</span>
+    </div>}
     {pop&&<Popup rect={pop} onClose={()=>setPop(null)} width={250}>
       <div style={{padding:'14px 16px 10px'}}>
         <div style={{fontSize:10,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',
@@ -2689,7 +2726,7 @@ function StorageBadge({ws, onCreateWorkspace, onGoHome}) {
 
 /* ---------------- Topbar ---------------- */
 function Topbar({node,nodes,openPage,toggleSidebar,sidebarOpen,toggleFav,isFav,setModal,
-  downloadPage,activeWorkspace,onGoHome}){
+  downloadPage,activeWorkspace,onGoHome,saveState}){
   const chain=[]; let c=node;
   while(c){ chain.unshift(c); c=c.parentId?nodes[c.parentId]:null; }
   const [dlMenu,setDlMenu]=useState(null);
@@ -2717,7 +2754,7 @@ function Topbar({node,nodes,openPage,toggleSidebar,sidebarOpen,toggleFav,isFav,s
       <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{diskPath}</span>
     </div>}
     <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
-      onGoHome={onGoHome}/>
+      onGoHome={onGoHome} saveState={saveState}/>
     <div className="topbar-actions">
       <div className="tb-btn" title={isFav?'Favorited':'Add to Favorites'}
         onClick={()=>toggleFav(node.id)} style={{color:isFav?'#eab308':undefined}}>
@@ -3398,7 +3435,7 @@ function ShortcutsModal({onClose}){
         {SHORTCUTS.map((s,i)=>
           <div key={i} className="kbd-item">
             <span>{s[0]}</span>
-            <kbd className="kbd">{s[1]}</kbd>
+            <kbd className="kbd">{fmtShortcut(s[1])}</kbd>
           </div>)}
       </div>
     </div>
@@ -3464,9 +3501,15 @@ function CloudWorkspacesModal({connectedWorkspaces,onReconnect,onClose}){
   const [busyId,setBusyId]=useState(null);
   useEffect(()=>{
     let cancelled=false;
-    listDriveWorkspaces()
-      .then(list=>{ if(!cancelled) setFolders(list); })
-      .catch(e=>{ if(!cancelled) setError(e.message); });
+    (async()=>{
+      try{
+        // If the Drive session has expired / never started, ask the user to
+        // reconnect before we try to list their workspaces.
+        if(!getDriveToken()) await authenticateGoogleDrive();
+        const list=await listDriveWorkspaces();
+        if(!cancelled) setFolders(list);
+      }catch(e){ if(!cancelled){ setError(e.message||'Could not connect to Google Drive.'); setFolders([]); } }
+    })();
     return ()=>{ cancelled=true; };
   },[]);
   const connectedIds=new Set((connectedWorkspaces||[]).filter(w=>w.type==='gdrive').map(w=>w.id));
@@ -3522,6 +3565,142 @@ function CloudWorkspacesModal({connectedWorkspaces,onReconnect,onClose}){
             })}
           </div>
         </>}
+      </div>
+    </div>
+  </div>;
+}
+
+/* One row in the Manage modal — open / edit (name + description) / delete. */
+function ManageRow({f,connected,onOpen,onDelete,onRename}){
+  const [editing,setEditing]=useState(false);
+  const [name,setName]=useState(f.name);
+  const [desc,setDesc]=useState('');
+  const [loading,setLoading]=useState(false);
+  const [busy,setBusy]=useState(false);
+  const startEdit=async()=>{
+    setName(f.name); setEditing(true); setLoading(true);
+    try{ const meta=await readDriveWorkspaceMeta(f.id); setDesc(meta.description||''); }
+    catch(_){ setDesc(''); }
+    finally{ setLoading(false); }
+  };
+  const save=async()=>{
+    const nn=name.trim();
+    if(!nn){ alert('Workspace name cannot be empty.'); return; }
+    setBusy(true);
+    try{
+      if(nn!==f.name) await renameDriveWorkspace(f.id,nn);
+      await updateDriveWorkspaceDescription(f.id,desc);
+      onRename&&onRename(f.id,nn);
+      setEditing(false);
+    }catch(e){ alert(e.message); }
+    finally{ setBusy(false); }
+  };
+  const open=async()=>{ setBusy(true); try{ await onOpen(f.id,f.name); }catch(e){ alert(e.message); setBusy(false); } };
+  const del=async()=>{ setBusy(true); try{ await onDelete(f); }catch(e){ alert(e.message); } finally{ setBusy(false); } };
+
+  return <div style={{borderRadius:8,border:`1px solid ${editing?'var(--accent)':'var(--border)'}`,
+    background:'var(--bg-2)',overflow:'hidden'}}>
+    <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px'}}>
+      <div style={{width:38,height:38,borderRadius:8,flexShrink:0,background:GDRIVE.gradient,
+        display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>{GDRIVE.emoji}</div>
+      <div style={{flex:1,minWidth:0}}>
+        <div style={{fontWeight:600,fontSize:13,overflow:'hidden',
+          textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{f.name}</div>
+        {connected&&<div style={{fontSize:11,color:'var(--accent)',fontWeight:600,marginTop:2}}>● Connected</div>}
+      </div>
+      {!editing&&<>
+        <button className="btn" style={{fontSize:12,padding:'5px 12px',whiteSpace:'nowrap'}}
+          onClick={open} disabled={busy}>{busy?'…':'Open'}</button>
+        <button className="btn" style={{fontSize:12,padding:'5px 10px',whiteSpace:'nowrap'}}
+          title="Rename / edit description" onClick={startEdit} disabled={busy}>
+          <Ic n="settings" style={{width:13,height:13}}/> Edit
+        </button>
+        <button className="btn" style={{fontSize:12,padding:'5px 10px',whiteSpace:'nowrap',
+          color:'#d44c47',borderColor:'color-mix(in srgb,#d44c47 40%,var(--border))'}}
+          title="Permanently delete this workspace from Google Drive"
+          onClick={del} disabled={busy}>
+          <Ic n="trash" style={{width:13,height:13}}/> Delete
+        </button>
+      </>}
+    </div>
+    {editing&&<div style={{padding:'2px 12px 14px',display:'flex',flexDirection:'column',gap:10}}>
+      <label style={{display:'flex',flexDirection:'column',gap:4}}>
+        <span style={{fontSize:11,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',letterSpacing:'.05em'}}>Name</span>
+        <input className="fld" value={name} onChange={e=>setName(e.target.value)}
+          placeholder="Workspace name" disabled={busy} autoFocus/>
+      </label>
+      <label style={{display:'flex',flexDirection:'column',gap:4}}>
+        <span style={{fontSize:11,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',letterSpacing:'.05em'}}>Description</span>
+        <textarea className="fld" value={desc} onChange={e=>setDesc(e.target.value)} rows={2}
+          placeholder={loading?'Loading…':'Optional description'} disabled={busy||loading}
+          style={{resize:'vertical',fontFamily:'inherit'}}/>
+      </label>
+      <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+        <button className="btn" style={{fontSize:12,padding:'6px 14px'}}
+          onClick={()=>setEditing(false)} disabled={busy}>Cancel</button>
+        <button className="btn primary" style={{fontSize:12,padding:'6px 14px'}}
+          onClick={save} disabled={busy||loading}>{busy?'Saving…':'Save'}</button>
+      </div>
+    </div>}
+  </div>;
+}
+
+/* Manage Google Drive workspaces — open, rename / edit description, or delete. */
+function ManageWorkspacesModal({connectedWorkspaces,onOpen,onDeleted,onRenamed,onClose}){
+  const [folders,setFolders]=useState(null);
+  const [error,setError]=useState('');
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      try{
+        if(!getDriveToken()) await authenticateGoogleDrive();
+        const list=await listDriveWorkspaces();
+        if(!cancelled) setFolders(list);
+      }catch(e){ if(!cancelled){ setError(e.message||'Could not connect to Google Drive.'); setFolders([]); } }
+    })();
+    return ()=>{ cancelled=true; };
+  },[]);
+  const connectedIds=new Set((connectedWorkspaces||[]).filter(w=>w.type==='gdrive').map(w=>w.id));
+  const open=async(id,name)=>{ await onOpen(id,name); onClose(); };
+  const remove=async f=>{
+    if(!confirm(`Permanently delete “${f.name}” from Google Drive?\n\nThis deletes the entire workspace folder and every Markdown file inside it from your Google Drive. This cannot be undone.`)) return;
+    await deleteDriveWorkspace(f.id);
+    setFolders(list=>(list||[]).filter(x=>x.id!==f.id));
+    onDeleted&&onDeleted(f.id);
+  };
+  const rename=(id,name)=>{
+    setFolders(list=>(list||[]).map(x=>x.id===id?{...x,name}:x));
+    onRenamed&&onRenamed(id,name);
+  };
+  return <div className="overlay" onClick={onClose}>
+    <div className="modal" style={{width:520,maxHeight:'90vh',overflowY:'auto'}}
+      onClick={e=>e.stopPropagation()}>
+      <div className="modal-h">
+        <h3><Ic n="cloud" style={{width:18,height:18}}/> Manage {GDRIVE.name} workspaces</h3>
+        <button className="x" onClick={onClose}><Ic n="x"/></button>
+      </div>
+      <div style={{padding:'4px 24px 24px'}}>
+        <div style={{fontSize:12.5,color:'var(--text-2)',marginBottom:14,lineHeight:1.5}}>
+          Open a workspace, rename it or edit its description, or permanently delete it from
+          Google Drive. Deleting removes the whole folder and its files — it cannot be undone.
+        </div>
+        {!error&&folders===null&&
+          <div style={{textAlign:'center',padding:'40px 0',color:'var(--text-3)',fontSize:14}}>
+            Loading from {GDRIVE.name}…
+          </div>}
+        {error&&
+          <div style={{color:'#d44c47',fontSize:13,background:'color-mix(in srgb,#d44c47 12%,transparent)',
+            borderRadius:6,padding:'10px 14px',marginBottom:12}}>{error}</div>}
+        {folders?.length===0&&!error&&
+          <div style={{textAlign:'center',padding:'40px 0',color:'var(--text-3)',fontSize:14}}>
+            No workspaces found in {GDRIVE.name}.
+          </div>}
+        {folders?.length>0&&
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {folders.map(f=>
+              <ManageRow key={f.id} f={f} connected={connectedIds.has(f.id)}
+                onOpen={open} onDelete={remove} onRename={rename}/>)}
+          </div>}
       </div>
     </div>
   </div>;
@@ -3653,7 +3832,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
         </div>
         <div className="set-row" style={{borderBottom:'none'}}>
           <div className="sr-l"><b>About</b></div>
-          <span style={{color:'var(--text-3)'}}>v2.0.0</span>
+          <span style={{color:'var(--text-3)'}}>v2.0.1</span>
         </div>
       </div>
     </div>
@@ -3815,7 +3994,7 @@ function ConnectPanel({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,bus
   </div>;
 }
 
-function HomeScreen({pointer,list,busy,error,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
+function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onManage,onDocs,theme,onToggleTheme,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
   const known=list||[];
   const lastId=pointer?pointer.id:null;
   return <div className="home-screen">
@@ -3823,11 +4002,25 @@ function HomeScreen({pointer,list,busy,error,onOpen,onRemove,onReconnect,onLocal
       <span className="orb o1"/><span className="orb o2"/><span className="orb o3"/><span className="orb o4"/>
       <span className="home-grid"/>
     </div>
-    <div className="home-inner">
-      <div className="home-brand home-rise" style={{animationDelay:'0ms'}}>
-        <span className="home-mark">◧</span>
-        <span className="home-word">Workspace</span>
+    <nav className="home-nav">
+      <div className="home-nav-brand">
+        <span className="home-nav-mark">◧</span>
+        <span className="home-nav-title">Workspace</span>
       </div>
+      <div className="home-nav-links">
+        <button type="button" className="home-nav-link" onClick={onDocs}>Docs</button>
+        <button type="button" className="home-nav-link" onClick={onManage}>
+          <Ic n="cloud" style={{width:15,height:15}}/> Manage workspaces
+        </button>
+        <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
+          target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
+          <svg viewBox="0 0 16 16" width="17" height="17" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+    <div className="home-inner">
       <h1 className="home-title home-rise" style={{animationDelay:'60ms'}}>
         Your notes, as plain&nbsp;<span className="grad">Markdown</span>.
       </h1>
@@ -3839,7 +4032,19 @@ function HomeScreen({pointer,list,busy,error,onOpen,onRemove,onReconnect,onLocal
 
       <div className={cx('home-columns',known.length>0&&'two-col')}>
         {known.length>0&&<div className="home-col home-rise" style={{animationDelay:'180ms'}}>
-          <div className="home-label">Your workspaces</div>
+          <div className="home-label home-label-row">
+            <span>Your workspaces</span>
+            <button type="button"
+              className={cx('drive-cloud',driveConnected?'on':'off')}
+              disabled={busy} onClick={onConnectDrive}
+              title={driveConnected?'Google Drive connected — click to refresh':'Click to connect to Google Drive'}
+              aria-label={driveConnected?'Google Drive connected — click to refresh':'Connect to Google Drive'}>
+              <Ic n="cloud" style={{width:24,height:24}}/>
+              <span className="drive-cloud-badge">
+                <Ic n={driveConnected?'check':'x'} style={{width:10,height:10}}/>
+              </span>
+            </button>
+          </div>
           <div className="home-ws-list">
             {known.map(ws=>{
               const isLocal=ws.type==='local';
@@ -3878,12 +4083,340 @@ function HomeScreen({pointer,list,busy,error,onOpen,onRemove,onReconnect,onLocal
       </div>
 
       <div className="home-foot home-rise" style={{animationDelay:'300ms'}}>
-        Local folders need a Chromium browser. Google Drive works everywhere.
+        <div className="home-foot-copy">
+          © {new Date().getFullYear()} Workspace · Mohan Viswagna MR. All rights reserved.
+        </div>
+        <button type="button" role="switch" aria-checked={theme==='dark'}
+          className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
+          title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
+          aria-label={theme==='dark'?'Switch to light mode':'Switch to dark mode'}>
+          <Ic n="sun" style={{width:13,height:13}}/>
+          <Ic n="moon" style={{width:13,height:13}}/>
+          <span className="theme-switch-knob"/>
+        </button>
       </div>
     </div>
   </div>;
 }
 
+/* =========================================================================
+   DOCS PAGE — full in-app documentation
+   ========================================================================= */
+const DOCS_TOC=[
+  ['overview','Overview'],
+  ['quick-start','Quick start & setup'],
+  ['workspace-types','Workspace types'],
+  ['data-on-disk','How your data is stored'],
+  ['interface','The interface'],
+  ['blocks','Blocks & the editor'],
+  ['slash','Slash commands'],
+  ['databases','Databases & views'],
+  ['pages','Pages & hierarchy'],
+  ['features','Features'],
+  ['managing','Managing workspaces'],
+  ['shortcuts','Keyboard shortcuts'],
+  ['persistence','Persistence & privacy'],
+  ['structure','Project structure'],
+  ['stack','Tech stack'],
+  ['deploy','Deployment'],
+  ['troubleshooting','Troubleshooting'],
+];
+
+function DocsPage({onBack,theme,onToggleTheme}){
+  const scroller=React.useRef(null);
+  const [active,setActive]=React.useState('overview');
+  const go=id=>{
+    const el=document.getElementById('doc-'+id);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+  };
+  React.useEffect(()=>{
+    const root=scroller.current; if(!root) return;
+    const onScroll=()=>{
+      // Bottom of the page → always highlight the last section (it can't scroll to the top).
+      if(root.scrollTop+root.clientHeight>=root.scrollHeight-4){
+        setActive(DOCS_TOC[DOCS_TOC.length-1][0]); return;
+      }
+      const rootTop=root.getBoundingClientRect().top;
+      const offset=110; // px below the sticky top bar
+      let current=DOCS_TOC[0][0];
+      for(const [id] of DOCS_TOC){
+        const el=document.getElementById('doc-'+id);
+        if(!el) continue;
+        if(el.getBoundingClientRect().top-rootTop<=offset) current=id; else break;
+      }
+      setActive(current);
+    };
+    onScroll();
+    root.addEventListener('scroll',onScroll,{passive:true});
+    return ()=>root.removeEventListener('scroll',onScroll);
+  },[]);
+  const H=({id,children})=><h2 id={'doc-'+id} className="docs-h2">{children}</h2>;
+
+  return <div className="docs-page">
+    <div className="docs-top">
+      <button className="docs-back" onClick={onBack} title="Back to homepage">
+        <Ic n="back" style={{width:16,height:16}}/> Back
+      </button>
+      <div className="docs-top-brand">
+        <span className="home-nav-mark">◧</span>
+        <span className="home-nav-title">Workspace</span>
+        <span className="docs-top-tag">Docs</span>
+      </div>
+      <div className="docs-top-actions">
+        <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
+          target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
+          <svg viewBox="0 0 16 16" width="17" height="17" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+          </svg>
+        </a>
+        <button type="button" role="switch" aria-checked={theme==='dark'}
+          className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
+          title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
+          aria-label={theme==='dark'?'Switch to light mode':'Switch to dark mode'}>
+          <Ic n="sun" style={{width:13,height:13}}/>
+          <Ic n="moon" style={{width:13,height:13}}/>
+          <span className="theme-switch-knob"/>
+        </button>
+      </div>
+    </div>
+
+    <div className="docs-body">
+      <aside className="docs-toc">
+        <div className="docs-toc-title">On this page</div>
+        {DOCS_TOC.map(([id,label])=>
+          <button key={id} className={cx('docs-toc-link',active===id&&'on')}
+            onClick={()=>go(id)}>{label}</button>)}
+      </aside>
+
+      <main className="docs-main" ref={scroller}>
+        <div className="docs-content">
+          <div className="docs-hero">
+            <h1 className="docs-title">Workspace documentation</h1>
+            <p className="docs-lead">
+              A fast, block-based, Notion-style workspace built with <b>Vite + React 18</b>.
+              No accounts and no backend — everything you write is stored as ordinary folders
+              and Markdown files, either on your computer or mirrored to your Google Drive.
+            </p>
+            <div className="docs-badges">
+              <span className="docs-badge">Version 2.0.1</span>
+              <span className="docs-badge">React 18 · Vite 6</span>
+              <span className="docs-badge">Plain Markdown storage</span>
+            </div>
+          </div>
+
+          <H id="overview">Overview</H>
+          <p className="docs-p">Workspace is a single place for docs, wikis, tasks and databases.
+            Its defining idea: <b>your data is just files</b>. Pages are plain <code>.md</code> files
+            with a little YAML frontmatter, and the page hierarchy is mirrored as nested folders — so
+            your notes stay readable and usable even if this app goes away.</p>
+          <ul className="docs-list">
+            <li><b>No account, no login, no cloud lock-in</b> — nothing is sent anywhere except (optionally) your own Google Drive.</li>
+            <li><b>Two workspace types</b> — a Local folder (via the File System Access API) or Google Drive.</li>
+            <li><b>Block editor</b> — text, headings, to-dos, lists, toggles, quotes, callouts, dividers, code, images and file attachments.</li>
+            <li><b>Multi-view databases</b> — table, board, gallery, list and calendar.</li>
+            <li><b>Nested pages, slash commands, search, favorites, trash &amp; archive, templates, dark mode and keyboard shortcuts.</b></li>
+            <li><b>Import</b> — bring in <code>.docx</code> files.</li>
+          </ul>
+
+          <H id="quick-start">Quick start &amp; setup</H>
+          <p className="docs-p">You need <b>Node.js 18+</b>. Clone the repository, install dependencies, and start the dev server:</p>
+          <pre className="docs-code"><code>{`git clone https://github.com/MohanViswagnaMR/Workspace.git
+cd Workspace
+npm install
+npm run dev`}</code></pre>
+          <p className="docs-p">Open <code>http://localhost:5173</code> and pick <b>Local folder</b> or <b>Google Drive</b> from the homepage.</p>
+          <table className="docs-table"><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
+            <tr><td><code>npm run dev</code></td><td>Start the dev server with hot reload (port 5173)</td></tr>
+            <tr><td><code>npm run build</code></td><td>Production build into <code>dist/</code></td></tr>
+            <tr><td><code>npm run preview</code></td><td>Preview the production build locally</td></tr>
+          </tbody></table>
+          <div className="docs-note">
+            <b>Browser support:</b> Local folders require a Chromium browser (Chrome, Edge, Brave)
+            because they use the File System Access API. Google Drive works in any modern browser.
+          </div>
+
+          <H id="workspace-types">Workspace types</H>
+          <div className="docs-grid2">
+            <div className="docs-card">
+              <div className="docs-card-h">💻 Local folder</div>
+              <p>Saved on your computer via the File System Access API. Pick a location and the app
+              creates a folder you fully own. The directory handle is cached in IndexedDB; Chromium
+              asks you to re-grant access once per session (click <b>Reconnect</b>).</p>
+            </div>
+            <div className="docs-card">
+              <div className="docs-card-h">📁 Google Drive</div>
+              <p>A real, browsable folder in your Drive that mirrors the exact same layout. Uses the
+              <code>drive.file</code> OAuth scope so files are editable directly in Drive. The token
+              lives in <code>sessionStorage</code>; sign in again when it expires.</p>
+            </div>
+          </div>
+
+          <H id="data-on-disk">How your data is stored</H>
+          <p className="docs-p">Each workspace is a self-describing folder tree. Pages with children become
+            folders holding a <code>master page.md</code>; leaf pages are single <code>.md</code> files.
+            Ordering and metadata live in each file's YAML frontmatter. There is <b>no JSON</b> anywhere in your data.</p>
+          <pre className="docs-code"><code>{`My Workspace/                 (the folder you picked — its name is the title)
+├── Upload/                   uploaded images & file attachments
+│   └── sunset.jpg
+├── info.md                   appearance settings + description
+├── trash/                    trashed pages
+├── archive/                  archived pages
+└── Space/                    all top-level pages
+    ├── Meeting Notes.md      a page with no children
+    └── Homework/             a page WITH children → a folder
+        ├── master page.md    the "Homework" page's own content
+        ├── Essay.md
+        └── Math/
+            ├── master page.md
+            └── Problem set 1.md`}</code></pre>
+          <p className="docs-p">A page file is readable on its own — no app required:</p>
+          <pre className="docs-code"><code>{`---
+id: n_start
+title: Getting Started
+icon: 📓
+order: 0
+type: page
+favorite: true
+---
+
+# 📓 Getting Started
+
+Welcome to your **connected workspace**.
+
+> 💡 Callouts are blockquotes with a leading emoji.
+
+- [x] To-dos are GitHub-style checkboxes`}</code></pre>
+          <p className="docs-p">Databases keep their structure (properties, rows and views) in the frontmatter
+            <code>db:</code> block and render a readable Markdown table in the body.</p>
+
+          <H id="interface">The interface</H>
+          <ul className="docs-list">
+            <li><b>Homepage</b> — a top navbar (logo, Docs, Manage workspaces, GitHub), your connected workspaces, a Google&nbsp;Drive connection cloud, connect panels, and a footer with a light/dark switch.</li>
+            <li><b>Sidebar</b> — the workspace switcher, a glowing <b>New page</b> button, Search &amp; Home, Favorites, your page tree, and Templates / Import / Storage / Archive / Trash. Settings and Close workspace sit at the bottom.</li>
+            <li><b>Topbar</b> — breadcrumbs, favorite toggle, share, and the page menu.</li>
+            <li><b>Editor</b> — the block canvas where you write. Hover the left margin of any line to drag it, or click <b>⊕</b> to add a block.</li>
+          </ul>
+
+          <H id="blocks">Blocks &amp; the editor</H>
+          <p className="docs-p">Everything you see is a <b>block</b>. Type <code>/</code> on an empty line to insert one,
+            or use Markdown-style shortcuts (e.g. <code>#</code> + space for a heading). Available block types:</p>
+          <div className="docs-chips">
+            {CMDS.filter(c=>c.g!=='Database').map(c=>
+              <span key={c.id} className="docs-chip"><span className="docs-chip-ic">{c.ic}</span>{c.label}</span>)}
+          </div>
+          <p className="docs-p">Inline formatting supports <b>bold</b>, <i>italic</i>, underline, strikethrough and
+            <code>inline code</code> (see shortcuts below).</p>
+
+          <H id="slash">Slash commands</H>
+          <p className="docs-p">Press <kbd className="docs-kbd">/</kbd> at the start of an empty block to open the
+            block menu, then type to filter. Commands are grouped into <b>Basic</b>, <b>Database</b> and <b>Media</b>.
+            The same menu is how you insert a database view or an embedded sub-page.</p>
+
+          <H id="databases">Databases &amp; views</H>
+          <p className="docs-p">A database is a collection of rows with typed properties, viewable five ways.
+            Add one from the slash menu, then switch or add views on the fly:</p>
+          <div className="docs-grid">
+            {CMDS.filter(c=>c.g==='Database').map(c=>
+              <div key={c.id} className="docs-mini"><span className="docs-mini-ic">{c.ic}</span>
+                <div><b>{c.label.replace(' view','')}</b><small>{c.desc}</small></div></div>)}
+          </div>
+          <p className="docs-p">Properties, rows and view configuration are serialized into the page's
+            <code>db:</code> frontmatter, and a plain Markdown table is written in the body so the data
+            stays human-readable outside the app.</p>
+
+          <H id="pages">Pages &amp; hierarchy</H>
+          <ul className="docs-list">
+            <li><b>Infinite nesting</b> — any page can contain sub-pages; the tree mirrors 1:1 to nested folders on disk.</li>
+            <li><b>Drag to reorder / nest</b> — drag pages in the sidebar to reorder them or drop one inside another.</li>
+            <li><b>Icons &amp; covers</b> — give pages an emoji icon; ordering is stored per file as <code>order</code>.</li>
+            <li><b>Embedded sub-pages</b> — the <b>Page</b> block links a child page inline within a parent.</li>
+          </ul>
+
+          <H id="features">Features</H>
+          <div className="docs-grid2">
+            <div className="docs-card"><div className="docs-card-h">🔍 Search</div><p>Instant fuzzy search across every page — open it with <kbd className="docs-kbd">⌘K</kbd>.</p></div>
+            <div className="docs-card"><div className="docs-card-h">⭐ Favorites</div><p>Pin pages to a Favorites section at the top of the sidebar.</p></div>
+            <div className="docs-card"><div className="docs-card-h">🗑️ Trash &amp; Archive</div><p>Deleted pages go to Trash (restore or purge); Archive hides pages you want to keep but not see. Both are full pages.</p></div>
+            <div className="docs-card"><div className="docs-card-h">🧩 Templates</div><p>Reusable page starters, available as a dedicated Templates page.</p></div>
+            <div className="docs-card"><div className="docs-card-h">📥 Import</div><p>Bring in <code>.docx</code> documents — converted to blocks via mammoth.</p></div>
+            <div className="docs-card"><div className="docs-card-h">📎 Storage</div><p>Browse every uploaded image and attachment in grid, gallery or list view.</p></div>
+            <div className="docs-card"><div className="docs-card-h">🌙 Dark mode &amp; accents</div><p>Light/dark themes plus 7 accent colours (indigo, blue, ocean, forest, rose, sunset, violet). Default is dark + violet.</p></div>
+            <div className="docs-card"><div className="docs-card-h">⌨️ Shortcuts</div><p>A full keyboard-driven flow — see the table below.</p></div>
+          </div>
+
+          <H id="managing">Managing workspaces</H>
+          <ul className="docs-list">
+            <li><b>Connect</b> — create a new workspace, open an existing folder, or open one from Drive.</li>
+            <li><b>Drive cloud icon</b> — next to “Your workspaces”; green ✓ when connected, grey ✗ when not. Click it to connect/refresh.</li>
+            <li><b>Manage workspaces</b> (navbar) — lists every Google Drive workspace with <b>Open</b>, <b>Edit</b> and <b>Delete</b>.</li>
+            <li><b>Edit</b> — rename a Drive workspace (renames the Drive folder) and change its description (stored in <code>info.md</code>).</li>
+            <li><b>Delete</b> — permanently removes the whole Drive folder and its files. This cannot be undone.</li>
+            <li><b>Unlink</b> — removes a workspace from your list without touching the underlying files.</li>
+          </ul>
+
+          <H id="shortcuts">Keyboard shortcuts</H>
+          <table className="docs-table"><thead><tr><th>Action</th><th>Shortcut</th></tr></thead><tbody>
+            {SHORTCUTS.map(([a,k])=><tr key={a}><td>{a}</td><td><kbd className="docs-kbd">{fmtShortcut(k)}</kbd></td></tr>)}
+          </tbody></table>
+
+          <H id="persistence">Persistence &amp; privacy</H>
+          <ul className="docs-list">
+            <li><b>Cookies</b> hold only small pointers — the active workspace (type, name, Drive folder id) and your theme/accent. Never workspace data.</li>
+            <li><b>IndexedDB</b> stores the Local folder's directory handle (it can't live in a cookie).</li>
+            <li><b>sessionStorage</b> holds the Google Drive OAuth token for the session.</li>
+            <li><b>Your content</b> only ever lives in the folder you picked — on your disk, or in your own Drive. Nothing is sent to any third-party server.</li>
+          </ul>
+
+          <H id="structure">Project structure</H>
+          <table className="docs-table"><thead><tr><th>File</th><th>Responsibility</th></tr></thead><tbody>
+            <tr><td><code>index.html</code></td><td>Boot screen and root mount point</td></tr>
+            <tr><td><code>vite.config.js</code></td><td>Vite config (vendor chunk splitting)</td></tr>
+            <tr><td><code>src/main.jsx</code></td><td>Entry point</td></tr>
+            <tr><td><code>src/App.jsx</code></td><td>Restores theme, renders the workspace</td></tr>
+            <tr><td><code>src/workspace.jsx</code></td><td>The full app: homepage, docs, editor, databases, sidebar, modals</td></tr>
+            <tr><td><code>src/markdown.js</code></td><td>Workspace ⇄ folder-of-Markdown serialization (pure)</td></tr>
+            <tr><td><code>src/localfs.js</code></td><td>Local folder storage (File System Access API + IndexedDB)</td></tr>
+            <tr><td><code>src/cloudstorage.js</code></td><td>Google Drive folder-tree mirror</td></tr>
+            <tr><td><code>src/cookies.js</code></td><td>Cookie helpers (active-workspace pointer + theme)</td></tr>
+            <tr><td><code>src/styles.css</code></td><td>Theme tokens, components, dark mode</td></tr>
+          </tbody></table>
+
+          <H id="stack">Tech stack</H>
+          <table className="docs-table"><thead><tr><th>Layer</th><th>Technology</th></tr></thead><tbody>
+            <tr><td>Build tool</td><td>Vite 6</td></tr>
+            <tr><td>UI</td><td>React 18</td></tr>
+            <tr><td>Storage</td><td>File System Access API · Google Drive API</td></tr>
+            <tr><td>Frontmatter</td><td>js-yaml</td></tr>
+            <tr><td>Icons</td><td>lucide-react</td></tr>
+            <tr><td>Import</td><td>mammoth (<code>.docx</code> → blocks)</td></tr>
+          </tbody></table>
+
+          <H id="deploy">Deployment</H>
+          <p className="docs-p">The built <code>dist/</code> folder is a static site — host it anywhere (Vercel, Netlify,
+            GitHub Pages, any static host). To use Google Drive on a deployed site:</p>
+          <ol className="docs-list">
+            <li>Add the site's origin as an <b>Authorised JavaScript origin</b> on your Google Cloud OAuth client.</li>
+            <li>Ensure the <b>Google Drive API</b> is enabled in the project.</li>
+            <li>If the OAuth app is in <b>Testing</b>, add your email as a Test User.</li>
+          </ol>
+
+          <H id="troubleshooting">Troubleshooting</H>
+          <div className="docs-grid2">
+            <div className="docs-card"><div className="docs-card-h">“Local folders need Chrome”</div><p>The File System Access API is Chromium-only. Use Chrome/Edge/Brave, or use a Google Drive workspace instead.</p></div>
+            <div className="docs-card"><div className="docs-card-h">Drive says “not connected”</div><p>Your session token expired. Click the cloud icon (or Manage workspaces) to reconnect — connecting needs a click because the OAuth popup requires a user gesture.</p></div>
+            <div className="docs-card"><div className="docs-card-h">Drive is slow to open</div><p>Reading a Drive workspace makes one network request per file; large workspaces take longer than local ones. This is expected.</p></div>
+            <div className="docs-card"><div className="docs-card-h">A local workspace needs access</div><p>Chromium re-asks for folder permission each session — click <b>Reconnect</b> / <b>Open</b> to re-grant.</p></div>
+          </div>
+
+          <div className="docs-foot">
+            © {new Date().getFullYear()} Workspace · Mohan Viswagna MR ·{' '}
+            <a href="https://github.com/MohanViswagnaMR/Workspace" target="_blank" rel="noopener noreferrer">GitHub</a>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>;
+}
 
 /* =========================================================================
    WORKSPACE  (the app surface)
@@ -3897,8 +4430,22 @@ function Workspace(){
   const [modal,setModal]=React.useState(null);
   const [peek,setPeek]=React.useState(null); // {dbHostId, rowId}
   const [showTutorial,setShowTutorial]=React.useState(false);
+  const [docsOpen,setDocsOpen]=React.useState(false);
+  const [homeTheme,setHomeTheme]=React.useState(()=>readTheme().theme);
+  const [saveState,setSaveState]=React.useState('saved'); // 'saved' | 'saving' | 'error'
   const driveTimer=React.useRef(null);
+  const savedRef=React.useRef({id:null});
   const tutorialShown=React.useRef(false);
+
+  /* ---- homepage dark/light toggle (persists to cookie + <body>) ---- */
+  const toggleHomeTheme=()=>{
+    setHomeTheme(t=>{
+      const next=t==='dark'?'light':'dark';
+      writeTheme({theme:next,accent:readTheme().accent});
+      document.body.classList.toggle('dark',next==='dark');
+      return next;
+    });
+  };
 
   /* ---- build the switcher list from local index + the active workspace ---- */
   const buildWsList=(localList,active)=>{
@@ -3916,6 +4463,15 @@ function Workspace(){
     if(ptr&&ptr.type==='gdrive'&&ptr.folderId&&!list.some(w=>w.id===ptr.folderId))
       list.push({id:ptr.folderId,name:ptr.name||'Drive workspace',type:'gdrive',folderId:ptr.folderId});
     return list;
+  };
+
+  /* ---- merge live Google Drive workspaces into a homepage list (dedup by id) ---- */
+  const mergeDriveWorkspaces=(list,driveList)=>{
+    const out=(list||[]).map(w=>({...w}));
+    (driveList||[]).forEach(d=>{
+      if(!out.some(w=>w.id===d.id)) out.push({id:d.id,name:d.name,type:'gdrive',folderId:d.id});
+    });
+    return out;
   };
 
   /* ---- assemble store from freshly-loaded data + activate ---- */
@@ -3944,7 +4500,15 @@ function Workspace(){
       const localIndex=isLocalFSSupported()?await loadLocalWorkspaceIndex():[];
       const localList=localIndex.map(l=>({id:l.id,name:l.name||l.dirName,type:'local',accessible:l.accessible}));
       const ptr=readActivePointer();
-      const goHome=extra=>{ if(alive){ setHome(h=>({...h,pointer:ptr,list:homeList(localList,ptr),...extra})); setBooting(false); } };
+      const driveConnected=!!getDriveToken();
+      const goHome=extra=>{
+        if(alive){ setHome(h=>({...h,pointer:ptr,list:homeList(localList,ptr),driveConnected,...extra})); setBooting(false); }
+        // If we already hold a Drive token, surface every connected Drive
+        // workspace in "Your workspaces" (no prompt — token is already live).
+        if(driveConnected) listDriveWorkspaces()
+          .then(dl=>{ if(alive&&dl.length) setHome(h=>({...h,list:mergeDriveWorkspaces(h.list,dl)})); })
+          .catch(()=>{});
+      };
       if(!ptr){ goHome(); return; }
       try{
         if(ptr.type==='local'){
@@ -3976,19 +4540,24 @@ function Workspace(){
     writeTheme({theme:store.theme,accent:store.accent});
     document.body.classList.toggle('dark',store.theme==='dark');
     ['indigo','blue','ocean','forest','rose','sunset','violet'].forEach(a=>document.body.classList.remove(`t-${a}`));
-    document.body.classList.add(`t-${store.accent||'indigo'}`);
+    document.body.classList.add(`t-${store.accent||'violet'}`);
 
     const active=store.active;
+    // Freshly opened / switched workspace → nothing to save yet; don't rewrite it.
+    if(savedRef.current.id!==active.id){ savedRef.current.id=active.id; setSaveState('saved'); return; }
+
     const info={theme:store.theme,accent:store.accent,font:store.font,description:store.description,pageBg:store.pageBg};
     const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
-    if(active?.type==='local'){
-      writeWorkspaceTreeDebounced(active.id,payload);
-    }else if(active?.type==='gdrive'){
-      clearTimeout(driveTimer.current);
-      driveTimer.current=setTimeout(()=>{
-        writeGdriveWorkspaceTree(active.folderId,payload).catch(e=>console.warn('[drive] write failed:',e.message));
-      },1500);
-    }
+    setSaveState('saving');
+    clearTimeout(driveTimer.current);
+    const delay=active?.type==='gdrive'?1500:600;
+    driveTimer.current=setTimeout(async()=>{
+      try{
+        if(active?.type==='local') await writeWorkspaceTreeNow(active.id,payload);
+        else if(active?.type==='gdrive') await writeGdriveWorkspaceTree(active.folderId,payload);
+        setSaveState('saved');
+      }catch(e){ console.warn('[save] failed:',e.message); setSaveState('error'); }
+    },delay);
   },[store]);
 
   /* ---- kick off the tutorial once, on first connect ---- */
@@ -4005,7 +4574,7 @@ function Workspace(){
       else if(meta&&e.shiftKey&&(e.key==='l'||e.key==='L')){e.preventDefault();
         setStore(s=>s?{...s,theme:s.theme==='dark'?'light':'dark'}:s);}
       else if(meta&&(e.key==='/'||e.key==='?')){e.preventDefault();setModal({type:'shortcuts'});}
-      else if(meta&&e.key==='n'){e.preventDefault();
+      else if(e.altKey&&!e.ctrlKey&&!e.metaKey&&e.code==='KeyN'){e.preventDefault();
         setStore(s=>{
           if(!s) return s;
           const id=nid();
@@ -4080,17 +4649,45 @@ function Workspace(){
     }catch(e){ setHome(h=>({...h,busy:false,error:e.message||'Could not create the Drive workspace.'})); }
   };
 
-  const connectDriveExisting=async(folderId,name)=>{
+  /* Connect (or reconnect) Google Drive from the homepage, then list every
+     Drive workspace into "Your workspaces". */
+  const connectDriveList=async()=>{
     setHome(h=>({...h,busy:true,error:''}));
     try{
       await authenticateGoogleDrive();
-      if(folderId){
-        const data=await readGdriveWorkspaceTree(folderId);
-        await finishConnect(data,{id:folderId,name:name||'Drive workspace',type:'gdrive',folderId});
-      }else{
-        setModal({type:'browse-cloud'});
-        setHome(h=>({...h,busy:false}));
-      }
+      const dl=await listDriveWorkspaces();
+      setHome(h=>({...h,busy:false,driveConnected:true,list:mergeDriveWorkspaces(h.list,dl)}));
+    }catch(e){ setHome(h=>({...h,busy:false,error:e.message||'Could not connect to Google Drive.'})); }
+  };
+
+  /* A Drive workspace was permanently deleted — drop it from the homepage. */
+  const handleDriveWorkspaceDeleted=id=>{
+    if(home.pointer&&home.pointer.folderId===id) clearActivePointer();
+    setHome(h=>({...h,
+      list:(h.list||[]).filter(w=>w.id!==id),
+      pointer:h.pointer&&h.pointer.folderId===id?null:h.pointer}));
+  };
+
+  /* A Drive workspace was renamed — reflect the new title on the homepage. */
+  const handleDriveWorkspaceRenamed=(id,name)=>{
+    setHome(h=>{
+      const pointer=h.pointer&&h.pointer.folderId===id?{...h.pointer,name}:h.pointer;
+      if(pointer!==h.pointer) writeActivePointer(pointer);
+      return {...h,
+        list:(h.list||[]).map(w=>w.id===id?{...w,name}:w),
+        pointer};
+    });
+  };
+
+  const connectDriveExisting=async(folderId,name)=>{
+    // No folderId → open the browser modal, which lists every connected Drive
+    // workspace (and prompts a Google reconnect itself if the session lapsed).
+    if(!folderId){ setModal({type:'browse-cloud'}); return; }
+    setHome(h=>({...h,busy:true,error:''}));
+    try{
+      await authenticateGoogleDrive();
+      const data=await readGdriveWorkspaceTree(folderId);
+      await finishConnect(data,{id:folderId,name:name||'Drive workspace',type:'gdrive',folderId});
     }catch(e){ setHome(h=>({...h,busy:false,error:e.message||'Could not connect to Google Drive.'})); }
   };
 
@@ -4197,12 +4794,42 @@ function Workspace(){
 
   if(booting) return <div className="app-loading"><div className="app-loading-logo">◧</div><div className="app-loading-bar"><i /></div></div>;
 
-  if(!store) return <HomeScreen pointer={home.pointer} list={home.list} busy={home.busy} error={home.error}
-    onOpen={openKnownWorkspace} onRemove={removeKnownWorkspace} onReconnect={reconnectActive}
-    onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
-    onDriveNew={connectDriveNew} onDriveExisting={()=>connectDriveExisting(null)}/>;
+  if(docsOpen) return <DocsPage onBack={()=>setDocsOpen(false)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>;
 
-  const {nodes,favorites,currentId,theme,accent='indigo'}=store;
+  if(!store) return <>
+    <HomeScreen pointer={home.pointer} list={home.list} busy={home.busy} error={home.error}
+      driveConnected={home.driveConnected} onConnectDrive={connectDriveList}
+      onManage={()=>setModal({type:'manage-ws'})} onDocs={()=>setDocsOpen(true)}
+      theme={homeTheme} onToggleTheme={toggleHomeTheme}
+      onOpen={openKnownWorkspace} onRemove={removeKnownWorkspace} onReconnect={reconnectActive}
+      onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
+      onDriveNew={connectDriveNew} onDriveExisting={()=>connectDriveExisting(null)}/>
+    {modal&&modal.type==='browse-cloud'&&
+      <CloudWorkspacesModal
+        connectedWorkspaces={home.list}
+        onReconnect={(folderId,name)=>connectDriveExisting(folderId,name)}
+        onClose={()=>{
+          setModal(null);
+          // If the modal authenticated Drive, reflect it on the homepage.
+          if(getDriveToken()) listDriveWorkspaces()
+            .then(dl=>setHome(h=>({...h,driveConnected:true,list:mergeDriveWorkspaces(h.list,dl)})))
+            .catch(()=>{});
+        }}/>}
+    {modal&&modal.type==='manage-ws'&&
+      <ManageWorkspacesModal
+        connectedWorkspaces={home.list}
+        onOpen={(folderId,name)=>connectDriveExisting(folderId,name)}
+        onDeleted={handleDriveWorkspaceDeleted}
+        onRenamed={handleDriveWorkspaceRenamed}
+        onClose={()=>{
+          setModal(null);
+          if(getDriveToken()) listDriveWorkspaces()
+            .then(dl=>setHome(h=>({...h,driveConnected:true,list:mergeDriveWorkspaces(h.list,dl)})))
+            .catch(()=>{});
+        }}/>}
+  </>;
+
+  const {nodes,favorites,currentId,theme,accent='violet'}=store;
   const node=currentId===DASH_ID?null:nodes[currentId]||nodes[Object.keys(nodes)[0]]||null;
   const workspaces=buildWsList(store.localList,store.active);
   const activeWorkspaceId=store.active.id;
@@ -4402,7 +5029,7 @@ function Workspace(){
       {!sidebarOpen&&<div className="tb-btn" title="Open sidebar" onClick={()=>setSidebarOpen(o=>!o)}>
         <Ic n="menu" style={{width:17,height:17}}/></div>}
       <div className="crumbs"><div className="crumb"><span>{emoji}</span><span>{label}</span></div></div>
-      <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})} onGoHome={goHome}/>
+      <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})} onGoHome={goHome} saveState={saveState}/>
       <div className="topbar-actions"/>
     </div>;
 
@@ -4432,7 +5059,7 @@ function Workspace(){
                 <div className="crumb"><span>📦</span><span>Storage</span></div>
               </div>
               <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
-                onGoHome={goHome}/>
+                onGoHome={goHome} saveState={saveState}/>
               <div className="topbar-actions"/>
             </div>
             <StoragePage uploads={scopedUploads} activeWorkspace={activeWorkspace}
@@ -4448,7 +5075,7 @@ function Workspace(){
                 <div className="crumb"><span>🏠</span><span>Home</span></div>
               </div>
               <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
-                onGoHome={goHome}/>
+                onGoHome={goHome} saveState={saveState}/>
               <div className="topbar-actions"/>
             </div>
             <Dashboard nodes={nodes} favorites={favorites} openPage={openPage}
@@ -4467,7 +5094,8 @@ function Workspace(){
             <Topbar node={node} nodes={nodes} openPage={openPage}
               toggleSidebar={()=>setSidebarOpen(o=>!o)} sidebarOpen={sidebarOpen}
               toggleFav={toggleFav} isFav={node&&favorites.includes(node.id)} setModal={setModal}
-              downloadPage={downloadPage} activeWorkspace={activeWorkspace} onGoHome={goHome}/>
+              downloadPage={downloadPage} activeWorkspace={activeWorkspace} onGoHome={goHome}
+              saveState={saveState}/>
             {node&&<Editor key={node.id} node={node} update={updateNode}
               createChild={createChild} openPage={openPage}
               lookupNode={lookupNode} openRow={editorOpenRow}

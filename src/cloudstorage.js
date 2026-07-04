@@ -16,7 +16,7 @@
    OAuth: Google Identity Services token client (implicit, browser-only). The
    GIS script is pre-loaded in index.html. Tokens are cached in sessionStorage.
    ========================================================================= */
-import { buildFolderPlan, parseFolderTree } from './markdown.js';
+import { buildFolderPlan, parseFolderTree, infoToMarkdown, markdownToInfo } from './markdown.js';
 
 export const GDRIVE = {
   id: 'gdrive',
@@ -364,6 +364,46 @@ export async function readGdriveWorkspaceTree(rootId) {
   if (info && info.pageBg && map[info.pageBg]) info.pageBgUrl = map[info.pageBg];
 
   return { nodes, favorites, currentId, uploads, info };
+}
+
+/* Read a Drive workspace's stored settings (theme/accent/font/description)
+   from its root info.md. Returns {} if there is no info.md yet. */
+export async function readDriveWorkspaceMeta(rootId) {
+  const token = _getToken();
+  if (!token) throw new Error('Not authenticated with Google Drive.');
+  const infoFiles = await _findChild(token, 'info.md', rootId, false);
+  if (!infoFiles.length) return {};
+  const text = await _downloadText(token, infoFiles[0].id);
+  return markdownToInfo(text);
+}
+
+/* Rename a Drive workspace — its folder name IS the workspace title. */
+export async function renameDriveWorkspace(rootId, newName) {
+  const token = _getToken();
+  if (!token) throw new Error('Not authenticated with Google Drive.');
+  const name = (newName || '').trim();
+  if (!name) throw new Error('Workspace name cannot be empty.');
+  await _driveFetch(token, `https://www.googleapis.com/drive/v3/files/${rootId}?fields=id`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  return name;
+}
+
+/* Update a Drive workspace's description (in info.md), preserving every other
+   setting already stored there. Creates info.md if it is missing. */
+export async function updateDriveWorkspaceDescription(rootId, description) {
+  const token = _getToken();
+  if (!token) throw new Error('Not authenticated with Google Drive.');
+  const infoFiles = await _findChild(token, 'info.md', rootId, false);
+  let info = {}, existingId = null;
+  if (infoFiles.length) { existingId = infoFiles[0].id; info = markdownToInfo(await _downloadText(token, existingId)); }
+  info.description = (description || '').trim();
+  const id = await _uploadText(token, rootId, 'info.md', infoToMarkdown(info), existingId);
+  // keep any active-session cache for this root consistent
+  const cache = _cache[rootId];
+  if (cache) { cache.fileId.set('info.md', id); cache.text.set('info.md', infoToMarkdown(info)); }
 }
 
 /* Permanently delete a whole Drive workspace folder. */

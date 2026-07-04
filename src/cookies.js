@@ -54,10 +54,11 @@ export function clearActivePointer() { deleteCookie(PTR_KEY); }
 /* Encoded as:  <theme>|<accent> */
 export function readTheme() {
   const raw = getCookie(THEME_KEY);
-  if (!raw) return { theme: 'light', accent: 'indigo' };
+  // Default look: dark mode with a purple (violet) accent.
+  if (!raw) return { theme: 'dark', accent: 'violet' };
   const [theme, accent] = raw.split('|');
-  return { theme: theme === 'dark' ? 'dark' : 'light', accent: accent || 'indigo' };
+  return { theme: theme === 'dark' ? 'dark' : 'light', accent: accent || 'violet' };
 }
 export function writeTheme({ theme, accent }) {
-  setCookie(THEME_KEY, `${theme === 'dark' ? 'dark' : 'light'}|${accent || 'indigo'}`);
+  setCookie(THEME_KEY, `${theme === 'dark' ? 'dark' : 'light'}|${accent || 'violet'}`);
 }

@@ -1,6 +1,6 @@
 # Workspace — Notes & databases as plain Markdown
 
-**Version 2.0.0**
+**Version 2.0.1**
 
 A fast, block-based, Notion-style workspace built with **Vite + React 18**. There
 are no accounts and no backend. Everything you write is stored as **ordinary
@@ -25,6 +25,10 @@ away.
 - **Slash commands, instant search, favorites, trash & archive, templates,
   dark mode and keyboard shortcuts.**
 - **Import** — bring in `.docx` files via mammoth.
+- **Homepage** — a top navbar with in-app **Docs**, **Manage workspaces** (rename /
+  edit description / delete Drive workspaces), a Google Drive connection indicator, and a
+  dark/light switch. Defaults to dark mode with a purple accent.
+- **Live save status** — a Saved / Saving… / Unsaved indicator next to the storage badge.
 
 ---
 
@@ -117,7 +121,7 @@ vite.config.js      Vite config (vendor chunk splitting)
 src/
   main.jsx          Entry point
   App.jsx           Restores theme, renders the workspace
-  workspace.jsx     The full app: homepage, editor, databases, sidebar, modals
+  workspace.jsx     The full app: homepage, docs, editor, databases, sidebar, modals
   markdown.js       Workspace ⇄ folder-of-Markdown serialization (pure)
   localfs.js        Local folder storage (File System Access API + IndexedDB)
   cloudstorage.js   Google Drive folder-tree mirror
@@ -151,11 +155,12 @@ client, and ensure the Google Drive API is enabled.
 
 ## Versions
 
-Current release: **2.0.0**. Full release notes live in the [`versions/`](./versions)
+Current release: **2.0.1**. Full release notes live in the [`versions/`](./versions)
 folder.
 
 | Version | Date       | Highlights                                                        |
 |---------|------------|-------------------------------------------------------------------|
+| [2.0.1](./versions/v2.0.1.md) | 2026-07-04 | Google Drive fixes (open/browse/reconnect); homepage navbar; in-app Docs page; Manage workspaces (rename/description/delete); save-state indicator; dark+violet default; `Alt+N` / `Ctrl+Enter` shortcuts |
 | [2.0.0](./versions/v2.0.0.md) | 2026-07-03 | Firebase/accounts removed; plain-Markdown storage (Local + Google Drive); `info.md`, `trash/` & `archive/` folders; homepage; Trash/Archive/Templates as full pages |
 | [1.2.0](./versions/v1.2.0.md) | 2026-05-29 | File attachment, storage icons, code-block redesign               |
 | 1.1.0   | 2026-05-28 | Feature-complete initial release                                  |
