@@ -3832,7 +3832,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
         </div>
         <div className="set-row" style={{borderBottom:'none'}}>
           <div className="sr-l"><b>About</b></div>
-          <span style={{color:'var(--text-3)'}}>v2.0.1</span>
+          <span style={{color:'var(--text-3)'}}>v2.1.0</span>
         </div>
       </div>
     </div>
@@ -4198,7 +4198,7 @@ function DocsPage({onBack,theme,onToggleTheme}){
               and Markdown files, either on your computer or mirrored to your Google Drive.
             </p>
             <div className="docs-badges">
-              <span className="docs-badge">Version 2.0.1</span>
+              <span className="docs-badge">Version 2.1.0</span>
               <span className="docs-badge">React 18 · Vite 6</span>
               <span className="docs-badge">Plain Markdown storage</span>
             </div>

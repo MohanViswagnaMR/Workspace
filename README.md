@@ -1,6 +1,6 @@
-# Workspace — Notes & databases as plain Markdown
+# Workspace
 
-**Version 2.0.1**
+**Version 2.1.0**
 
 A fast, block-based, Notion-style workspace built with **Vite + React 18**. There
 are no accounts and no backend. Everything you write is stored as **ordinary
@@ -24,6 +24,9 @@ away.
 - **Multi-view databases** — table, board, gallery, list and calendar views.
 - **Slash commands, instant search, favorites, trash & archive, templates,
   dark mode and keyboard shortcuts.**
+- **Installable PWA** — install it to your desktop or phone and launch it in its
+  own window; a service worker caches the app shell so it opens offline (your
+  data is already local files or Drive).
 - **Import** — bring in `.docx` files via mammoth.
 - **Homepage** — a top navbar with in-app **Docs**, **Manage workspaces** (rename /
   edit description / delete Drive workspaces), a Google Drive connection indicator, and a
@@ -116,10 +119,14 @@ There is **no JSON** anywhere in your data.
 ## Project structure
 
 ```
-index.html          Boot screen and root mount point
+index.html          Boot screen, root mount point, PWA manifest + meta tags
 vite.config.js      Vite config (vendor chunk splitting)
+public/             Static assets copied to the site root
+  manifest.webmanifest  PWA web app manifest (name, icons, colors, display)
+  sw.js                 Service worker (offline app-shell cache)
+  icon.svg / icon-*.png App icons (any + maskable) + apple-touch-icon
 src/
-  main.jsx          Entry point
+  main.jsx          Entry point + service-worker registration
   App.jsx           Restores theme, renders the workspace
   workspace.jsx     The full app: homepage, docs, editor, databases, sidebar, modals
   markdown.js       Workspace ⇄ folder-of-Markdown serialization (pure)
@@ -128,6 +135,31 @@ src/
   cookies.js        Tiny cookie helpers (active-workspace pointer + theme)
   styles.css        Theme tokens, components, dark mode
 ```
+
+---
+
+## Progressive Web App
+
+Workspace is an installable PWA. In a supported browser you'll get an **Install**
+option (address-bar icon or menu) to add it to your desktop or phone; it then
+launches in its own standalone window.
+
+- **Offline** — a hand-rolled service worker (`public/sw.js`) precaches the app
+  shell and serves Vite's hashed assets stale-while-revalidate, so the app opens
+  with no network. Your notes are already local Markdown files (or Google Drive),
+  so editing works offline for Local workspaces.
+- **Network stays untouched for auth/sync** — the service worker never intercepts
+  cross-origin requests, so Google sign-in (`accounts.google.com`) and the Google
+  Drive API always talk to the network directly.
+- **Updates** — the worker uses the classic lifecycle (no forced reloads); a new
+  version activates once all tabs are closed. Bump the `CACHE` constant in
+  `sw.js` on each release to refresh the shell.
+- The worker registers in **production builds only**, so it never interferes with
+  the dev server's hot reload. Test it with `npm run build && npm run preview`.
+
+> Deploying under a sub-path? The manifest and service worker assume the site is
+> served from the origin root (`/`). If you set a Vite `base`, adjust the paths in
+> `manifest.webmanifest`, `sw.js`, and the registration in `main.jsx` to match.
 
 ---
 
@@ -155,11 +187,12 @@ client, and ensure the Google Drive API is enabled.
 
 ## Versions
 
-Current release: **2.0.1**. Full release notes live in the [`versions/`](./versions)
+Current release: **2.1.0**. Full release notes live in the [`versions/`](./versions)
 folder.
 
 | Version | Date       | Highlights                                                        |
 |---------|------------|-------------------------------------------------------------------|
+| [2.1.0](./versions/v2.1.0.md) | 2026-07-04 | Progressive Web App — installable, offline app shell, service worker, web manifest & icons; app renamed to just **Workspace** |
 | [2.0.1](./versions/v2.0.1.md) | 2026-07-04 | Google Drive fixes (open/browse/reconnect); homepage navbar; in-app Docs page; Manage workspaces (rename/description/delete); save-state indicator; dark+violet default; `Alt+N` / `Ctrl+Enter` shortcuts |
 | [2.0.0](./versions/v2.0.0.md) | 2026-07-03 | Firebase/accounts removed; plain-Markdown storage (Local + Google Drive); `info.md`, `trash/` & `archive/` folders; homepage; Trash/Archive/Templates as full pages |
 | [1.2.0](./versions/v1.2.0.md) | 2026-05-29 | File attachment, storage icons, code-block redesign               |

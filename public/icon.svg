@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- "any" purpose icon: rounded corners, transparent outside the squircle.
+       The mark is the app's ◧ boot logo, drawn geometrically (no font). -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8b5cf6"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <!-- left half filled, with rounded left corners -->
+  <path d="M176 146 L256 146 L256 366 L176 366 A30 30 0 0 1 146 336 L146 176 A30 30 0 0 1 176 146 Z" fill="#ffffff"/>
+  <!-- square outline -->
+  <rect x="146" y="146" width="220" height="220" rx="30" fill="none" stroke="#ffffff" stroke-width="22"/>
+</svg>
