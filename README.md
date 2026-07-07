@@ -1,6 +1,6 @@
 # Workspace
 
-**Version 2.1.1**
+**Version 2.2.0**
 
 A fast, block-based, Notion-style workspace built with **Vite + React 18**. There
 are no accounts and no backend. Everything you write is stored as **ordinary
@@ -12,6 +12,12 @@ away.
 
 ## Highlights
 
+- **Welcome page** — first-time visitors (no workspace data in the browser) get
+  a website-style landing that explains the app, with **Get Started**, **About**
+  and **Self-hosting** pages; returning users go straight to the start page.
+- **Try the demo** — a one-click, in-memory sandbox workspace;
+  nothing is saved until you choose **Keep this workspace**, which converts it
+  (content included) into a real Local or Drive workspace.
 - **Your data is just files** — pages are plain `.md` files with a little YAML
   frontmatter; folders mirror the page hierarchy. Open them in any editor.
 - **No account, no login, no cloud lock-in** — nothing is sent anywhere except
@@ -44,9 +50,9 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 and pick **Local folder** or **Google Drive** from the
-homepage. Local folders require a Chromium browser (Chrome, Edge, Brave); Google
-Drive works everywhere.
+Open http://localhost:5173 and click **Try the demo**, or pick **Local folder**
+or **Google Drive** from the homepage. Local folders require a Chromium browser
+(Chrome, Edge, Brave); Google Drive works everywhere.
 
 | Command           | Description                          |
 |-------------------|--------------------------------------|
@@ -189,11 +195,12 @@ client, and ensure the Google Drive API is enabled.
 
 ## Versions
 
-Current release: **2.1.1**. Full release notes live in the [`versions/`](./versions)
+Current release: **2.2.0**. Full release notes live in the [`versions/`](./versions)
 folder.
 
 | Version | Date       | Highlights                                                        |
 |---------|------------|-------------------------------------------------------------------|
+| [2.2.0](./versions/v2.2.0.md) | 2026-07-08 | First-impression release — **Welcome page** for first-time visitors (with About & Self-hosting pages) vs the classic **Start page** for returning users; one-click in-memory **demo workspace** with "Keep this workspace" conversion; version badge; empty new workspaces; subpage-only sidebar chevrons |
 | [2.1.1](./versions/v2.1.1.md) | 2026-07-08 | Editor bug-fix release — phantom empty blocks fixed, Enter splits paragraphs, clickable links, right-click format menu (colour/highlight), multi-block selection, forward-delete merge, menus stay on screen |
 | [2.1.0](./versions/v2.1.0.md) | 2026-07-04 | Progressive Web App — installable, offline app shell, service worker, web manifest & icons; app renamed to just **Workspace** |
 | [2.0.1](./versions/v2.0.1.md) | 2026-07-04 | Google Drive fixes (open/browse/reconnect); homepage navbar; in-app Docs page; Manage workspaces (rename/description/delete); save-state indicator; dark+violet default; `Alt+N` / `Ctrl+Enter` shortcuts |

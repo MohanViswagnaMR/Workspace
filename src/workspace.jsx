@@ -14,6 +14,7 @@ import {
   Share2, Users, Archive, Upload, LayoutDashboard, RotateCcw, Download,
   Monitor, CloudCheck, CloudUpload, Key, ExternalLink, Copy, Keyboard,
   Cloud, HardDrive, Paperclip, Database, Eye, PanelRight, LogOut, Unlink,
+  Play,
 } from 'lucide-react';
 import {
   isLocalFSSupported,
@@ -171,8 +172,11 @@ const ICON_MAP = {
   key: Key, 'external-link': ExternalLink, copy: Copy, keyboard: Keyboard,
   cloud: Cloud, 'hard-drive': HardDrive,
   paperclip: Paperclip, database: Database, eye: Eye, 'panel-right': PanelRight,
-  'log-out': LogOut, unlink: Unlink,
+  'log-out': LogOut, unlink: Unlink, play: Play,
 };
+
+/* Injected by Vite from package.json (vite.config.js `define`). */
+const APP_VERSION=typeof __APP_VERSION__!=='undefined'?__APP_VERSION__:'';
 
 const DASH_ID='__dashboard__';
 const STORAGE_ID='__storage__';
@@ -2409,11 +2413,14 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onDelete,onRec
       <div className="menu-h">Switch workspace</div>
       {(workspaces||[]).map(ws=>{
         const isLocal=ws.type==='local';
+        const isDemo=ws.type==='demo';
         const localUnavailable=isLocal&&!localSupported;
         const needsAccess=isLocal&&!localUnavailable&&ws.accessible===false;
-        const avatarBg=isLocal?'linear-gradient(135deg,#7c3aed,#a78bfa)':GDRIVE.gradient;
-        const subtitle=isLocal?'💻 Local folder':`${GDRIVE.emoji} Google Drive`;
-        const avatarLabel=isLocal?'💻':GDRIVE.emoji;
+        const avatarBg=isDemo?'linear-gradient(135deg,#f59e0b,#fbbf24)'
+          :isLocal?'linear-gradient(135deg,#7c3aed,#a78bfa)':GDRIVE.gradient;
+        const subtitle=isDemo?'🧪 Demo — not saved'
+          :isLocal?'💻 Local folder':`${GDRIVE.emoji} Google Drive`;
+        const avatarLabel=isDemo?'🧪':isLocal?'💻':GDRIVE.emoji;
         return <div key={ws.id} className={cx('mi',ws.id===activeId&&'hi')} style={{gap:0,paddingRight:6}}>
           <div style={{display:'flex',alignItems:'center',gap:8,flex:1,
             cursor:localUnavailable?'not-allowed':'pointer',minWidth:0,
@@ -2436,11 +2443,11 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onDelete,onRec
             </div>
             {ws.id===activeId&&<Ic n="check" style={{width:14,height:14,color:'var(--accent)',flexShrink:0}}/>}
           </div>
-          <button className="icon-btn" style={{width:22,height:22,flexShrink:0,marginLeft:4}}
+          {!isDemo&&<button className="icon-btn" style={{width:22,height:22,flexShrink:0,marginLeft:4}}
             title={isLocal?'Remove local workspace from list (files are not deleted)':'Remove Drive workspace from list (folder is not deleted)'}
             onMouseDown={e=>{e.preventDefault();e.stopPropagation();onDelete(ws.id);onClose();}}>
             <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
-          </button>
+          </button>}
         </div>;
       })}
       <div className="menu-sep"/>
@@ -2498,9 +2505,11 @@ function TreeItem({node,nodes,depth,currentId,expanded,toggleExp,openPage,addChi
         const id=e.dataTransfer.getData('node'); if(id&&id!==node.id) onDrop(id,node.id);}}
       onClick={()=>openPage(node.id)}
       onContextMenu={openCtx}>
-      <span className={cx('twist',isOpen&&'open')}
-        onClick={e=>{e.stopPropagation(); if(hasKids) toggleExp(node.id); else openPage(node.id);}}>
-        <Ic n="chevron"/></span>
+      {hasKids
+        ? <span className={cx('twist',isOpen&&'open')}
+            onClick={e=>{e.stopPropagation();toggleExp(node.id);}}>
+            <Ic n="chevron"/></span>
+        : <span className="twist blank"/>}
       <span className="tree-emoji">{node.icon||(node.kind==='database'?'🗄️':'📄')}</span>
       <span className="tree-label">{node.title||'Untitled'}</span>
       <span className="tree-actions">
@@ -2517,7 +2526,6 @@ function TreeItem({node,nodes,depth,currentId,expanded,toggleExp,openPage,addChi
         addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
         setModal={setModal} favorites={favorites} toggleFav={toggleFav}
         duplicate={duplicate} exportPage={exportPage} renameNode={renameNode}/>)}
-    {isOpen&&!hasKids&&<div className="tree-empty" style={{paddingLeft:30+depth*16}}>No pages inside</div>}
     {ctxMenu&&<ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxItems} onClose={()=>setCtxMenu(null)}/>}
   </div>;
 }
@@ -2533,7 +2541,8 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
   const favNodes=favorites.map(id=>nodes[id]).filter(n=>n&&!n.trashed&&!n.archived);
   const [wsPop,setWsPop]=React.useState(null);
   const activeWs=(workspaces||[]).find(w=>w.id===activeWorkspaceId)||{id:'',name:'Workspace',type:'local'};
-  const wsSub=activeWs.type==='gdrive'?`${GDRIVE.emoji} Google Drive`:'💻 Local folder';
+  const wsSub=activeWs.type==='demo'?'🧪 Demo — not saved'
+    :activeWs.type==='gdrive'?`${GDRIVE.emoji} Google Drive`:'💻 Local folder';
   const navRow=(icon,label,onClick,kbd,active)=>
     <div className={cx('tree-item',active&&'sel')} onClick={onClick}>
       <span className="tree-emoji" style={{fontSize:14}}><Ic n={icon==='layout'?'template':icon==='edit'?'plus':icon==='close'?'x':icon}/></span>
@@ -3037,9 +3046,11 @@ function StorageBadge({ws, onCreateWorkspace, onGoHome, saveState}) {
   const [pop, setPop] = useState(null);
   if (!ws) return null;
   const isLocal = ws.type === 'local';
-  const label = isLocal ? 'Local' : GDRIVE.shortName;
-  const detail = isLocal ? 'Saved on this computer' : `Saved to ${GDRIVE.name}`;
-  const BIcon = isLocal ? <HardDrive size={12}/> : <span style={{fontSize:11,lineHeight:1}}>{GDRIVE.emoji}</span>;
+  const isDemo = ws.type === 'demo';
+  const label = isDemo ? 'Demo' : isLocal ? 'Local' : GDRIVE.shortName;
+  const detail = isDemo ? 'Demo — nothing is saved' : isLocal ? 'Saved on this computer' : `Saved to ${GDRIVE.name}`;
+  const BIcon = isDemo ? <span style={{fontSize:11,lineHeight:1}}>🧪</span>
+    : isLocal ? <HardDrive size={12}/> : <span style={{fontSize:11,lineHeight:1}}>{GDRIVE.emoji}</span>;
   const where = isLocal ? 'your local folder' : GDRIVE.name;
   return <>
     <div className="storage-badge" onClick={e=>setPop(e.currentTarget.getBoundingClientRect())}
@@ -3048,23 +3059,25 @@ function StorageBadge({ws, onCreateWorkspace, onGoHome, saveState}) {
       <span>{label}</span>
     </div>
     {saveState&&<div className={cx('save-pill',saveState)}
-      title={saveState==='saving'?`Saving your changes to ${where}…`
+      title={saveState==='demo'?'You’re in the demo — changes are not saved. Use “Keep this workspace” to save your work.'
+        :saveState==='saving'?`Saving your changes to ${where}…`
         :saveState==='error'?`Could not save to ${where} — your changes are still here. Check your connection or reconnect.`
         :`All changes saved to ${where}.`}>
       {saveState==='saving'?<span className="save-spin"/>
-        :saveState==='error'?<Ic n="x" style={{width:13,height:13}}/>
+        :saveState==='error'||saveState==='demo'?<Ic n="x" style={{width:13,height:13}}/>
         :<Ic n="check" style={{width:13,height:13}}/>}
-      <span className="save-pill-tx">{saveState==='saving'?'Saving…':saveState==='error'?'Unsaved':'Saved'}</span>
+      <span className="save-pill-tx">{saveState==='saving'?'Saving…':saveState==='error'?'Unsaved':saveState==='demo'?'Not saved':'Saved'}</span>
     </div>}
     {pop&&<Popup rect={pop} onClose={()=>setPop(null)} width={250}>
       <div style={{padding:'14px 16px 10px'}}>
         <div style={{fontSize:10,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',
-          letterSpacing:'.06em',marginBottom:10}}>Saved to</div>
+          letterSpacing:'.06em',marginBottom:10}}>{isDemo?'Storage':'Saved to'}</div>
         <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:12}}>
           <div style={{width:40,height:40,borderRadius:10,flexShrink:0,display:'flex',
             alignItems:'center',justifyContent:'center',fontSize:22,
-            background: isLocal?'linear-gradient(135deg,#7c3aed,#a78bfa)':GDRIVE.gradient}}>
-            {isLocal?'💻':GDRIVE.emoji}
+            background: isDemo?'linear-gradient(135deg,#f59e0b,#fbbf24)'
+              :isLocal?'linear-gradient(135deg,#7c3aed,#a78bfa)':GDRIVE.gradient}}>
+            {isDemo?'🧪':isLocal?'💻':GDRIVE.emoji}
           </div>
           <div style={{minWidth:0}}>
             <div style={{fontWeight:600,fontSize:14,whiteSpace:'nowrap',overflow:'hidden',
@@ -3077,7 +3090,7 @@ function StorageBadge({ws, onCreateWorkspace, onGoHome, saveState}) {
         <div className="mi" style={{borderRadius:7,marginTop:4}}
           onMouseDown={e=>{e.preventDefault();setPop(null);onCreateWorkspace();}}>
           <div className="mi-ic"><Plus size={14}/></div>
-          <div className="mi-tx">Connect another workspace…</div>
+          <div className="mi-tx">{isDemo?'Keep this workspace…':'Connect another workspace…'}</div>
         </div>
         {onGoHome&&<div className="mi" style={{borderRadius:7}}
           onMouseDown={e=>{e.preventDefault();setPop(null);onGoHome();}}>
@@ -3834,7 +3847,7 @@ function PromptModal({title,placeholder,onConfirm,onClose}){
 }
 
 /* ---------------- Create Workspace Modal (cloud vs local) ---------------- */
-function CreateWorkspaceModal({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,onClose}){
+function CreateWorkspaceModal({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,onClose,keepDemo}){
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState('');
   const wrap=fn=>async(...a)=>{ setErr('');setBusy(true);
@@ -3844,10 +3857,14 @@ function CreateWorkspaceModal({onLocalNew,onLocalExisting,onDriveNew,onDriveExis
     <div className="modal" style={{width:640,maxHeight:'90vh',overflowY:'auto'}}
       onClick={e=>e.stopPropagation()}>
       <div className="modal-h">
-        <h3>Connect a workspace</h3>
+        <h3>{keepDemo?'Keep this workspace':'Connect a workspace'}</h3>
         <button className="x" onClick={onClose}><Ic n="x"/></button>
       </div>
       <div style={{padding:'18px 24px 24px'}}>
+        {keepDemo&&<div className="keep-demo-note">
+          Pick where to store it — everything you made in the demo will be saved there
+          as ordinary folders and <code>.md</code> files.
+        </div>}
         <ConnectPanel
           onLocalNew={wrap(async (n,d)=>{ await onLocalNew(n,d); })}
           onLocalExisting={wrap(async()=>{ await onLocalExisting(); })}
@@ -4361,7 +4378,124 @@ function ConnectPanel({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,bus
   </div>;
 }
 
-function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onManage,onDocs,theme,onToggleTheme,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
+const GitHubIcon=({size=17})=>
+  <svg viewBox="0 0 16 16" width={size} height={size} fill="currentColor" aria-hidden="true">
+    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+  </svg>;
+
+/* =========================================================================
+   WELCOME PAGE — the public landing for first-time visitors (no workspace
+   data in this browser yet). Explains the app; "Get Started" leads to the
+   start page (HomeScreen).
+   ========================================================================= */
+function WelcomePage({onGetStarted,onDemo,onDocs,onAbout,onSelfHost,theme,onToggleTheme}){
+  return <div className="home-screen welcome-page">
+    <div className="home-aurora" aria-hidden="true">
+      <span className="orb o1"/><span className="orb o2"/><span className="orb o3"/><span className="orb o4"/>
+      <span className="home-grid"/>
+    </div>
+    <nav className="home-nav">
+      <div className="home-nav-brand">
+        <span className="home-nav-mark">◧</span>
+        <span className="home-nav-title">Workspace</span>
+      </div>
+      <div className="home-nav-links">
+        <button type="button" className="home-nav-link" onClick={onAbout}>About</button>
+        <button type="button" className="home-nav-link" onClick={onSelfHost}>Self-hosting</button>
+        <button type="button" className="home-nav-link" onClick={onDocs}>Docs</button>
+        <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
+          target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
+          <GitHubIcon/>
+        </a>
+        {APP_VERSION&&<a className="home-nav-ver"
+          href="https://github.com/MohanViswagnaMR/Workspace/tree/main/versions"
+          target="_blank" rel="noopener noreferrer" title="Release notes">v{APP_VERSION}</a>}
+      </div>
+    </nav>
+    <div className="welcome-inner">
+      <section className="wl-hero">
+        <h1 className="wl-title home-rise" style={{animationDelay:'60ms'}}>
+          Notes, docs &amp; databases.<br/>
+          Saved as plain <span className="grad">Markdown files</span>.
+        </h1>
+        <p className="wl-sub home-rise" style={{animationDelay:'120ms'}}>
+          Workspace is a free, open-source, Notion-style block editor with no accounts and
+          no backend. Everything you write lives in ordinary folders and <code>.md</code> files —
+          in a folder on your computer or in your own Google Drive — readable and usable
+          even if this app goes away.
+        </p>
+        <div className="wl-actions home-rise" style={{animationDelay:'170ms'}}>
+          <button type="button" className="btn-demo" onClick={onGetStarted}>
+            Get Started <Ic n="fwd" style={{width:16,height:16}}/>
+          </button>
+          <button type="button" className="btn-demo-ghost" onClick={onDemo}>
+            <Ic n="play" style={{width:15,height:15}}/> Try the demo
+          </button>
+        </div>
+        <div className="wl-hint home-rise" style={{animationDelay:'200ms'}}>
+          The demo runs right here in your browser — no sign-up, nothing saved until you keep it.
+        </div>
+      </section>
+
+      <section className="home-feats wl-feats home-rise" style={{animationDelay:'240ms'}}>
+        {[['🧱','Block editor','Headings, to-dos, toggles, callouts, quotes, code, images and files — type / for everything.'],
+          ['📊','Databases','Tables, boards, galleries, lists and calendars, with multiple views per database.'],
+          ['🗂️','Nested pages','Infinite page hierarchy with instant search, favorites, templates, trash and archive.'],
+          ['📁','Plain files, yours','Pages are Markdown files in real folders — open them with any editor, forever.'],
+          ['🔒','No account, no cloud','Nothing is sent anywhere except, optionally, your own Google Drive.'],
+          ['⚡','Installable & offline','A PWA you can install on desktop or phone; local workspaces work fully offline.']]
+          .map(([ic,t,s])=><div className="home-feat" key={t}>
+            <span className="home-feat-ic">{ic}</span>
+            <span className="home-feat-t">{t}</span>
+            <span className="home-feat-s">{s}</span>
+          </div>)}
+      </section>
+
+      <section className="wl-files home-rise" style={{animationDelay:'280ms'}}>
+        <div className="wl-files-copy">
+          <h2 className="wl-h2">Your data is just files.</h2>
+          <p className="wl-p">
+            Each workspace is a self-describing folder tree: pages with children become
+            folders, leaf pages are single <code>.md</code> files, and metadata lives in a
+            little YAML frontmatter. There is <b>no JSON</b> anywhere in your data — open
+            it in any editor, sync it with any tool, keep it forever.
+          </p>
+          <p className="wl-p">
+            Curious how it works? Read the <button type="button" className="home-demo-link"
+              onClick={onDocs}>documentation</button> or learn about{' '}
+            <button type="button" className="home-demo-link" onClick={onSelfHost}>hosting it yourself</button>.
+          </p>
+        </div>
+        <pre className="wl-tree"><code>{`My Workspace/
+├── Upload/            images & attachments
+└── Space/             all top-level pages
+    ├── Meeting Notes.md
+    └── Homework/
+        ├── master page.md
+        ├── Essay.md
+        └── Math/
+            ├── Problem set 1.md
+            └── Problem set 2.md`}</code></pre>
+      </section>
+
+      <div className="home-foot home-rise" style={{animationDelay:'320ms'}}>
+        <div className="home-foot-copy">
+          © {new Date().getFullYear()} Workspace · Mohan Viswagna MR. All rights reserved.
+        </div>
+        <button type="button" role="switch" aria-checked={theme==='dark'}
+          className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
+          title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
+          aria-label={theme==='dark'?'Switch to light mode':'Switch to dark mode'}>
+          <Ic n="sun" style={{width:13,height:13}}/>
+          <Ic n="moon" style={{width:13,height:13}}/>
+          <span className="theme-switch-knob"/>
+        </button>
+      </div>
+    </div>
+  </div>;
+}
+
+function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onManage,onDocs,onWelcome,theme,onToggleTheme,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
   const known=list||[];
   const lastId=pointer?pointer.id:null;
   return <div className="home-screen">
@@ -4375,16 +4509,18 @@ function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onMan
         <span className="home-nav-title">Workspace</span>
       </div>
       <div className="home-nav-links">
+        <button type="button" className="home-nav-link" onClick={onWelcome}>Welcome</button>
         <button type="button" className="home-nav-link" onClick={onDocs}>Docs</button>
         <button type="button" className="home-nav-link" onClick={onManage}>
           <Ic n="cloud" style={{width:15,height:15}}/> Manage workspaces
         </button>
         <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
           target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
-          <svg viewBox="0 0 16 16" width="17" height="17" fill="currentColor" aria-hidden="true">
-            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
-          </svg>
+          <GitHubIcon/>
         </a>
+        {APP_VERSION&&<a className="home-nav-ver"
+          href="https://github.com/MohanViswagnaMR/Workspace/tree/main/versions"
+          target="_blank" rel="noopener noreferrer" title="Release notes">v{APP_VERSION}</a>}
       </div>
     </nav>
     <div className="home-inner">
@@ -4786,6 +4922,190 @@ Welcome to your **connected workspace**.
 }
 
 /* =========================================================================
+   ABOUT & SELF-HOSTING — simple single-column site pages (docs styling)
+   ========================================================================= */
+function SitePage({tag,onBack,theme,onToggleTheme,children}){
+  return <div className="docs-page">
+    <div className="docs-top">
+      <button className="docs-back" onClick={onBack} title="Back">
+        <Ic n="back" style={{width:16,height:16}}/> Back
+      </button>
+      <div className="docs-top-brand">
+        <span className="home-nav-mark">◧</span>
+        <span className="home-nav-title">Workspace</span>
+        <span className="docs-top-tag">{tag}</span>
+      </div>
+      <div className="docs-top-actions">
+        <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
+          target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
+          <GitHubIcon/>
+        </a>
+        <button type="button" role="switch" aria-checked={theme==='dark'}
+          className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
+          title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
+          aria-label={theme==='dark'?'Switch to light mode':'Switch to dark mode'}>
+          <Ic n="sun" style={{width:13,height:13}}/>
+          <Ic n="moon" style={{width:13,height:13}}/>
+          <span className="theme-switch-knob"/>
+        </button>
+      </div>
+    </div>
+    <div className="docs-body">
+      <main className="docs-main">
+        <div className="docs-content">
+          {children}
+          <div className="docs-foot">
+            © {new Date().getFullYear()} Workspace · Mohan Viswagna MR ·{' '}
+            <a href="https://github.com/MohanViswagnaMR/Workspace" target="_blank" rel="noopener noreferrer">GitHub</a>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>;
+}
+
+function AboutPage({onBack,theme,onToggleTheme,onDocs,onSelfHost}){
+  return <SitePage tag="About" onBack={onBack} theme={theme} onToggleTheme={onToggleTheme}>
+    <div className="docs-hero">
+      <h1 className="docs-title">About Workspace</h1>
+      <p className="docs-lead">
+        A fast, block-based, Notion-style workspace with a simple promise:
+        <b> your notes are yours</b> — as plain, readable files, with no account
+        and no backend between you and your own words.
+      </p>
+    </div>
+
+    <h2 className="docs-h2">Why it exists</h2>
+    <p className="docs-p">
+      Modern note apps are wonderful to write in but keep your work inside their
+      own databases, behind their own accounts. If the app changes, breaks, or
+      shuts down, your notes go with it. Workspace keeps the writing experience —
+      blocks, slash commands, nested pages, databases with views — but stores
+      everything as ordinary folders and Markdown files that outlive any app.
+    </p>
+
+    <h2 className="docs-h2">The principles</h2>
+    <ul className="docs-list">
+      <li><b>Files over databases.</b> Every page is a plain <code>.md</code> file with a
+        little YAML frontmatter; folders mirror the page hierarchy. No JSON, no
+        proprietary formats.</li>
+      <li><b>No accounts.</b> There is nothing to sign up for. Your workspace lives in a
+        folder on your computer, or — if you choose — a real, browsable folder in your
+        own Google Drive.</li>
+      <li><b>No lock-in.</b> Stop using the app any day and your notes remain a tidy
+        folder of Markdown, readable in any editor, importable anywhere.</li>
+      <li><b>Local-first.</b> Installable as an app; local workspaces work fully
+        offline. The network is only used for Google Drive, if you connect it.</li>
+    </ul>
+
+    <h2 className="docs-h2">What's inside</h2>
+    <p className="docs-p">
+      A block editor (text, headings, to-dos, lists, toggles, quotes, callouts, code,
+      images, files), infinite nested pages, multi-view databases (table, board,
+      gallery, list, calendar), instant search, favorites, templates, trash &amp;
+      archive, dark mode, and <code>.docx</code> import. See the{' '}
+      <button type="button" className="home-demo-link" onClick={onDocs}>full documentation</button>.
+    </p>
+
+    <h2 className="docs-h2">Open source &amp; self-hostable</h2>
+    <p className="docs-p">
+      Workspace is a static site — a Vite + React app with no server of its own. The
+      source is on <a href="https://github.com/MohanViswagnaMR/Workspace" target="_blank"
+      rel="noopener noreferrer">GitHub</a>, and you can{' '}
+      <button type="button" className="home-demo-link" onClick={onSelfHost}>host it yourself</button>{' '}
+      on any static host.
+    </p>
+
+    <h2 className="docs-h2">Tech</h2>
+    <table className="docs-table"><tbody>
+      <tr><td>Build tool</td><td>Vite 6</td></tr>
+      <tr><td>UI</td><td>React 18</td></tr>
+      <tr><td>Storage</td><td>File System Access API · Google Drive API</td></tr>
+      <tr><td>Frontmatter</td><td>js-yaml</td></tr>
+      <tr><td>Icons</td><td>lucide-react</td></tr>
+      <tr><td>Import</td><td>mammoth (<code>.docx</code> → blocks)</td></tr>
+    </tbody></table>
+  </SitePage>;
+}
+
+function SelfHostPage({onBack,theme,onToggleTheme}){
+  return <SitePage tag="Self-hosting" onBack={onBack} theme={theme} onToggleTheme={onToggleTheme}>
+    <div className="docs-hero">
+      <h1 className="docs-title">Self-hosting Workspace</h1>
+      <p className="docs-lead">
+        Workspace has no backend — the production build is a folder of static files.
+        If you can serve HTML, you can host it: Vercel, Netlify, GitHub Pages, an
+        nginx box, a Raspberry Pi.
+      </p>
+    </div>
+
+    <h2 className="docs-h2">1 · Build</h2>
+    <pre className="docs-code"><code>{`git clone https://github.com/MohanViswagnaMR/Workspace.git
+cd Workspace
+npm install
+npm run build     # → static site in dist/`}</code></pre>
+    <p className="docs-p">
+      That's the whole build. <code>npm run preview</code> serves <code>dist/</code> locally
+      so you can check it (including the PWA service worker) before deploying.
+    </p>
+
+    <h2 className="docs-h2">2 · Deploy the <code>dist/</code> folder</h2>
+    <ul className="docs-list">
+      <li><b>Vercel / Netlify</b> — point it at the repo; build command <code>npm run build</code>,
+        output directory <code>dist</code>. Nothing else to configure.</li>
+      <li><b>GitHub Pages</b> — publish the <code>dist/</code> folder (e.g. with an Actions
+        workflow). Prefer a custom domain or user site served from the root — see the
+        sub-path note below.</li>
+      <li><b>Your own server</b> — copy <code>dist/</code> behind nginx/Apache/Caddy. It's
+        static files; no Node process is needed in production. Serve over <b>HTTPS</b> —
+        the File System Access API, service worker, and Google sign-in all require a
+        secure origin (plain <code>http://localhost</code> is fine for testing).</li>
+    </ul>
+    <p className="docs-note">
+      Local-folder workspaces and the offline PWA work out of the box on any HTTPS
+      host — no configuration at all. Google Drive is the only feature that needs setup.
+    </p>
+
+    <h2 className="docs-h2">3 · (Optional) Google Drive on your domain</h2>
+    <p className="docs-p">
+      Drive workspaces use Google's browser OAuth flow with a client ID that is public
+      by design (there is no secret). To run it on your own domain:
+    </p>
+    <ul className="docs-list">
+      <li>In <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer">Google
+        Cloud Console</a>, create a project and enable the <b>Google Drive API</b>.</li>
+      <li>Create an <b>OAuth client ID</b> of type <i>Web application</i> and add your
+        site's origin (e.g. <code>https://notes.example.com</code>) as an
+        <b> Authorised JavaScript origin</b>.</li>
+      <li>Put your client ID in <code>src/cloudstorage.js</code> (the
+        <code> GDRIVE_CLIENT_ID</code> constant at the top) and rebuild.</li>
+    </ul>
+    <p className="docs-p">
+      Skip all of this if you only want local-folder workspaces — the Drive option
+      simply won't authenticate.
+    </p>
+
+    <h2 className="docs-h2">Deploying under a sub-path</h2>
+    <p className="docs-p">
+      The manifest and service worker assume the site is served from the origin root
+      (<code>/</code>). If you deploy under a sub-path (e.g.
+      <code> example.com/workspace/</code>), set Vite's <code>base</code> in
+      <code> vite.config.js</code> and adjust the paths in
+      <code> public/manifest.webmanifest</code>, <code>public/sw.js</code>, and the
+      service-worker registration in <code>src/main.jsx</code> to match.
+    </p>
+
+    <h2 className="docs-h2">Updating</h2>
+    <p className="docs-p">
+      Pull the new version, <code>npm run build</code>, redeploy <code>dist/</code>.
+      The service worker uses the classic lifecycle: a new version activates once all
+      tabs are closed — no forced reloads, and your notes are never touched (they live
+      in your folders, not on the site).
+    </p>
+  </SitePage>;
+}
+
+/* =========================================================================
    WORKSPACE  (the app surface)
    ========================================================================= */
 function Workspace(){
@@ -4797,7 +5117,8 @@ function Workspace(){
   const [modal,setModal]=React.useState(null);
   const [peek,setPeek]=React.useState(null); // {dbHostId, rowId}
   const [showTutorial,setShowTutorial]=React.useState(false);
-  const [docsOpen,setDocsOpen]=React.useState(false);
+  const [sitePage,setSitePage]=React.useState(null); // 'docs' | 'about' | 'selfhost'
+  const [entry,setEntry]=React.useState(null);       // null (auto) | 'start' | 'welcome'
   const [homeTheme,setHomeTheme]=React.useState(()=>readTheme().theme);
   const [saveState,setSaveState]=React.useState('saved'); // 'saved' | 'saving' | 'error'
   const driveTimer=React.useRef(null);
@@ -4817,6 +5138,8 @@ function Workspace(){
   /* ---- build the switcher list from local index + the active workspace ---- */
   const buildWsList=(localList,active)=>{
     const list=(localList||[]).map(l=>({...l}));
+    if(active&&active.type==='demo')
+      list.unshift({id:active.id,name:active.name,type:'demo'});
     if(active&&active.type==='gdrive'&&!list.some(w=>w.id===active.id))
       list.push({id:active.id,name:active.name,type:'gdrive',folderId:active.folderId});
     if(active&&active.type==='local'&&!list.some(w=>w.id===active.id))
@@ -4854,7 +5177,8 @@ function Workspace(){
       active, localList:localList||[],
       tutorialCompleted:getCookie('ws_tutorial')==='1',
     });
-    writeActivePointer(active.type==='gdrive'
+    // Demo workspaces are memory-only — never remember them across reloads.
+    if(active.type!=='demo') writeActivePointer(active.type==='gdrive'
       ?{type:'gdrive',name:active.name,folderId:active.folderId,id:active.id}
       :{type:'local',name:active.name,id:active.id});
   };
@@ -4910,6 +5234,8 @@ function Workspace(){
     document.body.classList.add(`t-${store.accent||'violet'}`);
 
     const active=store.active;
+    // Demo workspaces live only in memory — nothing is ever written.
+    if(active?.type==='demo'){ savedRef.current.id=active.id; setSaveState('demo'); return; }
     // Freshly opened / switched workspace → nothing to save yet; don't rewrite it.
     if(savedRef.current.id!==active.id){ savedRef.current.id=active.id; setSaveState('saved'); return; }
 
@@ -4967,6 +5293,17 @@ function Workspace(){
     setExpanded({});
   };
 
+  /* One-click demo — the seed workspace mounted purely in memory. Nothing is
+     asked for and nothing is written; "Keep this workspace" (the in-app
+     Connect modal) turns it into a real Local/Drive workspace, content included. */
+  const openDemo=async()=>{
+    const seed=buildSeed();
+    const info={};
+    await finishConnect(
+      {nodes:seed.nodes,favorites:seed.favorites,currentId:seed.currentId,uploads:[],info},
+      {id:'demo',name:'Demo workspace',type:'demo'});
+  };
+
   const connectLocalNew=async(name,description)=>{
     if(!name||!name.trim()) return;
     const id=nid();
@@ -4982,7 +5319,11 @@ function Workspace(){
         await finishConnect(data,{id,name:rec.name,type:'local'});
         return;
       }
-      const seed=buildSeed();
+      // New workspaces start empty — sample pages exist only in the demo;
+      // keeping the demo carries its current content into the new workspace.
+      const seed=store&&store.active?.type==='demo'
+        ? {nodes:store.nodes,favorites:store.favorites,currentId:store.currentId}
+        : {nodes:{},favorites:[],currentId:null};
       const info={...readTheme(),font:'default',pageBg:null,description:(description||'').trim()};
       data={nodes:seed.nodes,favorites:seed.favorites,currentId:seed.currentId,uploads:[],info};
       await writeWorkspaceTreeNow(id,{nodes:data.nodes,favorites:data.favorites,uploads:[],info});
@@ -5008,7 +5349,11 @@ function Workspace(){
     setHome(h=>({...h,busy:true,error:''}));
     try{
       const folderId=await createDriveWorkspace(name);
-      const seed=buildSeed();
+      // New workspaces start empty — sample pages exist only in the demo;
+      // keeping the demo carries its current content into the new workspace.
+      const seed=store&&store.active?.type==='demo'
+        ? {nodes:store.nodes,favorites:store.favorites,currentId:store.currentId}
+        : {nodes:{},favorites:[],currentId:null};
       const info={...readTheme(),font:'default',pageBg:null,description:(description||'').trim()};
       await writeGdriveWorkspaceTree(folderId,{nodes:seed.nodes,favorites:seed.favorites,uploads:[],info});
       await finishConnect({nodes:seed.nodes,favorites:seed.favorites,currentId:seed.currentId,uploads:[],info},
@@ -5161,12 +5506,31 @@ function Workspace(){
 
   if(booting) return <div className="app-loading"><div className="app-loading-logo">◧</div><div className="app-loading-bar"><i /></div></div>;
 
-  if(docsOpen) return <DocsPage onBack={()=>setDocsOpen(false)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>;
+  if(sitePage==='docs')
+    return <DocsPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>;
+  if(sitePage==='about')
+    return <AboutPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}
+      onDocs={()=>setSitePage('docs')} onSelfHost={()=>setSitePage('selfhost')}/>;
+  if(sitePage==='selfhost')
+    return <SelfHostPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>;
+
+  /* First visit (no workspace data in this browser) → the Welcome landing.
+     Any browser memory — known workspaces, an active pointer, a live Drive
+     session — or a "Get Started" click leads to the start page below. The
+     start page's "Welcome" nav link shows the landing again on demand. */
+  const hasMemory=(home.list||[]).length>0||!!home.pointer||!!home.driveConnected;
+  const showWelcome=entry==='welcome'||(entry!=='start'&&!hasMemory);
+  if(!store&&showWelcome)
+    return <WelcomePage onGetStarted={()=>setEntry('start')} onDemo={openDemo}
+      onDocs={()=>setSitePage('docs')} onAbout={()=>setSitePage('about')}
+      onSelfHost={()=>setSitePage('selfhost')}
+      theme={homeTheme} onToggleTheme={toggleHomeTheme}/>;
 
   if(!store) return <>
     <HomeScreen pointer={home.pointer} list={home.list} busy={home.busy} error={home.error}
       driveConnected={home.driveConnected} onConnectDrive={connectDriveList}
-      onManage={()=>setModal({type:'manage-ws'})} onDocs={()=>setDocsOpen(true)}
+      onManage={()=>setModal({type:'manage-ws'})} onDocs={()=>setSitePage('docs')}
+      onWelcome={()=>setEntry('welcome')}
       theme={homeTheme} onToggleTheme={toggleHomeTheme}
       onOpen={openKnownWorkspace} onRemove={removeKnownWorkspace} onReconnect={reconnectActive}
       onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
@@ -5416,6 +5780,14 @@ function Workspace(){
 
     <div className={cx('main',store.pageBgUrl&&'has-page-bg')}
       style={store.pageBgUrl?{'--page-bg':`url("${store.pageBgUrl}")`}:undefined}>
+      {activeWorkspace.type==='demo'&&<div className="demo-banner">
+        <span className="demo-banner-ic">🧪</span>
+        <span className="demo-banner-tx"><b>You’re exploring the demo.</b> Edit anything —
+          nothing is saved until you keep it.</span>
+        <button className="btn primary sm" onClick={()=>setModal({type:'create-workspace'})}>
+          Keep this workspace</button>
+        <button className="btn ghost sm" onClick={goHome}>Exit demo</button>
+      </div>}
       {isStoragePage
         ? <>
             <div className="topbar">
@@ -5489,7 +5861,7 @@ function Workspace(){
     {modal&&modal.type==='search'&&
       <SearchModal nodes={nodes} openPage={openPage} onClose={()=>setModal(null)}/>}
     {modal&&modal.type==='create-workspace'&&
-      <CreateWorkspaceModal
+      <CreateWorkspaceModal keepDemo={activeWorkspace.type==='demo'}
         onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
         onDriveNew={connectDriveNew} onDriveExisting={()=>connectDriveExisting(null)}
         onClose={()=>setModal(null)}/>}
