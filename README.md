@@ -1,6 +1,6 @@
 # Workspace
 
-**Version 2.1.0**
+**Version 2.1.1**
 
 A fast, block-based, Notion-style workspace built with **Vite + React 18**. There
 are no accounts and no backend. Everything you write is stored as **ordinary
@@ -19,7 +19,9 @@ away.
 - **Two workspace types** — a **Local** folder (via the File System Access API)
   or **Google Drive** (a real, browsable folder in your Drive).
 - **Block editor** — text, headings, to-dos, lists, toggles, quotes, callouts,
-  dividers, code blocks, images and file attachments.
+  dividers, code blocks, images and file attachments. Inline formatting via a
+  right-click menu: bold, italic, underline, strikethrough, code, text colour
+  and highlight; bare URLs become clickable links automatically.
 - **Nested pages** — infinite page hierarchy, mirrored as nested folders on disk.
 - **Multi-view databases** — table, board, gallery, list and calendar views.
 - **Slash commands, instant search, favorites, trash & archive, templates,
@@ -187,11 +189,12 @@ client, and ensure the Google Drive API is enabled.
 
 ## Versions
 
-Current release: **2.1.0**. Full release notes live in the [`versions/`](./versions)
+Current release: **2.1.1**. Full release notes live in the [`versions/`](./versions)
 folder.
 
 | Version | Date       | Highlights                                                        |
 |---------|------------|-------------------------------------------------------------------|
+| [2.1.1](./versions/v2.1.1.md) | 2026-07-08 | Editor bug-fix release — phantom empty blocks fixed, Enter splits paragraphs, clickable links, right-click format menu (colour/highlight), multi-block selection, forward-delete merge, menus stay on screen |
 | [2.1.0](./versions/v2.1.0.md) | 2026-07-04 | Progressive Web App — installable, offline app shell, service worker, web manifest & icons; app renamed to just **Workspace** |
 | [2.0.1](./versions/v2.0.1.md) | 2026-07-04 | Google Drive fixes (open/browse/reconnect); homepage navbar; in-app Docs page; Manage workspaces (rename/description/delete); save-state indicator; dark+violet default; `Alt+N` / `Ctrl+Enter` shortcuts |
 | [2.0.0](./versions/v2.0.0.md) | 2026-07-03 | Firebase/accounts removed; plain-Markdown storage (Local + Google Drive); `info.md`, `trash/` & `archive/` folders; homepage; Trash/Archive/Templates as full pages |

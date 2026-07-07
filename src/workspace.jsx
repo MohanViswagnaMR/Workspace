@@ -4,7 +4,7 @@
    templates, favorites, dark mode, keyboard shortcuts.
    Persistence is delegated to ./storage (Firestore or localStorage).
    ========================================================================= */
-import React, { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Search, Home, Inbox, Settings, Plus, ChevronRight, ChevronDown,
@@ -770,12 +770,150 @@ function textBeforeCaret(el){
   r.selectNodeContents(el); r.setEnd(sel.getRangeAt(0).startContainer,sel.getRangeAt(0).startOffset);
   return r.toString();
 }
+function caretTextOffset(el){
+  const sel=window.getSelection();
+  if(!sel.rangeCount || !el.contains(sel.anchorNode)) return null;
+  const r=sel.getRangeAt(0).cloneRange();
+  r.selectNodeContents(el); r.setEnd(sel.getRangeAt(0).endContainer,sel.getRangeAt(0).endOffset);
+  return r.toString().length;
+}
+function splitHtmlAtCaret(el){
+  const sel=window.getSelection();
+  if(!sel.rangeCount || !el.contains(sel.anchorNode)) return null;
+  const r=sel.getRangeAt(0);
+  const div=document.createElement('div');
+  const before=r.cloneRange(); before.selectNodeContents(el); before.setEnd(r.startContainer,r.startOffset);
+  div.appendChild(before.cloneContents());
+  const bHtml=div.innerHTML.replace(/<br\s*\/?>$/i,'');
+  div.innerHTML='';
+  const after=r.cloneRange(); after.selectNodeContents(el); after.setStart(r.endContainer,r.endOffset);
+  div.appendChild(after.cloneContents());
+  const aHtml=div.innerHTML.replace(/^<br\s*\/?>/i,'');
+  return {before:bHtml,after:aHtml};
+}
+function setCaretTextOffset(el,offset){
+  const walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT);
+  let n,count=0;
+  while((n=walker.nextNode())){
+    const len=n.nodeValue.length;
+    if(count+len>=offset){
+      const sel=window.getSelection(); const r=document.createRange();
+      r.setStart(n,offset-count); r.collapse(true);
+      sel.removeAllRanges(); sel.addRange(r);
+      return;
+    }
+    count+=len;
+  }
+  placeCaret(el,'end');
+}
+
+/* =========================================================================
+   inline colour / highlight — wrap the selection in a tc-* / bg-* span
+   ========================================================================= */
+function applySelSpan(prefix,color){
+  const sel=window.getSelection();
+  if(!sel.rangeCount||sel.isCollapsed) return;
+  const r=sel.getRangeAt(0);
+  let host=r.commonAncestorContainer;
+  if(host.nodeType===3) host=host.parentNode;
+  const root=host.closest&&host.closest('.ce');
+  if(!root) return;
+  // selection as text offsets within the block, so enclosing spans split cleanly
+  const measure=(container,offset)=>{
+    const rr=document.createRange();
+    rr.selectNodeContents(root); rr.setEnd(container,offset);
+    return rr.toString().length;
+  };
+  const from=measure(r.startContainer,r.startOffset);
+  const to=measure(r.endContainer,r.endOffset);
+  if(from===to) return;
+  // rebuild the block HTML: same-kind spans are dissolved into an inherited
+  // class, text inside [from,to) gets the new colour, the rest keeps its own
+  const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const wrapCls=(t,cls)=>cls?'<span class="'+cls+'">'+esc(t)+'</span>':esc(t);
+  const newCls=color==='default'?'':prefix+color;
+  let pos=0;
+  const ser=(node,cls)=>{
+    let out='';
+    node.childNodes.forEach(ch=>{
+      if(ch.nodeType===3){
+        const t=ch.nodeValue,s=pos,e=pos+t.length; pos=e;
+        const c1=Math.min(Math.max(from,s),e),c2=Math.min(Math.max(to,s),e);
+        if(c1>s) out+=wrapCls(t.slice(0,c1-s),cls);
+        if(c2>c1) out+=wrapCls(t.slice(c1-s,c2-s),newCls);
+        if(e>c2) out+=wrapCls(t.slice(c2-s),cls);
+      } else if(ch.nodeType===1){
+        if(ch.tagName==='BR'){ out+='<br>'; return; }
+        const pcls=ch.tagName==='SPAN'?[...ch.classList].find(c=>c.startsWith(prefix)):undefined;
+        if(pcls!==undefined) out+=ser(ch,pcls);
+        else{
+          const tag=ch.tagName.toLowerCase();
+          let attrs='';
+          [...ch.attributes].forEach(a=>{attrs+=' '+a.name+'="'+String(a.value).replace(/"/g,'&quot;')+'"';});
+          out+='<'+tag+attrs+'>'+ser(ch,cls)+'</'+tag+'>';
+        }
+      }
+    });
+    return out;
+  };
+  root.innerHTML=ser(root,'');
+  // re-select the same text range so further formatting can be chained
+  const locate=offset=>{
+    const w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
+    let n,c=0;
+    while((n=w.nextNode())){
+      if(c+n.nodeValue.length>=offset) return [n,offset-c];
+      c+=n.nodeValue.length;
+    }
+    return [root,root.childNodes.length];
+  };
+  const [sn,so]=locate(from),[en,eo]=locate(to);
+  const nr=document.createRange(); nr.setStart(sn,so); nr.setEnd(en,eo);
+  sel.removeAllRanges(); sel.addRange(nr);
+}
+
+/* =========================================================================
+   linkify — wrap bare URLs in text with <a> (skips existing anchors)
+   ========================================================================= */
+const URL_RE=/(?:https?:\/\/|www\.)[^\s<>"']+[^\s<>"'.,;:!?)\]}]/gi;
+function linkifyHtml(html){
+  const tpl=document.createElement('template');
+  tpl.innerHTML=html||'';
+  const walk=node=>{
+    [...node.childNodes].forEach(child=>{
+      if(child.nodeType===3){
+        const text=child.nodeValue;
+        URL_RE.lastIndex=0;
+        if(!URL_RE.test(text)) return;
+        const frag=document.createDocumentFragment();
+        let last=0;
+        URL_RE.lastIndex=0;
+        text.replace(URL_RE,(url,idx)=>{
+          if(idx>last) frag.appendChild(document.createTextNode(text.slice(last,idx)));
+          const a=document.createElement('a');
+          a.href=/^www\./i.test(url)?'https://'+url:url;
+          a.textContent=url;
+          frag.appendChild(a);
+          last=idx+url.length;
+          return url;
+        });
+        if(last<text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        node.replaceChild(frag,child);
+      } else if(child.nodeType===1 && child.tagName!=='A'){
+        walk(child);
+      }
+    });
+  };
+  walk(tpl.content);
+  return tpl.innerHTML;
+}
 
 /* =========================================================================
    EDITABLE — uncontrolled contentEditable wrapper
    ========================================================================= */
 const Editable = React.forwardRef(function Editable(props,ref){
-  const {html,onInput,placeholder,className,onKeyDown,onFocus,onBlur,style}=props;
+  const {html:rawHtml,onInput,placeholder,className,onKeyDown,onFocus,onBlur,style}=props;
+  const html=useMemo(()=>linkifyHtml(rawHtml||''),[rawHtml]); // bare URLs in stored content render as links
   const local=useRef();
   const [focused,setFocused]=useState(false);
   const setRef=el=>{ local.current=el; if(typeof ref==='function')ref(el); else if(ref)ref.current=el; };
@@ -784,17 +922,36 @@ const Editable = React.forwardRef(function Editable(props,ref){
     if(local.current && document.activeElement!==local.current
        && local.current.innerHTML!==(html||'')) local.current.innerHTML=html||'';
   },[html]);
+  // wrap bare URLs in <a>, keeping the caret where it was
+  const maybeLinkify=el=>{
+    const next=linkifyHtml(el.innerHTML);
+    if(next===el.innerHTML) return false;
+    const off=caretTextOffset(el);
+    el.innerHTML=next;
+    if(off!=null) setCaretTextOffset(el,off);
+    return true;
+  };
   // placeholder shows only when focused AND the block has no visible text content
   const isEmpty=!(html||'').replace(/<br\s*\/?>/gi,'').replace(/&nbsp;/gi,' ').trim();
   return <div className={cx('ce',className,isEmpty&&focused&&placeholder&&'ph')} contentEditable suppressContentEditableWarning
     ref={setRef} data-ph={placeholder||''} style={style}
-    onInput={e=>onInput&&onInput(e.currentTarget.innerHTML)}
+    onInput={e=>{ const el=e.currentTarget;
+      const d=e.nativeEvent&&e.nativeEvent.data;
+      if(d===' '||d==='\u00a0') maybeLinkify(el); // linkify once a word is finished
+      onInput&&onInput(el.innerHTML); }}
     onKeyDown={onKeyDown}
     onFocus={e=>{ setFocused(true); onFocus&&onFocus(e); }}
-    onBlur={e=>{ setFocused(false); onBlur&&onBlur(e); }}
+    onBlur={e=>{ setFocused(false);
+      if(maybeLinkify(e.currentTarget)) onInput&&onInput(e.currentTarget.innerHTML);
+      onBlur&&onBlur(e); }}
+    onClick={e=>{ const a=e.target.closest&&e.target.closest('a');
+      if(a && local.current && local.current.contains(a)){
+        e.preventDefault(); window.open(a.href,'_blank','noopener'); } }}
     onPaste={e=>{ e.preventDefault();
       const t=(e.clipboardData||window.clipboardData).getData('text/plain');
-      document.execCommand('insertText',false,t); }}/>;
+      document.execCommand('insertText',false,t);
+      const el=e.currentTarget;
+      if(maybeLinkify(el)) onInput&&onInput(el.innerHTML); }}/>;
 });
 
 window.__NOTION_PART1_DONE=true;
@@ -870,21 +1027,41 @@ function BlockMenu({rect,block,onClose,onAction}){
 
   // ── main menu position ──
   const mw=210;
-  let mTop=rect.bottom+4, mLeft=rect.left;
+  let mLeft=rect.left;
   if(mLeft+mw>window.innerWidth-10) mLeft=window.innerWidth-mw-10;
+  // measured vertical clamp: open upward when there is no room below
+  const [mTopAdj,setMTopAdj]=useState(null);
+  useLayoutEffect(()=>{
+    const el=mainRef.current; if(!el) return;
+    const h=el.offsetHeight;
+    let t=rect.bottom+4;
+    if(t+h>window.innerHeight-10){
+      t=rect.top-h-4;
+      if(t<10) t=Math.max(10,window.innerHeight-h-10);
+    }
+    setMTopAdj(t);
+  },[]);
+  const mTop=mTopAdj??(rect.bottom+4);
 
   // ── submenu position: right side of the main menu, aligned to the hovered row ──
   const sw=sub==='turn'?210:220;
-  let sTop=0, sLeft=0;
+  let sLeft=0;
   if(subRect){
-    sTop=subRect.top-6;
     sLeft=mLeft+mw+6;
     // flip left if no room on the right
     if(sLeft+sw>window.innerWidth-10) sLeft=mLeft-sw-6;
-    // clamp bottom
-    const estH=sub==='turn'?300:360;
-    if(sTop+estH>window.innerHeight-10) sTop=window.innerHeight-estH-10;
   }
+  const [sTopAdj,setSTopAdj]=useState(null);
+  useLayoutEffect(()=>{
+    if(!sub||!subRect){ setSTopAdj(null); return; }
+    const el=subRef.current; if(!el) return;
+    const h=el.offsetHeight;
+    let t=subRect.top-6;
+    if(t+h>window.innerHeight-10) t=window.innerHeight-h-10;
+    if(t<10) t=10;
+    setSTopAdj(t);
+  },[sub,subRect]);
+  const sTop=sTopAdj??(subRect?subRect.top-6:0);
 
   const openSub=(type,e)=>{
     setSub(type);
@@ -952,6 +1129,68 @@ function BlockMenu({rect,block,onClose,onAction}){
   </>;
 }
 
+/* ---- Selection format menu — right-click on selected text ---- */
+function FormatMenu({pos,onClose,onCmd}){
+  const ref=useRef();
+  const [sub,setSub]=useState(null); // 'color' | 'bg'
+  useEffect(()=>{
+    const down=e=>{ if(ref.current&&!ref.current.contains(e.target)) onClose(); };
+    const key=e=>{ if(e.key==='Escape') onClose(); };
+    const t=setTimeout(()=>document.addEventListener('mousedown',down),0);
+    document.addEventListener('keydown',key);
+    return ()=>{ clearTimeout(t);
+      document.removeEventListener('mousedown',down);
+      document.removeEventListener('keydown',key); };
+  },[]);
+  const left=Math.max(8,Math.min(pos.left,window.innerWidth-330));
+  // measured vertical clamp: flip above the cursor when there is no room below
+  const [topAdj,setTopAdj]=useState(null);
+  useLayoutEffect(()=>{
+    const el=ref.current; if(!el) return;
+    const h=el.offsetHeight;
+    let t=pos.top+6;
+    if(t+h>window.innerHeight-8){
+      t=pos.top-h-6;
+      if(t<8) t=Math.max(8,window.innerHeight-h-8);
+    }
+    setTopAdj(t);
+  },[sub]);
+  const top=topAdj??(pos.top+6);
+  const pd=f=>e=>{ e.preventDefault(); e.stopPropagation(); f(); };
+  const Btn=({title,cmd,children})=>
+    <button className="fmt-btn" title={title} onMouseDown={pd(()=>onCmd(cmd))}>{children}</button>;
+  return createPortal(
+    <div className="pop fmt-pop" ref={ref} style={{top,left}}>
+      <div className="fmt-bar">
+        <Btn title="Bold — Ctrl+B" cmd="bold"><b>B</b></Btn>
+        <Btn title="Italic — Ctrl+I" cmd="italic"><i>I</i></Btn>
+        <Btn title="Underline — Ctrl+U" cmd="underline"><u>U</u></Btn>
+        <Btn title="Strikethrough — Ctrl+Shift+S" cmd="strike"><s>S</s></Btn>
+        <Btn title="Inline code — Ctrl+E" cmd="code"><code>&lt;&gt;</code></Btn>
+        <span className="fmt-sep"/>
+        <button className={cx('fmt-btn','fmt-dd',sub==='color'&&'on')} title="Text color"
+          onMouseDown={pd(()=>setSub(sub==='color'?null:'color'))}>
+          <span className="fmt-a">A</span><Ic n="chevron" style={{width:11,height:11}}/></button>
+        <button className={cx('fmt-btn','fmt-dd',sub==='bg'&&'on')} title="Highlight"
+          onMouseDown={pd(()=>setSub(sub==='bg'?null:'bg'))}>
+          <span className="fmt-hl">A</span><Ic n="chevron" style={{width:11,height:11}}/></button>
+        <span className="fmt-sep"/>
+        <Btn title="Clear formatting" cmd="clear"><Ic n="x" style={{width:14,height:14}}/></Btn>
+      </div>
+      {sub&&<div className="fmt-colors">
+        {(sub==='color'?TEXT_COLORS:SEL_COLORS).map(c=>
+          <button key={c} title={c==='default'?'Default':c} className="fmt-sw"
+            onMouseDown={pd(()=>onCmd(sub==='color'?'color':'bg',c))}>
+            {sub==='color'
+              ? <span className={c!=='default'?'tc-'+c:''}>A</span>
+              : <span className={cx('fmt-sw-bg',c!=='default'&&'bg-'+c)}/>}
+          </button>)}
+      </div>}
+    </div>,
+    document.body
+  );
+}
+
 /* ---- Code block language selector ---- */
 function CodeLangSelect({value, onChange}){
   const [open,setOpen]=useState(false);
@@ -984,15 +1223,36 @@ function CodeLangSelect({value, onChange}){
    BLOCK  — renders one block of any type
    ========================================================================= */
 function Block(props){
-  const {block,index,listNumber,onChange,onEnter,onBackspace,onArrow,onIndent,
+  const {block,index,listNumber,onChange,onEnter,onBackspace,onDeleteForward,onArrow,onIndent,
     focus,setFocus,onSlash,onBlockAction,openPage,onDragStart,onDragOver,onDrop,
-    dragInfo,depth,onUploadFile,uploads} = props;
+    dragInfo,depth,onUploadFile,uploads,selected} = props;
   const ceRef=useRef();
   const codeRef=useRef();
   const [menu,setMenu]=useState(null);
+  const [fmt,setFmt]=useState(null);   // selection format menu {top,left}
   const [emoji,setEmoji]=useState(false);
   const [imgPick,setImgPick]=useState(false);
   const T=block.type;
+  // selection formatting (right-click menu) — applies to the current selection
+  const applyFormat=(a,v)=>{
+    const el=ceRef.current; if(!el) return;
+    if(a==='bold') document.execCommand('bold');
+    else if(a==='italic') document.execCommand('italic');
+    else if(a==='underline') document.execCommand('underline');
+    else if(a==='strike') document.execCommand('strikeThrough');
+    else if(a==='code'){
+      const t=window.getSelection().toString();
+      if(t) document.execCommand('insertHTML',false,
+        '<code>'+t.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</code>');
+    }
+    else if(a==='clear'){
+      document.execCommand('removeFormat');
+      applySelSpan('tc-','default'); applySelSpan('bg-','default');
+    }
+    else if(a==='color') applySelSpan('tc-',v);
+    else if(a==='bg') applySelSpan('bg-',v);
+    onChange({...block,html:el.innerHTML});
+  };
   // auto-resize code textarea whenever its content changes
   useEffect(()=>{
     const el=codeRef.current;
@@ -1047,6 +1307,11 @@ function Block(props){
       if(e.key==='Backspace'){
         if(caretAtStart(el)){
           e.preventDefault(); onBackspace(block,el);
+        }
+      }
+      if(e.key==='Delete'){
+        if(caretAtEnd(el)){
+          e.preventDefault(); onDeleteForward(block,el);
         }
       }
       if(e.key==='ArrowUp' && !e.shiftKey){
@@ -1221,18 +1486,25 @@ function Block(props){
   const dropCls = dragInfo&&dragInfo.overId===block.id ?
     (dragInfo.pos==='above'?'drop-above':'drop-below') : '';
 
-  return <div className={cx('blk','b-'+T,dragInfo&&dragInfo.dragId===block.id&&'dragging',dropCls)}
+  return <div className={cx('blk','b-'+T,selected&&'blk-sel',dragInfo&&dragInfo.dragId===block.id&&'dragging',dropCls)}
     data-block-id={block.id}
     style={{marginLeft:(depth||0)*26}}
     onDragOver={e=>onDragOver(e,block)} onDrop={e=>onDrop(e,block)}
     onContextMenu={T!=='database'?e=>{
       e.preventDefault();e.stopPropagation();
+      const sel=window.getSelection();
+      if(ceRef.current && sel.rangeCount && !sel.isCollapsed
+         && ceRef.current.contains(sel.anchorNode) && ceRef.current.contains(sel.focusNode)){
+        setFmt({top:e.clientY,left:e.clientX});  // text selected → format menu
+        return;
+      }
       setMenu({top:e.clientY,bottom:e.clientY,left:e.clientX,right:e.clientX});
     }:undefined}>
     {T!=='database' && Gutter}
     <div className="blk-body">{body}</div>
     {menu&&<BlockMenu rect={menu} block={block} onClose={()=>setMenu(null)}
       onAction={(a,v)=>{ setMenu(null); onBlockAction(block,a,v); }}/>}
+    {fmt&&<FormatMenu pos={fmt} onClose={()=>setFmt(null)} onCmd={applyFormat}/>}
   </div>;
 }
 
@@ -1294,6 +1566,79 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     const nb=[...blocks]; nb.splice(i+1,0,blk); setBlocksH(nb);
     setFocus({id:blk.id,pos:'start'});
   }
+  // ── multi-block selection: dragging across block boundaries selects whole
+  // blocks (native text selection cannot span separate contentEditables) ──
+  const [blockSel,setBlockSel]=useState(null); // {a,b} indices, inclusive
+  const blockSelRef=useRef(null); blockSelRef.current=blockSel;
+  const dragSel=useRef(null);                  // {anchorId,active} during mouse drag
+  const bsBlockId=t=>{ const el=t&&t.closest&&t.closest('[data-block-id]');
+    return el?el.getAttribute('data-block-id'):null; };
+  function onSelMouseDown(e){
+    if(e.button!==0) return;
+    if(blockSelRef.current) setBlockSel(null); // a fresh click clears the selection
+    const id=bsBlockId(e.target);
+    if(!id||!e.target.closest('.blk-body')) return;
+    dragSel.current={anchorId:id,active:false};
+    const move=ev=>{
+      const d=dragSel.current; if(!d) return;
+      const over=bsBlockId(document.elementFromPoint(ev.clientX,ev.clientY));
+      if(!over) return;
+      if(over!==d.anchorId||d.active){
+        const ai=idx(d.anchorId),bi=idx(over);
+        if(ai<0||bi<0) return;
+        if(!d.active){ d.active=true;
+          if(document.activeElement&&document.activeElement.blur) document.activeElement.blur(); }
+        window.getSelection().removeAllRanges();
+        setBlockSel({a:ai,b:bi});
+        ev.preventDefault();
+      }
+    };
+    const up=()=>{
+      document.removeEventListener('mousemove',move);
+      document.removeEventListener('mouseup',up);
+      dragSel.current=null;
+    };
+    document.addEventListener('mousemove',move);
+    document.addEventListener('mouseup',up);
+  }
+  useEffect(()=>{
+    if(!blockSel) return;
+    const lo=Math.min(blockSel.a,blockSel.b),hi=Math.max(blockSel.a,blockSel.b);
+    const selText=()=>blocks.slice(lo,hi+1).map(b=>{
+      if(b.type==='code') return b.code||'';
+      const d=document.createElement('div'); d.innerHTML=b.html||'';
+      return d.textContent;
+    }).join('\n');
+    const removeSel=()=>{
+      const nb=blocks.filter((_,i)=>i<lo||i>hi);
+      if(!nb.length) nb.push({id:nid(),type:'text',html:''});
+      setBlocksH(nb); setBlockSel(null);
+    };
+    const onKey=e=>{
+      if(e.key==='Escape'){ setBlockSel(null); return; }
+      if(e.key==='Backspace'||e.key==='Delete'){ e.preventDefault(); removeSel(); return; }
+      const m=e.metaKey||e.ctrlKey;
+      if(m&&e.key.toLowerCase()==='c'){ e.preventDefault();
+        navigator.clipboard&&navigator.clipboard.writeText(selText()); return; }
+      if(m&&e.key.toLowerCase()==='x'){ e.preventDefault();
+        navigator.clipboard&&navigator.clipboard.writeText(selText()); removeSel(); return; }
+    };
+    document.addEventListener('keydown',onKey,true);
+    return ()=>document.removeEventListener('keydown',onKey,true);
+  },[blockSel,blocks]);
+
+  // clicking the empty area below the last block puts the caret in it
+  function focusLastEditable(){
+    const EDITABLE=['text','h1','h2','h3','bullet','number','todo','toggle','quote','callout'];
+    for(let i=blocks.length-1;i>=0;i--){
+      if(EDITABLE.includes(blocks[i].type)){
+        setFocus({id:blocks[i].id,pos:'end'}); return;
+      }
+    }
+    // no editable block found — create one
+    const b={id:nid(),type:'text',html:''};
+    setBlocksH([...blocks,b]); setFocus({id:b.id,pos:'start'});
+  }
   function onEnter(b,el){
     // continue lists; empty list item -> text
     const listish=['bullet','number','todo','toggle'].includes(b.type);
@@ -1303,9 +1648,16 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     }
     let nt='text';
     if(['bullet','number','todo'].includes(b.type)) nt=b.type;
-    const blk={id:nid(),type:nt,html:''};
+    // split at the caret: content after it moves into the new block
+    const split=el?splitHtmlAtCaret(el):null;
+    const blk={id:nid(),type:nt,html:split?split.after:''};
     if(nt==='todo')blk.checked=false;
-    insertAfter(b.id,blk);
+    if(split) el.innerHTML=split.before; // keep DOM in step so the focused block doesn't show stale text
+    const i=idx(b.id);
+    const nb=blocks.map(x=>x.id===b.id&&split?{...x,html:split.before}:x);
+    nb.splice(i+1,0,blk);
+    setBlocksH(nb);
+    setFocus({id:blk.id,pos:'start'});
   }
   function onBackspace(b,el){
     const i=idx(b.id);
@@ -1334,6 +1686,29 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     const merged={...prev,html:(prev.html||'')+(b.html||'')};
     const nb=blocks.filter(x=>x.id!==b.id).map(x=>x.id===prev.id?merged:x);
     setBlocksH(nb); setFocus({id:prev.id,pos:'end'});
+  }
+  // Delete at the end of a block — pull the next block's content up into it
+  function onDeleteForward(b,el){
+    const i=idx(b.id);
+    const next=blocks[i+1];
+    if(!next) return;
+    if(['divider','image','file','bookmark','subpage'].includes(next.type)){
+      // delete the media block below instead of merging
+      setBlocksH(blocks.filter(x=>x.id!==next.id)); return;
+    }
+    if(next.type==='code'||next.type==='database') return;
+    if(next.type==='toggle'&&(next.children||[]).length) return; // don't orphan its children
+    // an empty current block just disappears; the next block keeps its type
+    if(b.type==='text'&&!(b.html||'').replace(/<br\s*\/?>/gi,'').trim()){
+      setBlocksH(blocks.filter(x=>x.id!==b.id));
+      setFocus({id:next.id,pos:'start'}); return;
+    }
+    // merge, keeping the caret at the junction (this block stays focused, so
+    // update its DOM directly — the state sync skips focused blocks)
+    const junction=el?caretTextOffset(el):null;
+    const merged={...b,html:(b.html||'')+(next.html||'')};
+    if(el){ el.innerHTML=merged.html; if(junction!=null) setCaretTextOffset(el,junction); }
+    setBlocksH(blocks.filter(x=>x.id!==next.id).map(x=>x.id===b.id?merged:x));
   }
   function onArrow(dir,b){
     const i=idx(b.id);
@@ -1534,29 +1909,21 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       {node.kind==='database'
         ? <div style={{paddingBottom:'30vh'}}><DatabaseView db={node.db}
             onChange={ndb=>update(node.id,{db:ndb})} openRow={openRow}/></div>
-        : <div className="editor" ref={editorDivRef}>
+        : <div className={cx('editor',blockSel&&'bsel')} ref={editorDivRef}
+        onMouseDown={onSelMouseDown}
+        onClick={e=>{ if(e.target===e.currentTarget&&!blockSelRef.current) focusLastEditable(); }}>
         {blocks.map((b,i)=><Block key={b.id} block={b} index={i} depth={b.depth}
           listNumber={numbers[b.id]}
+          selected={!!blockSel&&i>=Math.min(blockSel.a,blockSel.b)&&i<=Math.max(blockSel.a,blockSel.b)}
           onChange={updateBlock} onEnter={onEnter} onBackspace={onBackspace}
-          onArrow={onArrow} onIndent={onIndent}
+          onDeleteForward={onDeleteForward} onArrow={onArrow} onIndent={onIndent}
           focus={focus} setFocus={setFocus}
           onSlash={info=>{setSlash(info);setSlashQuery('');}}
           onBlockAction={blockAction} openPage={openPage} openRow={openRow}
           lookupNode={lookupNode}
           onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop}
           dragInfo={drag} onUploadFile={onUploadFile} uploads={uploads}/>)}
-        <div className="blk editor-end-zone" onClick={()=>{
-          const EDITABLE=['text','h1','h2','h3','bullet','number','todo','toggle','quote','callout'];
-          // walk backwards to find the last editable block
-          for(let i=blocks.length-1;i>=0;i--){
-            if(EDITABLE.includes(blocks[i].type)){
-              setFocus({id:blocks[i].id,pos:'end'}); return;
-            }
-          }
-          // no editable block found — create one
-          const b={id:nid(),type:'text',html:''};
-          setBlocksH([...blocks,b]); setFocus({id:b.id,pos:'start'});
-        }}>
+        <div className="blk editor-end-zone" onClick={focusLastEditable}>
           <div className="blk-body"><div className="ce" style={{color:'var(--text-3)',
             cursor:'text',minHeight:24}}> </div></div>
         </div>
@@ -3832,7 +4199,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
         </div>
         <div className="set-row" style={{borderBottom:'none'}}>
           <div className="sr-l"><b>About</b></div>
-          <span style={{color:'var(--text-3)'}}>v2.1.0</span>
+          <span style={{color:'var(--text-3)'}}>v2.1.1</span>
         </div>
       </div>
     </div>
@@ -4198,7 +4565,7 @@ function DocsPage({onBack,theme,onToggleTheme}){
               and Markdown files, either on your computer or mirrored to your Google Drive.
             </p>
             <div className="docs-badges">
-              <span className="docs-badge">Version 2.1.0</span>
+              <span className="docs-badge">Version 2.1.1</span>
               <span className="docs-badge">React 18 · Vite 6</span>
               <span className="docs-badge">Plain Markdown storage</span>
             </div>

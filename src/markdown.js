@@ -40,9 +40,20 @@ export function htmlInlineToMd(h) {
     .replace(/<em>(.*?)<\/em>/gi, '*$1*')
     .replace(/<i>(.*?)<\/i>/gi, '*$1*')
     .replace(/<s>(.*?)<\/s>/gi, '~~$1~~')
+    .replace(/<strike>(.*?)<\/strike>/gi, '~~$1~~')
     .replace(/<code>(.*?)<\/code>/gi, '`$1`')
     .replace(/<a[^>]*href="([^"]*)"[^>]*>(.*?)<\/a>/gi, '[$2]($1)')
+    // underline + inline colour/highlight survive as a tiny HTML subset
+    // (Markdown has no syntax for them); protect from the strip below
+    .replace(/<span class="((?:tc|bg)-[a-z]+)">/gi, '\x00span $1\x00')
+    .replace(/<\/span>/gi, '\x00/span\x00')
+    .replace(/<u>/gi, '\x00u\x00')
+    .replace(/<\/u>/gi, '\x00/u\x00')
     .replace(/<[^>]+>/g, '')
+    .replace(/\x00span ((?:tc|bg)-[a-z]+)\x00/g, '<span class="$1">')
+    .replace(/\x00\/span\x00/g, '</span>')
+    .replace(/\x00u\x00/g, '<u>')
+    .replace(/\x00\/u\x00/g, '</u>')
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
@@ -53,6 +64,10 @@ export function htmlInlineToMd(h) {
 export function inlineToHtml(t) {
   return (t || '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // re-admit the small HTML subset kept in the Markdown (underline, colour, highlight)
+    .replace(/&lt;span class="((?:tc|bg)-[a-z]+)"&gt;/gi, '<span class="$1">')
+    .replace(/&lt;\/span&gt;/gi, '</span>')
+    .replace(/&lt;(\/?)u&gt;/gi, '<$1u>')
     .replace(/\*\*(.+?)\*\*|__(.+?)__/g, (_, a, b) => `<strong>${a || b}</strong>`)
     .replace(/\*(.+?)\*|_(.+?)_/g, (_, a, b) => `<em>${a || b}</em>`)
     .replace(/~~(.+?)~~/g, '<s>$1</s>')
@@ -288,8 +303,19 @@ function bodyToBlocks(body) {
     if (/^[-*]\s/.test(l)) { push({ type: 'bullet', html: inlineToHtml(l.replace(/^[-*]\s/, '')) }); i++; continue; }
     if (/^\d+\.\s/.test(l)) { push({ type: 'number', html: inlineToHtml(l.replace(/^\d+\.\s/, '')) }); i++; continue; }
 
-    // blank line
-    if (trimmed === '') { push({ type: 'text', html: '' }); i++; continue; }
+    // blank line(s) — paragraph-style blocks end with one blank separator
+    // line, so the first blank after them is NOT content; every additional
+    // blank in the run is a deliberate empty block. List items emit no
+    // separator, so after them every blank line counts.
+    if (trimmed === '') {
+      let n = 0;
+      while (i < lines.length && lines[i].trim() === '') { n++; i++; }
+      const prev = blocks[blocks.length - 1];
+      const prevSep = prev && !['bullet', 'number', 'todo'].includes(prev.type)
+        && !(prev.type === 'text' && !prev.html);
+      for (let k = prevSep ? 1 : 0; k < n; k++) push({ type: 'text', html: '' });
+      continue;
+    }
 
     // paragraph
     push({ type: 'text', html: inlineToHtml(l) });
