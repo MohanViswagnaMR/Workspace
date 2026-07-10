@@ -1,6 +1,6 @@
 # Workspace
 
-**Version 2.2.0**
+**Version 2.2.1**
 
 A fast, block-based, Notion-style workspace built with **Vite + React 18**. There
 are no accounts and no backend. Everything you write is stored as **ordinary
@@ -195,11 +195,12 @@ client, and ensure the Google Drive API is enabled.
 
 ## Versions
 
-Current release: **2.2.0**. Full release notes live in the [`versions/`](./versions)
+Current release: **2.2.1**. Full release notes live in the [`versions/`](./versions)
 folder.
 
 | Version | Date       | Highlights                                                        |
 |---------|------------|-------------------------------------------------------------------|
+| [2.2.1](./versions/v2.2.1.md) | 2026-07-11 | Editor polish release — selection-aware backspace/delete, backspace merges text up (caret at the junction), slash only opens after whitespace and converts the block in place, combined right-click menu with a format toolbar on top, inline-code styling + toggle-off, **offline spell-check with inline suggestions**, undo/redo merge-duplication fix, click-empty-space adds a block, and **/bold · /italic · /red · /yellow-highlight** slash formatting commands |
 | [2.2.0](./versions/v2.2.0.md) | 2026-07-08 | First-impression release — **Welcome page** for first-time visitors (with About & Self-hosting pages) vs the classic **Start page** for returning users; one-click in-memory **demo workspace** with "Keep this workspace" conversion; version badge; empty new workspaces; subpage-only sidebar chevrons |
 | [2.1.1](./versions/v2.1.1.md) | 2026-07-08 | Editor bug-fix release — phantom empty blocks fixed, Enter splits paragraphs, clickable links, right-click format menu (colour/highlight), multi-block selection, forward-delete merge, menus stay on screen |
 | [2.1.0](./versions/v2.1.0.md) | 2026-07-04 | Progressive Web App — installable, offline app shell, service worker, web manifest & icons; app renamed to just **Workspace** |

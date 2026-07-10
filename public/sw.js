@@ -21,7 +21,7 @@
    swaps. Bump CACHE to force a fresh app-shell cache on deploy.
    ========================================================================= */
 
-const CACHE = 'workspace-v2.2.0';
+const CACHE = 'workspace-v2.2.1';
 
 const APP_SHELL = [
   '/',
@@ -31,6 +31,7 @@ const APP_SHELL = [
   '/icon-192.png',
   '/icon-512.png',
   '/apple-touch-icon.png',
+  '/dict/en.txt',   // offline spell-check dictionary
 ];
 
 self.addEventListener('install', event => {

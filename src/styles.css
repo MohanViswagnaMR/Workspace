@@ -419,6 +419,9 @@ input,textarea{font-family:inherit;}
   padding:3px 2px;min-height:1.5em;}
 .ce.ph:before{content:attr(data-ph);color:var(--text-3);pointer-events:none;}
 .ce a{color:var(--accent);text-decoration:underline;cursor:pointer;}
+.ce code{font-family:var(--mono);font-size:.86em;background:var(--bg-hover);
+  border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:#eb5757;
+  white-space:pre-wrap;}
 
 .b-h1 .ce{font-size:32px;font-weight:800;padding-top:28px;letter-spacing:-.03em;}
 .b-h2 .ce{font-size:26px;font-weight:700;padding-top:20px;letter-spacing:-.025em;}
@@ -572,6 +575,11 @@ input,textarea{font-family:inherit;}
   font-size:13px;font-weight:700;color:var(--text);padding:0;}
 .fmt-sw:hover{background:var(--bg-hover);}
 .fmt-sw-bg{width:15px;height:15px;border-radius:5px;border:1px solid var(--border);}
+/* format toolbar embedded at the top of the block context menu */
+.fmt-in-menu{padding:2px 4px 4px;}
+.fmt-in-menu .fmt-colors{padding-left:2px;padding-right:2px;}
+/* spelling suggestions in the block context menu */
+.spell-sug{font-weight:600;}
 
 /* =========================================================================
    POPUP / MENU

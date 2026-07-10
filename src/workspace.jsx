@@ -31,6 +31,7 @@ import {
   writeLocalUploadFile,
   deleteLocalUploadFile,
 } from './localfs.js';
+import { loadDict, isMisspelled, suggest } from './spellcheck.js';
 
 /* Shown when the browser lacks the File System Access API (Firefox/Zen/Safari). */
 const LOCAL_FS_UNSUPPORTED_MSG =
@@ -124,6 +125,15 @@ const CMDS = [
   {g:'Media',id:'file',label:'File attachment',desc:'Attach any file or document',ic:'📎',kw:'file attach upload pdf doc'},
   {g:'Media',id:'bookmark',label:'Web bookmark',desc:'Save a link as a card',ic:'🔗',kw:'bookmark link url web'},
   {g:'Media',id:'code',label:'Code',desc:'Code with syntax style',ic:'</>',kw:'code snippet'},
+  // inline formatting — applied to the current block's text (see applySlash)
+  {g:'Format',id:'fmt-bold',label:'Bold',desc:'Make the text bold',ic:<b>B</b>,kw:'bold strong format',fmt:'bold'},
+  {g:'Format',id:'fmt-italic',label:'Italic',desc:'Make the text italic',ic:<i>I</i>,kw:'italic emphasis format',fmt:'italic'},
+  ...TEXT_COLORS.filter(c=>c!=='default').map(c=>({g:'Color',id:'fmt-tc-'+c,
+    label:c[0].toUpperCase()+c.slice(1)+' text',desc:'Colour the text '+c,
+    ic:<span className={'tc-'+c} style={{fontWeight:800}}>A</span>,kw:c+' color colour text',fmt:'tc-'+c})),
+  ...SEL_COLORS.filter(c=>c!=='default').map(c=>({g:'Highlight',id:'fmt-bg-'+c,
+    label:c[0].toUpperCase()+c.slice(1)+' highlight',desc:'Highlight the text in '+c,
+    ic:<span className={'bg-'+c} style={{padding:'0 5px',borderRadius:4}}>A</span>,kw:c+' highlight background',fmt:'bg-'+c})),
 ];
 
 const SHORTCUTS = [
@@ -938,7 +948,7 @@ const Editable = React.forwardRef(function Editable(props,ref){
   // placeholder shows only when focused AND the block has no visible text content
   const isEmpty=!(html||'').replace(/<br\s*\/?>/gi,'').replace(/&nbsp;/gi,' ').trim();
   return <div className={cx('ce',className,isEmpty&&focused&&placeholder&&'ph')} contentEditable suppressContentEditableWarning
-    ref={setRef} data-ph={placeholder||''} style={style}
+    spellCheck ref={setRef} data-ph={placeholder||''} style={style}
     onInput={e=>{ const el=e.currentTarget;
       const d=e.nativeEvent&&e.nativeEvent.data;
       if(d===' '||d==='\u00a0') maybeLinkify(el); // linkify once a word is finished
@@ -987,7 +997,7 @@ function SlashMenu({rect,query,onPick,onClose}){
   return <Popup rect={rect} onClose={onClose} width={300}>
     <div className="menu">
       {list.map((c,i)=>{
-        const head = c.g!==lastG ? <div className="menu-h" key={'h'+c.g}>{c.g} blocks</div> : null;
+        const head = c.g!==lastG ? <div className="menu-h" key={'h'+c.g}>{c.g}</div> : null;
         lastG=c.g;
         return <Fragment key={c.id}>{head}
           <div className={cx('mi',i===hi&&'hi')} ref={i===hi?sel:null}
@@ -1003,8 +1013,8 @@ function SlashMenu({rect,query,onPick,onClose}){
 /* =========================================================================
    BLOCK CONTEXT MENU  (drag-handle ⋮⋮ menu)
    ========================================================================= */
-function BlockMenu({rect,block,onClose,onAction}){
-  const [sub,setSub]=useState(null);      // 'turn' | 'color' | null
+function BlockMenu({rect,block,onClose,onAction,onFmt,canFormat,spell,onSpell}){
+  const [sub,setSub]=useState(null);      // 'turn' | null
   const [subRect,setSubRect]=useState(null);
   const mainRef=useRef();
   const subRef=useRef();
@@ -1029,8 +1039,8 @@ function BlockMenu({rect,block,onClose,onAction}){
     ['number','Numbered','1.'],['toggle','Toggle','▸'],['quote','Quote','❝'],
     ['callout','Callout','💡']];
 
-  // ── main menu position ──
-  const mw=210;
+  // ── main menu position ──  (wider when the format toolbar is shown)
+  const mw=canFormat?312:210;
   let mLeft=rect.left;
   if(mLeft+mw>window.innerWidth-10) mLeft=window.innerWidth-mw-10;
   // measured vertical clamp: open upward when there is no room below
@@ -1048,7 +1058,7 @@ function BlockMenu({rect,block,onClose,onAction}){
   const mTop=mTopAdj??(rect.bottom+4);
 
   // ── submenu position: right side of the main menu, aligned to the hovered row ──
-  const sw=sub==='turn'?210:220;
+  const sw=210;
   let sLeft=0;
   if(subRect){
     sLeft=mLeft+mw+6;
@@ -1076,6 +1086,18 @@ function BlockMenu({rect,block,onClose,onAction}){
     {createPortal(
       <div className="pop" ref={mainRef} style={{top:mTop,left:mLeft,width:mw}}>
         <div className="menu">
+          {canFormat && <>
+            <FormatBar onCmd={onFmt}/>
+            <div className="menu-sep"/>
+          </>}
+          {spell && spell.suggestions.length>0 && <>
+            <div className="menu-h">Spelling</div>
+            {spell.suggestions.map(s=><div key={s} className="mi"
+              onMouseDown={e=>{e.preventDefault();onSpell(s);}}>
+              <div className="mi-ic">✓</div><div className="mi-tx spell-sug">{s}</div>
+            </div>)}
+            <div className="menu-sep"/>
+          </>}
           <div className={cx('mi',sub==='turn'&&'hi')}
             onMouseEnter={e=>openSub('turn',e)}
             onMouseDown={e=>{e.preventDefault();openSub('turn',e);}}>
@@ -1084,14 +1106,6 @@ function BlockMenu({rect,block,onClose,onAction}){
           <div className="mi" onMouseDown={e=>{e.preventDefault();onAction('duplicate');}}>
             <div className="mi-ic">⧉</div><div className="mi-tx">Duplicate</div>
             <span className="mi-kbd">⌘D</span></div>
-          <div className={cx('mi',sub==='color'&&'hi')}
-            onMouseEnter={e=>openSub('color',e)}
-            onMouseDown={e=>{e.preventDefault();openSub('color',e);}}>
-            <div className="mi-ic">🎨</div><div className="mi-tx">Color</div>
-            <Ic n="chevron" style={{width:13,height:13}}/></div>
-          <div className="mi" onMouseDown={e=>{e.preventDefault();onAction('copylink');}}>
-            <div className="mi-ic"><Ic n="link" style={{width:15,height:15}}/></div>
-            <div className="mi-tx">Copy link to block</div></div>
           <div className="menu-sep"/>
           <div className="mi danger" onMouseDown={e=>{e.preventDefault();onAction('delete');}}>
             <div className="mi-ic"><Ic n="trash" style={{width:15,height:15}}/></div>
@@ -1101,98 +1115,56 @@ function BlockMenu({rect,block,onClose,onAction}){
       document.body
     )}
 
-    {sub&&subRect&&createPortal(
+    {sub==='turn'&&subRect&&createPortal(
       <div className="pop" ref={subRef} style={{top:sTop,left:sLeft,width:sw}}>
-        {sub==='turn'
-          ?<div className="menu">
-            <div className="menu-h">Turn into</div>
-            {turnTypes.map(([t,l,ic])=><div key={t} className="mi"
-              onMouseDown={e=>{e.preventDefault();onAction('turn',t);}}>
-              <div className="mi-ic">{ic}</div><div className="mi-tx">{l}</div>
-            </div>)}
-          </div>
-          :<div className="menu">
-            <div className="menu-h">Text color</div>
-            {TEXT_COLORS.map(c=><div key={c} className="mi"
-              onMouseDown={e=>{e.preventDefault();onAction('color',c);}}>
-              <div className="mi-ic" style={{textTransform:'capitalize'}}>A</div>
-              <div className="mi-tx" style={{textTransform:'capitalize'}}>
-                <span className={c!=='default'?'tc-'+c:''}>{c}</span>
-              </div>
-            </div>)}
-            <div className="menu-h">Background</div>
-            {SEL_COLORS.map(c=><div key={c} className="mi"
-              onMouseDown={e=>{e.preventDefault();onAction('bg',c);}}>
-              <div className={cx('mi-ic',c!=='default'&&'bg-'+c)}> </div>
-              <div className="mi-tx" style={{textTransform:'capitalize'}}>{c} background</div>
-            </div>)}
-          </div>}
+        <div className="menu">
+          <div className="menu-h">Turn into</div>
+          {turnTypes.map(([t,l,ic])=><div key={t} className="mi"
+            onMouseDown={e=>{e.preventDefault();onAction('turn',t);}}>
+            <div className="mi-ic">{ic}</div><div className="mi-tx">{l}</div>
+          </div>)}
+        </div>
       </div>,
       document.body
     )}
   </>;
 }
 
-/* ---- Selection format menu — right-click on selected text ---- */
-function FormatMenu({pos,onClose,onCmd}){
-  const ref=useRef();
+/* ---- Selection format toolbar (bold / italic / colour / highlight) ---- */
+/* Rendered at the top of the block context menu; `onCmd(cmd, value?)` applies
+   the command to the current selection (or the whole block when none). */
+function FormatBar({onCmd}){
   const [sub,setSub]=useState(null); // 'color' | 'bg'
-  useEffect(()=>{
-    const down=e=>{ if(ref.current&&!ref.current.contains(e.target)) onClose(); };
-    const key=e=>{ if(e.key==='Escape') onClose(); };
-    const t=setTimeout(()=>document.addEventListener('mousedown',down),0);
-    document.addEventListener('keydown',key);
-    return ()=>{ clearTimeout(t);
-      document.removeEventListener('mousedown',down);
-      document.removeEventListener('keydown',key); };
-  },[]);
-  const left=Math.max(8,Math.min(pos.left,window.innerWidth-330));
-  // measured vertical clamp: flip above the cursor when there is no room below
-  const [topAdj,setTopAdj]=useState(null);
-  useLayoutEffect(()=>{
-    const el=ref.current; if(!el) return;
-    const h=el.offsetHeight;
-    let t=pos.top+6;
-    if(t+h>window.innerHeight-8){
-      t=pos.top-h-6;
-      if(t<8) t=Math.max(8,window.innerHeight-h-8);
-    }
-    setTopAdj(t);
-  },[sub]);
-  const top=topAdj??(pos.top+6);
   const pd=f=>e=>{ e.preventDefault(); e.stopPropagation(); f(); };
   const Btn=({title,cmd,children})=>
     <button className="fmt-btn" title={title} onMouseDown={pd(()=>onCmd(cmd))}>{children}</button>;
-  return createPortal(
-    <div className="pop fmt-pop" ref={ref} style={{top,left}}>
-      <div className="fmt-bar">
-        <Btn title="Bold — Ctrl+B" cmd="bold"><b>B</b></Btn>
-        <Btn title="Italic — Ctrl+I" cmd="italic"><i>I</i></Btn>
-        <Btn title="Underline — Ctrl+U" cmd="underline"><u>U</u></Btn>
-        <Btn title="Strikethrough — Ctrl+Shift+S" cmd="strike"><s>S</s></Btn>
-        <Btn title="Inline code — Ctrl+E" cmd="code"><code>&lt;&gt;</code></Btn>
-        <span className="fmt-sep"/>
-        <button className={cx('fmt-btn','fmt-dd',sub==='color'&&'on')} title="Text color"
-          onMouseDown={pd(()=>setSub(sub==='color'?null:'color'))}>
-          <span className="fmt-a">A</span><Ic n="chevron" style={{width:11,height:11}}/></button>
-        <button className={cx('fmt-btn','fmt-dd',sub==='bg'&&'on')} title="Highlight"
-          onMouseDown={pd(()=>setSub(sub==='bg'?null:'bg'))}>
-          <span className="fmt-hl">A</span><Ic n="chevron" style={{width:11,height:11}}/></button>
-        <span className="fmt-sep"/>
-        <Btn title="Clear formatting" cmd="clear"><Ic n="x" style={{width:14,height:14}}/></Btn>
-      </div>
-      {sub&&<div className="fmt-colors">
-        {(sub==='color'?TEXT_COLORS:SEL_COLORS).map(c=>
-          <button key={c} title={c==='default'?'Default':c} className="fmt-sw"
-            onMouseDown={pd(()=>onCmd(sub==='color'?'color':'bg',c))}>
-            {sub==='color'
-              ? <span className={c!=='default'?'tc-'+c:''}>A</span>
-              : <span className={cx('fmt-sw-bg',c!=='default'&&'bg-'+c)}/>}
-          </button>)}
-      </div>}
-    </div>,
-    document.body
-  );
+  return <div className="fmt-in-menu">
+    <div className="fmt-bar">
+      <Btn title="Bold — Ctrl+B" cmd="bold"><b>B</b></Btn>
+      <Btn title="Italic — Ctrl+I" cmd="italic"><i>I</i></Btn>
+      <Btn title="Underline — Ctrl+U" cmd="underline"><u>U</u></Btn>
+      <Btn title="Strikethrough — Ctrl+Shift+S" cmd="strike"><s>S</s></Btn>
+      <Btn title="Inline code — Ctrl+E" cmd="code"><code>&lt;&gt;</code></Btn>
+      <span className="fmt-sep"/>
+      <button className={cx('fmt-btn','fmt-dd',sub==='color'&&'on')} title="Text color"
+        onMouseDown={pd(()=>setSub(sub==='color'?null:'color'))}>
+        <span className="fmt-a">A</span><Ic n="chevron" style={{width:11,height:11}}/></button>
+      <button className={cx('fmt-btn','fmt-dd',sub==='bg'&&'on')} title="Highlight"
+        onMouseDown={pd(()=>setSub(sub==='bg'?null:'bg'))}>
+        <span className="fmt-hl">A</span><Ic n="chevron" style={{width:11,height:11}}/></button>
+      <span className="fmt-sep"/>
+      <Btn title="Clear formatting" cmd="clear"><Ic n="x" style={{width:14,height:14}}/></Btn>
+    </div>
+    {sub&&<div className="fmt-colors">
+      {(sub==='color'?TEXT_COLORS:SEL_COLORS).map(c=>
+        <button key={c} title={c==='default'?'Default':c} className="fmt-sw"
+          onMouseDown={pd(()=>onCmd(sub==='color'?'color':'bg',c))}>
+          {sub==='color'
+            ? <span className={c!=='default'?'tc-'+c:''}>A</span>
+            : <span className={cx('fmt-sw-bg',c!=='default'&&'bg-'+c)}/>}
+        </button>)}
+    </div>}
+  </div>;
 }
 
 /* ---- Code block language selector ---- */
@@ -1233,28 +1205,87 @@ function Block(props){
   const ceRef=useRef();
   const codeRef=useRef();
   const [menu,setMenu]=useState(null);
-  const [fmt,setFmt]=useState(null);   // selection format menu {top,left}
   const [emoji,setEmoji]=useState(false);
   const [imgPick,setImgPick]=useState(false);
   const T=block.type;
+  // block types that carry inline-formattable text (drive the format toolbar)
+  const canFormat=['text','h1','h2','h3','quote','todo','bullet','number','toggle','callout'].includes(T);
   // selection formatting (right-click menu) — applies to the current selection
   const applyFormat=(a,v)=>{
     const el=ceRef.current; if(!el) return;
+    // unwrap any <code> spans overlapping the selection; returns whether any existed
+    const unwrapCode=()=>{
+      const sel=window.getSelection();
+      if(!sel.rangeCount) return false;
+      const range=sel.getRangeAt(0);
+      const codes=[...el.querySelectorAll('code')].filter(c=>range.intersectsNode(c));
+      codes.forEach(c=>{ const p=c.parentNode;
+        while(c.firstChild) p.insertBefore(c.firstChild,c);
+        p.removeChild(c); p.normalize(); });
+      return codes.length>0;
+    };
     if(a==='bold') document.execCommand('bold');
     else if(a==='italic') document.execCommand('italic');
     else if(a==='underline') document.execCommand('underline');
     else if(a==='strike') document.execCommand('strikeThrough');
     else if(a==='code'){
-      const t=window.getSelection().toString();
-      if(t) document.execCommand('insertHTML',false,
-        '<code>'+t.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</code>');
+      const sel=window.getSelection();
+      if(sel.rangeCount){
+        // remember the selection as text offsets so it survives the DOM edit
+        const r=sel.getRangeAt(0);
+        const measure=(c,o)=>{const rr=document.createRange();
+          rr.selectNodeContents(el); rr.setEnd(c,o); return rr.toString().length;};
+        const from=measure(r.startContainer,r.startOffset), to=measure(r.endContainer,r.endOffset);
+        if(from!==to){
+          // toggle: unwrap if already code, otherwise wrap the (plain) text
+          if(!unwrapCode()){
+            const text=r.toString();
+            r.deleteContents();
+            const code=document.createElement('code'); code.textContent=text;
+            r.insertNode(code);
+          }
+          // restore the selection over the same text so it stays highlighted
+          const locate=off=>{const w=document.createTreeWalker(el,NodeFilter.SHOW_TEXT);let n,c=0;
+            while((n=w.nextNode())){if(c+n.nodeValue.length>=off)return[n,off-c];c+=n.nodeValue.length;}
+            return[el,el.childNodes.length];};
+          const [sn,so]=locate(from),[en,eo]=locate(to);
+          const nr=document.createRange(); nr.setStart(sn,so); nr.setEnd(en,eo);
+          sel.removeAllRanges(); sel.addRange(nr);
+        }
+      }
     }
     else if(a==='clear'){
       document.execCommand('removeFormat');
       applySelSpan('tc-','default'); applySelSpan('bg-','default');
+      unwrapCode();
     }
     else if(a==='color') applySelSpan('tc-',v);
     else if(a==='bg') applySelSpan('bg-',v);
+    onChange({...block,html:el.innerHTML});
+  };
+  // format toolbar inside the block menu — apply to the current selection, or
+  // the whole block when nothing is selected
+  const formatFromMenu=(a,v)=>{
+    const el=ceRef.current; if(!el) return;
+    const sel=window.getSelection();
+    const hasSel=sel.rangeCount && !sel.isCollapsed
+      && el.contains(sel.anchorNode) && el.contains(sel.focusNode);
+    if(!hasSel){
+      el.focus();
+      const r=document.createRange(); r.selectNodeContents(el);
+      sel.removeAllRanges(); sel.addRange(r);
+    }
+    applyFormat(a,v);
+  };
+  // replace the currently-selected (misspelled) word with a spelling suggestion
+  const replaceSelection=(text)=>{
+    const el=ceRef.current; if(!el) return;
+    const sel=window.getSelection();
+    if(!sel.rangeCount || sel.isCollapsed) return;
+    const r=sel.getRangeAt(0);
+    r.deleteContents();
+    r.insertNode(document.createTextNode(text));
+    sel.collapseToEnd();
     onChange({...block,html:el.innerHTML});
   };
   // auto-resize code textarea whenever its content changes
@@ -1293,10 +1324,14 @@ function Block(props){
           return;
         }
       }
-      // slash
+      // slash — only open the menu at the start of the block or right after
+      // whitespace; typing "/" inside a word (URLs, and/or, 24/7) shouldn't fire
       if(e.key==='/'){
-        setTimeout(()=>{ const r=el.getBoundingClientRect();
-          onSlash({blockId:block.id,rect:r,el}); },0);
+        const before=textBeforeCaret(el);
+        if(before===''||/\s$/.test(before)){
+          setTimeout(()=>{ const r=el.getBoundingClientRect();
+            onSlash({blockId:block.id,rect:r,el}); },0);
+        }
       }
       // Ctrl/⌘ + Enter → open the block-insert menu (add a block) without typing "/"
       if((e.metaKey||e.ctrlKey) && e.key==='Enter'){
@@ -1309,12 +1344,14 @@ function Block(props){
         onEnter(block,el);
       }
       if(e.key==='Backspace'){
-        if(caretAtStart(el)){
+        // only merge/convert when there's a plain caret; a selected range
+        // should just be deleted natively by the browser
+        if(window.getSelection().isCollapsed && caretAtStart(el)){
           e.preventDefault(); onBackspace(block,el);
         }
       }
       if(e.key==='Delete'){
-        if(caretAtEnd(el)){
+        if(window.getSelection().isCollapsed && caretAtEnd(el)){
           e.preventDefault(); onDeleteForward(block,el);
         }
       }
@@ -1345,7 +1382,11 @@ function Block(props){
   // focus management
   useEffect(()=>{
     if(focus && focus.id===block.id && ceRef.current){
-      placeCaret(ceRef.current,focus.pos==='start'?'start':'end');
+      const el=ceRef.current;
+      // a numeric pos places the caret at that character offset (e.g. the
+      // junction after a merge); otherwise 'start' / 'end'
+      if(typeof focus.pos==='number'){ el.focus(); setCaretTextOffset(el,focus.pos); }
+      else placeCaret(el,focus.pos==='start'?'start':'end');
       setFocus(null);
     }
   },[focus]);
@@ -1496,19 +1537,25 @@ function Block(props){
     onDragOver={e=>onDragOver(e,block)} onDrop={e=>onDrop(e,block)}
     onContextMenu={T!=='database'?e=>{
       e.preventDefault();e.stopPropagation();
+      // a single selected, misspelled word → offer spelling suggestions at the
+      // top of the (custom) block menu
+      let spell=null;
       const sel=window.getSelection();
-      if(ceRef.current && sel.rangeCount && !sel.isCollapsed
-         && ceRef.current.contains(sel.anchorNode) && ceRef.current.contains(sel.focusNode)){
-        setFmt({top:e.clientY,left:e.clientX});  // text selected → format menu
-        return;
+      const word=sel.rangeCount && !sel.isCollapsed
+        && ceRef.current && ceRef.current.contains(sel.anchorNode)
+        && ceRef.current.contains(sel.focusNode) ? sel.toString().trim() : '';
+      if(word && !/\s/.test(word) && isMisspelled(word)){
+        const sug=suggest(word,4);
+        if(sug.length) spell={word,suggestions:sug};
       }
-      setMenu({top:e.clientY,bottom:e.clientY,left:e.clientX,right:e.clientX});
+      setMenu({top:e.clientY,bottom:e.clientY,left:e.clientX,right:e.clientX,spell});
     }:undefined}>
     {T!=='database' && Gutter}
     <div className="blk-body">{body}</div>
-    {menu&&<BlockMenu rect={menu} block={block} onClose={()=>setMenu(null)}
+    {menu&&<BlockMenu rect={menu} block={block} canFormat={canFormat}
+      spell={menu.spell} onSpell={w=>{ setMenu(null); replaceSelection(w); }}
+      onClose={()=>setMenu(null)} onFmt={formatFromMenu}
       onAction={(a,v)=>{ setMenu(null); onBlockAction(block,a,v); }}/>}
-    {fmt&&<FormatMenu pos={fmt} onClose={()=>setFmt(null)} onCmd={applyFormat}/>}
   </div>;
 }
 
@@ -1523,29 +1570,43 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
   const [iconPick,setIconPick]=useState(false);
   const [coverPick,setCoverPick]=useState(false);
   const blocks=node.blocks||[];
+  // warm the spell-check dictionary in the background so suggestions are ready
+  useEffect(()=>{ loadDict().catch(()=>{}); },[]);
 
   const setBlocks=nb=>update(node.id,{blocks:nb});
 
   /* ── undo / redo (block-structural history) ── */
   const undoStack=useRef([]);
   const redoStack=useRef([]);
+  // the key handler is registered once, so its undo/redo close over the first
+  // render's `blocks`; read the live value through a ref instead
+  const liveBlocks=useRef(blocks); liveBlocks.current=blocks;
   function setBlocksH(nb){        // history-aware setter for structural ops
     undoStack.current=[...undoStack.current.slice(-20), blocks];
     redoStack.current=[];
     setBlocks(nb);
   }
+  // a focused contentEditable keeps its own DOM (the sync effect skips it), so
+  // blur it before restoring history — otherwise the focused block still shows
+  // its pre-undo text while state reverts, duplicating content
+  function blurActiveCe(){
+    const ae=document.activeElement;
+    if(ae && ae.isContentEditable && ae.blur) ae.blur();
+  }
   function undo(){
     if(!undoStack.current.length) return;
     const prev=undoStack.current[undoStack.current.length-1];
     undoStack.current=undoStack.current.slice(0,-1);
-    redoStack.current=[blocks,...redoStack.current.slice(0,20)];
+    redoStack.current=[liveBlocks.current,...redoStack.current.slice(0,20)];
+    blurActiveCe();
     setBlocks(prev);
   }
   function redo(){
     if(!redoStack.current.length) return;
     const next=redoStack.current[0];
     redoStack.current=redoStack.current.slice(1);
-    undoStack.current=[...undoStack.current.slice(-100),blocks];
+    undoStack.current=[...undoStack.current.slice(-100),liveBlocks.current];
+    blurActiveCe();
     setBlocks(next);
   }
   useEffect(()=>{
@@ -1632,14 +1693,14 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
   },[blockSel,blocks]);
 
   // clicking the empty area below the last block puts the caret in it
-  function focusLastEditable(){
+  // clicking the empty space below the content adds a fresh block to type in —
+  // unless the last block is already an empty editable one, which we just focus
+  function addOrFocusEnd(){
     const EDITABLE=['text','h1','h2','h3','bullet','number','todo','toggle','quote','callout'];
-    for(let i=blocks.length-1;i>=0;i--){
-      if(EDITABLE.includes(blocks[i].type)){
-        setFocus({id:blocks[i].id,pos:'end'}); return;
-      }
-    }
-    // no editable block found — create one
+    const last=blocks[blocks.length-1];
+    const isEmpty = last && EDITABLE.includes(last.type)
+      && !(last.html||'').replace(/<br\s*\/?>/gi,'').replace(/&nbsp;/gi,' ').trim();
+    if(isEmpty){ setFocus({id:last.id,pos:'end'}); return; }
     const b={id:nid(),type:'text',html:''};
     setBlocksH([...blocks,b]); setFocus({id:b.id,pos:'start'});
   }
@@ -1673,13 +1734,19 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       if(i>0) setFocus({id:blocks[i-1].id,pos:'end'});
       return;
     }
-    if(b.type!=='text' && b.type!=='code'){
-      updateBlock({...b,type:'text',checked:undefined,children:undefined,
-        emoji:undefined,color:b.color}); setFocus({id:b.id,pos:'start'}); return;
-    }
     if(b.type==='code'){
       const nb=blocks.filter(x=>x.id!==b.id); setBlocksH(nb);
       if(i>0)setFocus({id:blocks[i-1].id,pos:'end'}); return;
+    }
+    // A styled block (heading, list, todo, quote, callout, toggle) only strips
+    // back to plain text when there's nowhere to merge into — it's the first
+    // block, or a toggle that still has children (merging would orphan them).
+    // Otherwise it merges: its text moves up into the previous block.
+    const styled=b.type!=='text';
+    const toggleWithKids=b.type==='toggle' && (b.children||[]).length;
+    if(styled && (i===0 || toggleWithKids)){
+      updateBlock({...b,type:'text',checked:undefined,children:undefined,
+        emoji:undefined,color:b.color}); setFocus({id:b.id,pos:'start'}); return;
     }
     if(i===0) return;
     const prev=blocks[i-1];
@@ -1687,9 +1754,13 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       // delete the media block above instead
       setBlocksH(blocks.filter(x=>x.id!==prev.id)); return;
     }
+    // caret lands at the junction — the end of prev's original text, before
+    // the content that just merged in
+    const jd=document.createElement('div'); jd.innerHTML=prev.html||'';
+    const junction=jd.textContent.length;
     const merged={...prev,html:(prev.html||'')+(b.html||'')};
     const nb=blocks.filter(x=>x.id!==b.id).map(x=>x.id===prev.id?merged:x);
-    setBlocksH(nb); setFocus({id:prev.id,pos:'end'});
+    setBlocksH(nb); setFocus({id:prev.id,pos:junction});
   }
   // Delete at the end of a block — pull the next block's content up into it
   function onDeleteForward(b,el){
@@ -1744,10 +1815,6 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       if(val==='callout')patch.emoji=patch.emoji||'💡';
       updateBlock(patch); return;
     }
-    if(action==='color'){ updateBlock({...b,color:val}); return; }
-    if(action==='bg'){ updateBlock({...b,bg:val,color:b.type==='callout'?val:b.color}); return; }
-    if(action==='copylink'){ navigator.clipboard&&navigator.clipboard.writeText(
-      location.href+'#'+b.id); return; }
   }
   // slash apply
   function applySlash(cmd){
@@ -1762,6 +1829,26 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     let text=el?el.textContent:'';
     if(tIdx>=0) text=text.slice(0,tIdx);
     setSlash(null);
+
+    // formatting commands (bold / italic / colour / highlight) apply to the
+    // block's text in place, keeping the block; they don't create a new block
+    if(cmd.fmt){
+      if(el){
+        const esc=s=>s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        el.innerHTML=esc(text);               // drop the "/query", keep the text
+        el.focus();
+        const sel=window.getSelection();
+        const r=document.createRange(); r.selectNodeContents(el);
+        sel.removeAllRanges(); sel.addRange(r);
+        if(cmd.fmt==='bold') document.execCommand('bold');
+        else if(cmd.fmt==='italic') document.execCommand('italic');
+        else if(cmd.fmt.startsWith('tc-')) applySelSpan('tc-',cmd.fmt.slice(3));
+        else if(cmd.fmt.startsWith('bg-')) applySelSpan('bg-',cmd.fmt.slice(3));
+        updateBlock({...b,html:el.innerHTML});
+        if(text) setCaretTextOffset(el,el.textContent.length);
+      }
+      return;
+    }
 
     const mk=()=>{ // returns the new block to use
       const id=nid();
@@ -1790,16 +1877,25 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       }
     };
     const nb=mk();
+    // block types that hold text — these convert the current block in place
+    const inline=['text','h1','h2','h3','quote','todo','bullet','number','toggle','callout'];
     if(text.trim()===''){
-      // replace current block
+      // empty block — replace it with the new block
       setBlocksH(blocks.map(x=>x.id===b.id?nb:x));
-      if(['text','h1','h2','h3','quote','todo','bullet','number','toggle','callout'].includes(nb.type))
-        setFocus({id:nb.id,pos:'start'});
+      if(inline.includes(nb.type)) setFocus({id:nb.id,pos:'start'});
+    } else if(inline.includes(nb.type)){
+      // block already has text — convert it in place, keeping the text
+      const conv={...nb,id:b.id,html:text};
+      setBlocksH(blocks.map(x=>x.id===b.id?conv:x));
+      setFocus({id:b.id,pos:'end'});
     } else {
-      // keep current text, insert new after
+      // divider / image / file / bookmark / code / page / database can't hold
+      // the text — keep it here and insert the new block right after
       const i=idx(b.id); const arr=[...blocks]; arr[i]={...b,html:text};
       arr.splice(i+1,0,nb); setBlocksH(arr);
-      if(nb.type==='text') setFocus({id:nb.id,pos:'start'});
+      // b keeps focus (so the state sync skips it) — strip the "/query" from
+      // its DOM directly and drop the caret at the end
+      if(el){ el.innerHTML=text; setCaretTextOffset(el,el.textContent.length); }
     }
   }
   // track slash query via input on the editing element
@@ -1915,7 +2011,7 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
             onChange={ndb=>update(node.id,{db:ndb})} openRow={openRow}/></div>
         : <div className={cx('editor',blockSel&&'bsel')} ref={editorDivRef}
         onMouseDown={onSelMouseDown}
-        onClick={e=>{ if(e.target===e.currentTarget&&!blockSelRef.current) focusLastEditable(); }}>
+        onClick={e=>{ if(e.target===e.currentTarget&&!blockSelRef.current) addOrFocusEnd(); }}>
         {blocks.map((b,i)=><Block key={b.id} block={b} index={i} depth={b.depth}
           listNumber={numbers[b.id]}
           selected={!!blockSel&&i>=Math.min(blockSel.a,blockSel.b)&&i<=Math.max(blockSel.a,blockSel.b)}
@@ -1927,7 +2023,7 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
           lookupNode={lookupNode}
           onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop}
           dragInfo={drag} onUploadFile={onUploadFile} uploads={uploads}/>)}
-        <div className="blk editor-end-zone" onClick={focusLastEditable}>
+        <div className="blk editor-end-zone" onClick={addOrFocusEnd}>
           <div className="blk-body"><div className="ce" style={{color:'var(--text-3)',
             cursor:'text',minHeight:24}}> </div></div>
         </div>
