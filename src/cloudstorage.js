@@ -105,10 +105,24 @@ async function _errMsg(res) {
   return `(${res.status}) ${reason}${hint}`;
 }
 
+/* Global concurrency gate: reads/writes below fire in parallel for speed, but
+   Drive rate-limits aggressive bursts — cap the requests in flight at once. */
+const MAX_INFLIGHT = 8;
+let _inflight = 0;
+const _waiters = [];
+
 async function _driveFetch(token, url, init = {}) {
-  const res = await fetch(url, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers || {}) } });
-  if (!res.ok) throw new Error('Drive request failed ' + (await _errMsg(res)));
-  return res;
+  if (_inflight >= MAX_INFLIGHT) await new Promise(r => _waiters.push(r));
+  _inflight++;
+  try {
+    const res = await fetch(url, { ...init, headers: { Authorization: `Bearer ${token}`, ...(init.headers || {}) } });
+    if (!res.ok) throw new Error('Drive request failed ' + (await _errMsg(res)));
+    return res;
+  } finally {
+    _inflight--;
+    const next = _waiters.shift();
+    if (next) next();
+  }
 }
 
 async function _createFolder(token, name, parentId) {
@@ -213,12 +227,10 @@ export async function listDriveWorkspaces() {
   const res = await _driveFetch(token,
     `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)&pageSize=1000`);
   const folders = (await res.json()).files || [];
-  const out = [];
-  for (const f of folders) {
-    const hasSpace = (await _findChild(token, 'Space', f.id, true)).length > 0;
-    if (hasSpace) out.push({ id: f.id, name: f.name });
-  }
-  return out;
+  // probe every candidate folder for a Space/ child in parallel
+  const hasSpace = await Promise.all(folders.map(
+    f => _findChild(token, 'Space', f.id, true).then(r => r.length > 0, () => false)));
+  return folders.filter((_, i) => hasSpace[i]).map(f => ({ id: f.id, name: f.name }));
 }
 
 async function _ensureFolderPath(token, rootId, dirParts, cache) {
@@ -244,25 +256,38 @@ export async function writeGdriveWorkspaceTree(rootId, store) {
   const plan = buildFolderPlan(store);
   const desired = new Map(plan.files.map(f => [f.path, f.text]));
 
-  // delete files no longer present
-  for (const path of [...cache.text.keys()]) {
-    if (!desired.has(path)) {
-      const id = cache.fileId.get(path);
-      if (id) await _deleteFile(token, id);
-      cache.text.delete(path); cache.fileId.delete(path);
-    }
-  }
-  // upsert changed / new files
-  for (const [path, text] of desired) {
-    if (cache.text.get(path) === text) continue;
+  // delete files no longer present (parallel)
+  const gone = [...cache.text.keys()].filter(p => !desired.has(p));
+  await Promise.all(gone.map(async path => {
+    const id = cache.fileId.get(path);
+    if (id) await _deleteFile(token, id);
+    cache.text.delete(path); cache.fileId.delete(path);
+  }));
+
+  // upsert changed / new files: ensure the folders first (sequential — the
+  // folderId cache makes this a no-op after the first save), then upload the
+  // file bodies in parallel
+  const changed = [...desired].filter(([path, text]) => cache.text.get(path) !== text);
+  const dirs = [...new Set(changed.map(([path]) => path.split('/').slice(0, -1).join('/')))];
+  for (const dir of dirs) if (dir) await _ensureFolderPath(token, rootId, dir.split('/'), cache);
+  await Promise.all(changed.map(async ([path, text]) => {
     const parts = path.split('/');
     const name = parts.pop();
-    const parentId = await _ensureFolderPath(token, rootId, parts, cache);
+    const dir = parts.join('/');
+    const parentId = dir ? cache.folderId.get(dir) : rootId;
     const id = await _uploadText(token, parentId, name, text, cache.fileId.get(path));
     cache.text.set(path, text); cache.fileId.set(path, id);
+  }));
+
+  // reconcile uploads only when the referenced set actually changed — it
+  // costs an Upload/ listing per call, which most saves don't need
+  const names = new Set((plan.uploads || []).map(u => u.name));
+  const prev = cache.uploadNames;
+  const same = prev && prev.size === names.size && [...names].every(n => prev.has(n));
+  if (!same) {
+    await _reconcileDriveUploads(token, rootId, plan.uploads, cache).catch(() => {});
+    cache.uploadNames = names;
   }
-  // reconcile uploads (delete Upload/ files no longer referenced)
-  await _reconcileDriveUploads(token, rootId, plan.uploads, cache).catch(() => {});
 }
 
 async function _reconcileDriveUploads(token, rootId, wantedUploads, cache) {
@@ -285,7 +310,8 @@ export async function writeDriveUpload(rootId, name, blob) {
 
 async function _collectMd(token, dirId, relPath, out, cache) {
   const children = await _listChildren(token, dirId);
-  for (const c of children) {
+  // fetch sub-folders and file bodies in parallel; _driveFetch caps the burst
+  await Promise.all(children.map(async c => {
     const p = relPath + '/' + c.name;
     if (c.mimeType === FOLDER_MIME) {
       cache.folderId.set(p, c.id);
@@ -295,7 +321,7 @@ async function _collectMd(token, dirId, relPath, out, cache) {
       out.push({ path: p, text });
       cache.text.set(p, text); cache.fileId.set(p, c.id);
     }
-  }
+  }));
 }
 
 function _hydrateBlocks(blocks, map) {
@@ -315,53 +341,60 @@ export async function readGdriveWorkspaceTree(rootId) {
   const cache = _cacheFor(rootId);
   cache.text.clear(); cache.fileId.clear(); cache.folderId.clear();
 
-  const files = [];
-  const spaceFolders = await _findChild(token, 'Space', rootId, true);
-  if (spaceFolders.length) {
-    cache.folderId.set('Space', spaceFolders[0].id);
-    await _collectMd(token, spaceFolders[0].id, 'Space', files, cache);
-  }
-  const trashFolders = await _findChild(token, 'trash', rootId, true);
-  if (trashFolders.length) {
-    cache.folderId.set('trash', trashFolders[0].id);
-    await _collectMd(token, trashFolders[0].id, 'trash', files, cache);
-  }
-  const archiveFolders = await _findChild(token, 'archive', rootId, true);
-  if (archiveFolders.length) {
-    cache.folderId.set('archive', archiveFolders[0].id);
-    await _collectMd(token, archiveFolders[0].id, 'archive', files, cache);
-  }
-  // workspace info.md (root)
-  const infoFiles = await _findChild(token, 'info.md', rootId, false);
-  if (infoFiles.length) {
-    cache.fileId.set('info.md', infoFiles[0].id);
-    const text = await _downloadText(token, infoFiles[0].id);
-    files.push({ path: 'info.md', text });
-    cache.text.set('info.md', text);
-  }
-  const { nodes, favorites, currentId, info } = parseFolderTree(files);
+  // one parallel round trip for all five root entries…
+  const [spaceFolders, trashFolders, archiveFolders, infoFiles, uploadFolders] = await Promise.all([
+    _findChild(token, 'Space', rootId, true),
+    _findChild(token, 'trash', rootId, true),
+    _findChild(token, 'archive', rootId, true),
+    _findChild(token, 'info.md', rootId, false),
+    _findChild(token, 'Upload', rootId, true),
+  ]);
 
-  // uploads
+  // …then read every section (and every file inside it) in parallel
+  const files = [];
   const uploads = [];
   const map = {};
-  const uploadFolders = await _findChild(token, 'Upload', rootId, true);
+  const jobs = [];
+  if (spaceFolders.length) {
+    cache.folderId.set('Space', spaceFolders[0].id);
+    jobs.push(_collectMd(token, spaceFolders[0].id, 'Space', files, cache));
+  }
+  if (trashFolders.length) {
+    cache.folderId.set('trash', trashFolders[0].id);
+    jobs.push(_collectMd(token, trashFolders[0].id, 'trash', files, cache));
+  }
+  if (archiveFolders.length) {
+    cache.folderId.set('archive', archiveFolders[0].id);
+    jobs.push(_collectMd(token, archiveFolders[0].id, 'archive', files, cache));
+  }
+  if (infoFiles.length) {
+    cache.fileId.set('info.md', infoFiles[0].id);
+    jobs.push(_downloadText(token, infoFiles[0].id).then(text => {
+      files.push({ path: 'info.md', text });
+      cache.text.set('info.md', text);
+    }));
+  }
   if (uploadFolders.length) {
     cache.folderId.set('Upload', uploadFolders[0].id);
-    const items = await _listChildren(token, uploadFolders[0].id);
-    for (const it of items) {
-      if (it.mimeType === FOLDER_MIME) continue;
-      try {
-        const blob = await _downloadBlob(token, it.id);
-        const url = URL.createObjectURL(blob);
-        (_objURLs[rootId] || (_objURLs[rootId] = [])).push(url);
-        map[it.name] = url;
-        uploads.push({ id: 'up_' + it.id, name: it.name, type: blob.type || '', size: Number(it.size) || blob.size || 0,
-          uploadedAt: Date.now(), localName: it.name, wsId: rootId, dataUrl: url });
-      } catch (_) {}
-    }
+    jobs.push(_listChildren(token, uploadFolders[0].id).then(items =>
+      Promise.all(items.map(async it => {
+        if (it.mimeType === FOLDER_MIME) return;
+        try {
+          const blob = await _downloadBlob(token, it.id);
+          const url = URL.createObjectURL(blob);
+          (_objURLs[rootId] || (_objURLs[rootId] = [])).push(url);
+          map[it.name] = url;
+          uploads.push({ id: 'up_' + it.id, name: it.name, type: blob.type || '', size: Number(it.size) || blob.size || 0,
+            uploadedAt: Date.now(), localName: it.name, wsId: rootId, dataUrl: url });
+        } catch (_) {}
+      }))));
   }
+  await Promise.all(jobs);
+
+  const { nodes, favorites, currentId, info } = parseFolderTree(files);
   for (const n of Object.values(nodes)) if (n.blocks) n.blocks = _hydrateBlocks(n.blocks, map);
   if (info && info.pageBg && map[info.pageBg]) info.pageBgUrl = map[info.pageBg];
+  cache.uploadNames = new Set(uploads.map(u => u.name));
 
   return { nodes, favorites, currentId, uploads, info };
 }

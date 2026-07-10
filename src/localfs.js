@@ -32,8 +32,10 @@ export const isLocalFSSupported = () =>
   typeof window.showDirectoryPicker === 'function';
 
 /* ---------------------------------------------------------------- IndexedDB tiny wrapper */
+let _dbPromise = null;
 function openIDB() {
-  return new Promise((resolve, reject) => {
+  if (_dbPromise) return _dbPromise;
+  _dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(IDB_DB, IDB_VER);
     req.onupgradeneeded = e => {
       const db = e.target.result;
@@ -41,9 +43,15 @@ function openIDB() {
         db.createObjectStore(IDB_STORE, { keyPath: 'id' });
       }
     };
-    req.onsuccess = e => resolve(e.target.result);
-    req.onerror   = e => reject(e.target.error);
+    req.onsuccess = e => {
+      const db = e.target.result;
+      // another tab upgrading the DB needs us to let go of the connection
+      db.onversionchange = () => { try { db.close(); } catch (_) {} _dbPromise = null; };
+      resolve(db);
+    };
+    req.onerror = e => { _dbPromise = null; reject(e.target.error); };
   });
+  return _dbPromise;
 }
 async function idbGet(id) {
   const db = await openIDB();
@@ -230,7 +238,7 @@ export async function removeLocalWorkspaceRecord(id) {
   // for a workspace we're forgetting. Then drop the handle + caches. No file
   // on disk is ever removed here — this only disconnects.
   clearTimeout(_writeTimers[id]); delete _writeTimers[id];
-  await idbDelete(id); revokeLocalURLs(id); delete _treeCache[id];
+  await idbDelete(id); revokeLocalURLs(id); delete _treeCache[id]; delete _uploadNameCache[id];
 }
 
 export async function requestPermissionForHandleDetailed(handle, write = true) {
@@ -333,7 +341,8 @@ export async function readWorkspaceTree(id) {
 }
 
 /* ================================================================ write tree */
-const _treeCache = {};  // id -> Map(path -> lastWrittenText)
+const _treeCache = {};        // id -> Map(path -> lastWrittenText)
+const _uploadNameCache = {};  // id -> Set(upload names at last reconcile)
 const _writeTimers = {};
 
 async function _doWriteTree(id, store) {
@@ -348,8 +357,9 @@ async function _doWriteTree(id, store) {
     const prev = _treeCache[id] || new Map();
 
     // 1) delete files no longer present
+    let deletedAny = false;
     for (const path of prev.keys()) {
-      if (!desired.has(path)) await _deleteFileAtPath(root, path);
+      if (!desired.has(path)) { await _deleteFileAtPath(root, path); deletedAny = true; }
     }
     // 2) write new / changed files
     for (const [path, text] of desired) {
@@ -357,10 +367,19 @@ async function _doWriteTree(id, store) {
       try { await _writeFileAtPath(root, path, text); }
       catch (e) { console.warn('[localfs] write failed:', path, e.message); }
     }
-    // 3) remove folders that became empty (e.g. a page that lost all children)
-    await _pruneEmptyDirs(root, SPACE_DIR).catch(() => {});
-    // 4) reconcile uploads: delete files no longer referenced
-    await _reconcileUploads(root, plan.uploads).catch(() => {});
+    // 3) remove folders that became empty — only a deletion can empty one, so
+    //    skip the full-tree walk on ordinary saves
+    if (deletedAny) await _pruneEmptyDirs(root, SPACE_DIR).catch(() => {});
+    // 4) reconcile uploads (delete files no longer referenced) — only when the
+    //    referenced set changed since the last save; it walks Upload/ each time
+    const uploadNames = new Set((plan.uploads || []).map(u => u.name));
+    const prevUploads = _uploadNameCache[id];
+    const sameUploads = prevUploads && prevUploads.size === uploadNames.size
+      && [...uploadNames].every(n => prevUploads.has(n));
+    if (!sameUploads) {
+      await _reconcileUploads(root, plan.uploads).catch(() => {});
+      _uploadNameCache[id] = uploadNames;
+    }
 
     _treeCache[id] = desired;
   } catch (e) {
@@ -387,8 +406,9 @@ export async function writeWorkspaceTreeNow(id, store) {
 }
 
 /* ================================================================ uploads */
-/* Write an uploaded file into Upload/. Returns the on-disk filename. */
-export async function writeLocalUploadFile(wsId, originalName, dataUrl) {
+/* Write an uploaded file into Upload/. Accepts a Blob/File directly (no
+   base64 round trip) or a data-URL string. Returns the on-disk filename. */
+export async function writeLocalUploadFile(wsId, originalName, fileOrDataUrl) {
   try {
     const rec = await idbGet(wsId);
     if (!rec) return null;
@@ -397,7 +417,9 @@ export async function writeLocalUploadFile(wsId, originalName, dataUrl) {
     const safe = Date.now() + '_' + slugifyTitle(originalName).replace(/\s+/g, '_');
     const fh = await dir.getFileHandle(safe, { create: true });
     const w = await fh.createWritable();
-    const blob = await (await fetch(dataUrl)).blob();
+    const blob = fileOrDataUrl instanceof Blob
+      ? fileOrDataUrl
+      : await (await fetch(fileOrDataUrl)).blob();
     await w.write(blob);
     await w.close();
     return safe;

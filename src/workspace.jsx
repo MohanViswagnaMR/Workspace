@@ -69,15 +69,12 @@ import { nodeDiskPath } from './markdown.js';
 /* ---------- utils ---------- */
 const nid = () => 'n'+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3);
 const cx = (...a)=>a.filter(Boolean).join(' ');
-const clone = o => JSON.parse(JSON.stringify(o));
+const clone = o => typeof structuredClone==='function' ? structuredClone(o) : JSON.parse(JSON.stringify(o));
 const todayISO = () => new Date().toISOString().slice(0,10);
 const fmtDate = iso => { if(!iso) return ''; const d=new Date(iso+'T00:00');
   return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); };
 const fmtBytes = b => { if(!b) return '0 B'; const u=['B','KB','MB','GB']; let i=0;
   while(b>=1024&&i<u.length-1){b/=1024;i++;} return b.toFixed(i>0?1:0)+' '+u[i]; };
-const readAsDataUrl = file => new Promise((res,rej)=>{
-  const r=new FileReader(); r.onload=e=>res(e.target.result); r.onerror=()=>rej(new Error('Read failed'));
-  r.readAsDataURL(file); });
 
 /* ---------- constants ---------- */
 const SEL_COLORS = ['default','gray','brown','orange','yellow','green','blue','purple','pink','red'];
@@ -1198,10 +1195,13 @@ function CodeLangSelect({value, onChange}){
 /* =========================================================================
    BLOCK  — renders one block of any type
    ========================================================================= */
-function Block(props){
+/* Memoized: the Editor re-renders on every keystroke, but its handler props
+   are identity-stable (see the live-ref pattern in Editor), so only the block
+   actually being edited re-renders. */
+const Block=React.memo(function Block(props){
   const {block,index,listNumber,onChange,onEnter,onBackspace,onDeleteForward,onArrow,onIndent,
     focus,setFocus,onSlash,onBlockAction,openPage,onDragStart,onDragOver,onDrop,
-    dragInfo,depth,onUploadFile,uploads,selected} = props;
+    isDragSource,dropPos,depth,onUploadFile,uploads,selected} = props;
   const ceRef=useRef();
   const codeRef=useRef();
   const [menu,setMenu]=useState(null);
@@ -1528,15 +1528,15 @@ function Block(props){
   }
   else body=renderText('Type something…');
 
-  const dropCls = dragInfo&&dragInfo.overId===block.id ?
-    (dragInfo.pos==='above'?'drop-above':'drop-below') : '';
+  const dropCls = dropPos ? (dropPos==='above'?'drop-above':'drop-below') : '';
 
-  return <div className={cx('blk','b-'+T,selected&&'blk-sel',dragInfo&&dragInfo.dragId===block.id&&'dragging',dropCls)}
+  return <div className={cx('blk','b-'+T,selected&&'blk-sel',isDragSource&&'dragging',dropCls)}
     data-block-id={block.id}
     style={{marginLeft:(depth||0)*26}}
     onDragOver={e=>onDragOver(e,block)} onDrop={e=>onDrop(e,block)}
     onContextMenu={T!=='database'?e=>{
       e.preventDefault();e.stopPropagation();
+      loadDict().catch(()=>{}); // no-op once loaded; warms it on first use
       // a single selected, misspelled word → offer spelling suggestions at the
       // top of the (custom) block menu
       let spell=null;
@@ -1557,7 +1557,7 @@ function Block(props){
       onClose={()=>setMenu(null)} onFmt={formatFromMenu}
       onAction={(a,v)=>{ setMenu(null); onBlockAction(block,a,v); }}/>}
   </div>;
-}
+});
 
 window.__NOTION_PART2_DONE=true;
 /* =========================================================================
@@ -1570,22 +1570,39 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
   const [iconPick,setIconPick]=useState(false);
   const [coverPick,setCoverPick]=useState(false);
   const blocks=node.blocks||[];
-  // warm the spell-check dictionary in the background so suggestions are ready
-  useEffect(()=>{ loadDict().catch(()=>{}); },[]);
+  // warm the spell-check dictionary once the page is idle — it's a 350 KB
+  // fetch that shouldn't compete with the initial load
+  useEffect(()=>{ const t=setTimeout(()=>loadDict().catch(()=>{}),2500);
+    return ()=>clearTimeout(t); },[]);
 
-  const setBlocks=nb=>update(node.id,{blocks:nb});
+  /* ── live refs ──
+     Block is memoized (React.memo), which only pays off when its handler
+     props keep the same identity across renders. Every handler below is a
+     stable useCallback that reads the CURRENT blocks/props through these
+     refs instead of closing over them. */
+  const liveBlocks=useRef(blocks); liveBlocks.current=blocks;
+  const updateRef=useRef(); updateRef.current=update;
+  const nodeIdRef=useRef(); nodeIdRef.current=node.id;
+  const openPageRef=useRef(); openPageRef.current=openPage;
+  const openRowRef=useRef(); openRowRef.current=openRow;
+  const lookupNodeRef=useRef(); lookupNodeRef.current=lookupNode;
+  const onUploadFileRef=useRef(); onUploadFileRef.current=onUploadFile;
+  const dragRef=useRef(null); dragRef.current=drag;
+
+  const setBlocks=useCallback(nb=>updateRef.current(nodeIdRef.current,{blocks:nb}),[]);
+  const stOpenPage=useCallback((...a)=>openPageRef.current(...a),[]);
+  const stOpenRow=useCallback((...a)=>openRowRef.current(...a),[]);
+  const stLookupNode=useCallback(id=>lookupNodeRef.current(id),[]);
+  const stUploadFile=useCallback((...a)=>onUploadFileRef.current?.(...a),[]);
 
   /* ── undo / redo (block-structural history) ── */
   const undoStack=useRef([]);
   const redoStack=useRef([]);
-  // the key handler is registered once, so its undo/redo close over the first
-  // render's `blocks`; read the live value through a ref instead
-  const liveBlocks=useRef(blocks); liveBlocks.current=blocks;
-  function setBlocksH(nb){        // history-aware setter for structural ops
-    undoStack.current=[...undoStack.current.slice(-20), blocks];
+  const setBlocksH=useCallback(nb=>{  // history-aware setter for structural ops
+    undoStack.current=[...undoStack.current.slice(-20), liveBlocks.current];
     redoStack.current=[];
     setBlocks(nb);
-  }
+  },[setBlocks]);
   // a focused contentEditable keeps its own DOM (the sync effect skips it), so
   // blur it before restoring history — otherwise the focused block still shows
   // its pre-undo text while state reverts, duplicating content
@@ -1623,14 +1640,15 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     document.addEventListener('keydown',onKey,true); // capture so it beats contentEditable
     return ()=>document.removeEventListener('keydown',onKey,true);
   },[]);
-  const updateBlock=(b)=>setBlocks(blocks.map(x=>x.id===b.id?b:x));
-  const idx=id=>blocks.findIndex(b=>b.id===id);
+  const updateBlock=useCallback(b=>setBlocks(liveBlocks.current.map(x=>x.id===b.id?b:x)),[setBlocks]);
+  const idx=id=>liveBlocks.current.findIndex(b=>b.id===id);
 
-  function insertAfter(afterId,blk){
-    const i=idx(afterId);
-    const nb=[...blocks]; nb.splice(i+1,0,blk); setBlocksH(nb);
+  const insertAfter=useCallback((afterId,blk)=>{
+    const bs=liveBlocks.current;
+    const i=bs.findIndex(b=>b.id===afterId);
+    const nb=[...bs]; nb.splice(i+1,0,blk); setBlocksH(nb);
     setFocus({id:blk.id,pos:'start'});
-  }
+  },[setBlocksH]);
   // ── multi-block selection: dragging across block boundaries selects whole
   // blocks (native text selection cannot span separate contentEditables) ──
   const [blockSel,setBlockSel]=useState(null); // {a,b} indices, inclusive
@@ -1704,7 +1722,8 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     const b={id:nid(),type:'text',html:''};
     setBlocksH([...blocks,b]); setFocus({id:b.id,pos:'start'});
   }
-  function onEnter(b,el){
+  const onEnter=useCallback((b,el)=>{
+    const bs=liveBlocks.current;
     // continue lists; empty list item -> text
     const listish=['bullet','number','todo','toggle'].includes(b.type);
     if(listish && el && el.textContent.trim()===''){
@@ -1718,25 +1737,26 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     const blk={id:nid(),type:nt,html:split?split.after:''};
     if(nt==='todo')blk.checked=false;
     if(split) el.innerHTML=split.before; // keep DOM in step so the focused block doesn't show stale text
-    const i=idx(b.id);
-    const nb=blocks.map(x=>x.id===b.id&&split?{...x,html:split.before}:x);
+    const i=bs.findIndex(x=>x.id===b.id);
+    const nb=bs.map(x=>x.id===b.id&&split?{...x,html:split.before}:x);
     nb.splice(i+1,0,blk);
     setBlocksH(nb);
     setFocus({id:blk.id,pos:'start'});
-  }
-  function onBackspace(b,el){
-    const i=idx(b.id);
+  },[setBlocksH,updateBlock]);
+  const onBackspace=useCallback((b,el)=>{
+    const bs=liveBlocks.current;
+    const i=bs.findIndex(x=>x.id===b.id);
     // media/embed blocks should be deleted on backspace, not converted to text
     if(['image','file','bookmark','divider','subpage'].includes(b.type)){
-      const nb=blocks.filter(x=>x.id!==b.id);
+      const nb=bs.filter(x=>x.id!==b.id);
       if(!nb.length) nb.push({id:nid(),type:'text',html:''});
       setBlocksH(nb);
-      if(i>0) setFocus({id:blocks[i-1].id,pos:'end'});
+      if(i>0) setFocus({id:bs[i-1].id,pos:'end'});
       return;
     }
     if(b.type==='code'){
-      const nb=blocks.filter(x=>x.id!==b.id); setBlocksH(nb);
-      if(i>0)setFocus({id:blocks[i-1].id,pos:'end'}); return;
+      const nb=bs.filter(x=>x.id!==b.id); setBlocksH(nb);
+      if(i>0)setFocus({id:bs[i-1].id,pos:'end'}); return;
     }
     // A styled block (heading, list, todo, quote, callout, toggle) only strips
     // back to plain text when there's nowhere to merge into — it's the first
@@ -1749,33 +1769,34 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
         emoji:undefined,color:b.color}); setFocus({id:b.id,pos:'start'}); return;
     }
     if(i===0) return;
-    const prev=blocks[i-1];
+    const prev=bs[i-1];
     if(['divider','image','file','bookmark','subpage','database'].includes(prev.type)){
       // delete the media block above instead
-      setBlocksH(blocks.filter(x=>x.id!==prev.id)); return;
+      setBlocksH(bs.filter(x=>x.id!==prev.id)); return;
     }
     // caret lands at the junction — the end of prev's original text, before
     // the content that just merged in
     const jd=document.createElement('div'); jd.innerHTML=prev.html||'';
     const junction=jd.textContent.length;
     const merged={...prev,html:(prev.html||'')+(b.html||'')};
-    const nb=blocks.filter(x=>x.id!==b.id).map(x=>x.id===prev.id?merged:x);
+    const nb=bs.filter(x=>x.id!==b.id).map(x=>x.id===prev.id?merged:x);
     setBlocksH(nb); setFocus({id:prev.id,pos:junction});
-  }
+  },[setBlocksH,updateBlock]);
   // Delete at the end of a block — pull the next block's content up into it
-  function onDeleteForward(b,el){
-    const i=idx(b.id);
-    const next=blocks[i+1];
+  const onDeleteForward=useCallback((b,el)=>{
+    const bs=liveBlocks.current;
+    const i=bs.findIndex(x=>x.id===b.id);
+    const next=bs[i+1];
     if(!next) return;
     if(['divider','image','file','bookmark','subpage'].includes(next.type)){
       // delete the media block below instead of merging
-      setBlocksH(blocks.filter(x=>x.id!==next.id)); return;
+      setBlocksH(bs.filter(x=>x.id!==next.id)); return;
     }
     if(next.type==='code'||next.type==='database') return;
     if(next.type==='toggle'&&(next.children||[]).length) return; // don't orphan its children
     // an empty current block just disappears; the next block keeps its type
     if(b.type==='text'&&!(b.html||'').replace(/<br\s*\/?>/gi,'').trim()){
-      setBlocksH(blocks.filter(x=>x.id!==b.id));
+      setBlocksH(bs.filter(x=>x.id!==b.id));
       setFocus({id:next.id,pos:'start'}); return;
     }
     // merge, keeping the caret at the junction (this block stays focused, so
@@ -1783,27 +1804,29 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     const junction=el?caretTextOffset(el):null;
     const merged={...b,html:(b.html||'')+(next.html||'')};
     if(el){ el.innerHTML=merged.html; if(junction!=null) setCaretTextOffset(el,junction); }
-    setBlocksH(blocks.filter(x=>x.id!==next.id).map(x=>x.id===b.id?merged:x));
-  }
-  function onArrow(dir,b){
-    const i=idx(b.id);
+    setBlocksH(bs.filter(x=>x.id!==next.id).map(x=>x.id===b.id?merged:x));
+  },[setBlocksH]);
+  const onArrow=useCallback((dir,b)=>{
+    const bs=liveBlocks.current;
+    const i=bs.findIndex(x=>x.id===b.id);
     const t=dir==='up'?i-1:i+1;
-    if(t>=0&&t<blocks.length) setFocus({id:blocks[t].id,pos:'end'});
-  }
-  function onIndent(b,delta){
+    if(t>=0&&t<bs.length) setFocus({id:bs[t].id,pos:'end'});
+  },[]);
+  const onIndent=useCallback((b,delta)=>{
     const cur=b.depth||0;
     updateBlock({...b,depth:Math.max(0,Math.min(cur+delta,5))});
-  }
-  function blockAction(b,action,val){
-    const i=idx(b.id);
+  },[updateBlock]);
+  const blockAction=useCallback((b,action,val)=>{
+    const bs=liveBlocks.current;
+    const i=bs.findIndex(x=>x.id===b.id);
     if(action==='delete'){
-      const nb=blocks.filter(x=>x.id!==b.id);
+      const nb=bs.filter(x=>x.id!==b.id);
       if(!nb.length)nb.push({id:nid(),type:'text',html:''});
       setBlocksH(nb); return;
     }
     if(action==='duplicate'){
       const copy={...clone(b),id:nid()};
-      const nb=[...blocks]; nb.splice(i+1,0,copy); setBlocksH(nb); return;
+      const nb=[...bs]; nb.splice(i+1,0,copy); setBlocksH(nb); return;
     }
     if(action==='add-below'){
       insertAfter(b.id,{id:nid(),type:'text',html:''}); return;
@@ -1815,7 +1838,7 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       if(val==='callout')patch.emoji=patch.emoji||'💡';
       updateBlock(patch); return;
     }
-  }
+  },[setBlocksH,insertAfter,updateBlock]);
   // slash apply
   function applySlash(cmd){
     if(!slash) return;
@@ -1912,26 +1935,29 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     return ()=>el.removeEventListener('input',read);
   },[slash]);
   const [slashQuery,setSlashQuery]=useState('');
+  const onSlash=useCallback(info=>{setSlash(info);setSlashQuery('');},[]);
 
   // drag & drop blocks
-  function onDragStart(e,b,i){ setDrag({dragId:b.id}); e.dataTransfer.effectAllowed='move'; }
-  function onDragOver(e,b){
-    if(!drag) return; e.preventDefault();
+  const onDragStart=useCallback((e,b)=>{ setDrag({dragId:b.id}); e.dataTransfer.effectAllowed='move'; },[]);
+  const onDragOver=useCallback((e,b)=>{
+    const d=dragRef.current;
+    if(!d) return; e.preventDefault();
     const r=e.currentTarget.getBoundingClientRect();
     const pos=e.clientY<r.top+r.height/2?'above':'below';
-    if(drag.overId!==b.id||drag.pos!==pos) setDrag({...drag,overId:b.id,pos});
-  }
-  function onDrop(e,b){
-    if(!drag||drag.dragId===b.id){ setDrag(null); return; }
+    if(d.overId!==b.id||d.pos!==pos) setDrag({...d,overId:b.id,pos});
+  },[]);
+  const onDrop=useCallback((e,b)=>{
+    const d=dragRef.current;
+    if(!d||d.dragId===b.id){ setDrag(null); return; }
     e.preventDefault();
-    const from=idx(drag.dragId);
-    const moving=blocks[from];
-    let rest=blocks.filter(x=>x.id!==drag.dragId);
+    const bs=liveBlocks.current;
+    const moving=bs.find(x=>x.id===d.dragId);
+    let rest=bs.filter(x=>x.id!==d.dragId);
     let ti=rest.findIndex(x=>x.id===b.id);
-    if(drag.pos==='below')ti++;
+    if(d.pos==='below')ti++;
     rest.splice(ti,0,moving);
     setBlocksH(rest); setDrag(null);
-  }
+  },[setBlocksH]);
   useEffect(()=>{ const end=()=>setDrag(null);
     document.addEventListener('dragend',end); return ()=>document.removeEventListener('dragend',end); },[]);
 
@@ -2017,12 +2043,14 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
           selected={!!blockSel&&i>=Math.min(blockSel.a,blockSel.b)&&i<=Math.max(blockSel.a,blockSel.b)}
           onChange={updateBlock} onEnter={onEnter} onBackspace={onBackspace}
           onDeleteForward={onDeleteForward} onArrow={onArrow} onIndent={onIndent}
-          focus={focus} setFocus={setFocus}
-          onSlash={info=>{setSlash(info);setSlashQuery('');}}
-          onBlockAction={blockAction} openPage={openPage} openRow={openRow}
-          lookupNode={lookupNode}
+          focus={focus&&focus.id===b.id?focus:null} setFocus={setFocus}
+          onSlash={onSlash}
+          onBlockAction={blockAction} openPage={stOpenPage} openRow={stOpenRow}
+          lookupNode={stLookupNode}
           onDragStart={onDragStart} onDragOver={onDragOver} onDrop={onDrop}
-          dragInfo={drag} onUploadFile={onUploadFile} uploads={uploads}/>)}
+          isDragSource={!!drag&&drag.dragId===b.id}
+          dropPos={drag&&drag.overId===b.id?drag.pos:null}
+          onUploadFile={stUploadFile} uploads={uploads}/>)}
         <div className="blk editor-end-zone" onClick={addOrFocusEnd}>
           <div className="blk-body"><div className="ce" style={{color:'var(--text-3)',
             cursor:'text',minHeight:24}}> </div></div>
@@ -2141,6 +2169,172 @@ const PROP_TYPES=[
 ];
 const VIEW_ICONS={table:'table',board:'board',gallery:'gallery',list:'list',calendar:'calendar'};
 
+/* The five view renderers are top-level components (not defined inside
+   DatabaseView) so React keeps them MOUNTED across database edits — otherwise
+   their local state (calendar month, board drag) resets on every change. */
+
+/* ============ TABLE ============ */
+function TableV({db,rows,openRow,setCell,setProp,addRow,setPropMenu,setAddProp}){
+  return <div className="tbl"><table><thead><tr>
+    <th className="row-num"> </th>
+    {db.props.map(p=><th key={p.id}>
+      <div className="th-in" onClick={e=>setPropMenu({rect:e.currentTarget.getBoundingClientRect(),prop:p})}>
+        <span>{PROP_TYPES.find(t=>t[0]===p.type)?.[2]||'≡'}</span>{p.name}</div></th>)}
+    <th className="add-col" onClick={e=>setAddProp(e.currentTarget.getBoundingClientRect())}>
+      <Ic n="plus" style={{width:14,height:14,margin:'0 auto'}}/></th>
+  </tr></thead><tbody>
+    {rows.map((r,i)=><tr key={r.id}>
+      <td className="row-num">{i+1}</td>
+      {db.props.map((p,pi)=><td key={p.id} className="cell">
+        {pi===0
+          ? <div style={{display:'flex',alignItems:'center'}}>
+              <span style={{padding:'0 4px 0 8px',cursor:'pointer'}}
+                onClick={()=>openRow(db,r.id)}>{r.icon}</span>
+              <div style={{flex:1}}><PropCell prop={p} row={r}
+                onSet={v=>setCell(r.id,p.id,v)} onProp={setProp}/></div>
+              <button className="db-tool" style={{padding:'2px 6px',margin:'0 4px'}}
+                onClick={()=>openRow(db,r.id)}>Open</button>
+            </div>
+          : <PropCell prop={p} row={r} onSet={v=>setCell(r.id,p.id,v)} onProp={setProp}/>}
+      </td>)}
+      <td/>
+    </tr>)}
+  </tbody></table>
+  <div className="db-addrow" onClick={()=>addRow()}><Ic n="plus"/>New row</div>
+  </div>;
+}
+
+/* ============ BOARD ============ */
+function BoardV({db,view,rows,setCell,addRow,openRow}){
+  const [bdrag,setBdrag]=useState(null);
+  const gp=db.props.find(p=>p.id===view.groupProp)
+    ||db.props.find(p=>p.type==='status'||p.type==='select');
+  if(!gp) return <div className="empty-state">Add a Select or Status property to use Board view.</div>;
+  const opts=[...(gp.options||[]),{id:'__none',name:'No '+gp.name,color:'default'}];
+  return <div className="board">
+    {opts.map(o=>{
+      const cards=rows.filter(r=>(r.cells[gp.id]||'__none')===o.id);
+      return <div key={o.id} className="board-col"
+        onDragOver={e=>{e.preventDefault();}}
+        onDrop={e=>{ if(bdrag){ setCell(bdrag,gp.id,o.id==='__none'?'':o.id); setBdrag(null);} }}>
+        <div className="board-col-h">
+          <span className="chip" style={{background:colorVar(o.color)}}>{o.name}</span>
+          <span className="cnt">{cards.length}</span></div>
+        <div className="board-cards">
+          {cards.map(r=><div key={r.id} className={cx('board-card',bdrag===r.id&&'dragging')}
+            draggable onDragStart={()=>setBdrag(r.id)} onDragEnd={()=>setBdrag(null)}
+            onClick={()=>openRow(db,r.id)}>
+            <div className="bc-title">{r.icon} {r.cells.p_title||'Untitled'}</div>
+            <div className="bc-props">
+              {db.props.filter(p=>p.id!==gp.id&&p.type!=='title').map(p=>{
+                const v=r.cells[p.id]; if(!v)return null;
+                if(p.type==='select'||p.type==='status'){
+                  const op=(p.options||[]).find(x=>x.id===v); if(!op)return null;
+                  return <span key={p.id} className="chip"
+                    style={{background:colorVar(op.color)}}>{op.name}</span>;
+                }
+                if(p.type==='date')return <span key={p.id} className="chip"
+                  style={{background:'var(--c-default)'}}>📅 {fmtDate(v)}</span>;
+                if(p.type==='person')return <span key={p.id} className="chip"
+                  style={{background:'var(--c-default)'}}>👤 {v}</span>;
+                if(p.type==='checkbox')return <span key={p.id} className="chip"
+                  style={{background:'var(--c-default)'}}>{v?'☑':'☐'} {p.name}</span>;
+                return null;
+              })}
+            </div></div>)}
+          <div className="board-add" onClick={()=>{ const r=addRow({[gp.id]:o.id==='__none'?'':o.id});
+            openRow(db,r.id); }}><Ic n="plus" style={{width:14,height:14}}/>New</div>
+        </div></div>;
+    })}
+  </div>;
+}
+
+/* ============ GALLERY ============ */
+function GalleryV({db,rows,openRow,addRow}){
+  return <div><div className="gallery">
+    {rows.map(r=><div key={r.id} className="gcard" onClick={()=>openRow(db,r.id)}>
+      <div className="gc-cover" style={{background:'var(--bg-input)'}}>{r.icon||'📄'}</div>
+      <div className="gc-body">
+        <div className="gc-title">{r.cells.p_title||'Untitled'}</div>
+        <div className="bc-props">
+          {db.props.filter(p=>p.type!=='title').slice(0,3).map(p=>{
+            const v=r.cells[p.id]; if(!v)return null;
+            if(p.type==='select'||p.type==='status'){
+              const op=(p.options||[]).find(x=>x.id===v); if(!op)return null;
+              return <span key={p.id} className="chip"
+                style={{background:colorVar(op.color)}}>{op.name}</span>;
+            }
+            return <span key={p.id} className="chip" style={{background:'var(--c-default)'}}>
+              {p.type==='date'?fmtDate(v):(''+v)}</span>;
+          })}
+        </div></div></div>)}
+  </div>
+  <div className="db-addrow" style={{border:'none'}} onClick={()=>{const r=addRow();openRow(db,r.id);}}>
+    <Ic n="plus"/>New card</div></div>;
+}
+
+/* ============ LIST ============ */
+function ListV({db,rows,openRow,addRow}){
+  return <div><div className="listv">
+    {rows.map(r=><div key={r.id} className="list-item" onClick={()=>openRow(db,r.id)}>
+      <span>{r.icon||'📄'}</span>
+      <span className="li-title">{r.cells.p_title||'Untitled'}</span>
+      <div className="li-props">
+        {db.props.filter(p=>p.type!=='title').slice(0,3).map(p=>{
+          const v=r.cells[p.id]; if(!v)return null;
+          if(p.type==='select'||p.type==='status'){
+            const op=(p.options||[]).find(x=>x.id===v); if(!op)return null;
+            return <span key={p.id} className="chip"
+              style={{background:colorVar(op.color)}}>{op.name}</span>;
+          }
+          return <span key={p.id} style={{color:'var(--text-3)',fontSize:13}}>
+            {p.type==='date'?fmtDate(v):(''+v)}</span>;
+        })}
+      </div></div>)}
+  </div>
+  <div className="db-addrow" style={{border:'none'}} onClick={()=>{const r=addRow();openRow(db,r.id);}}>
+    <Ic n="plus"/>New</div></div>;
+}
+
+/* ============ CALENDAR ============ */
+function CalendarV({db,rows,addRow,openRow}){
+  const [cur,setCur]=useState(()=>{const d=new Date();return {y:d.getFullYear(),m:d.getMonth()};});
+  const dateProp=db.props.find(p=>p.type==='date');
+  if(!dateProp) return <div className="empty-state">Add a Date property to use Calendar view.</div>;
+  const first=new Date(cur.y,cur.m,1);
+  const start=new Date(first); start.setDate(1-first.getDay());
+  const cells=[]; for(let i=0;i<42;i++){const d=new Date(start);d.setDate(start.getDate()+i);cells.push(d);}
+  const tIso=todayISO();
+  const byDay={}; rows.forEach(r=>{const v=r.cells[dateProp.id];if(v){(byDay[v]=byDay[v]||[]).push(r);}});
+  return <div className="calv">
+    <div className="cal-head">
+      <b>{first.toLocaleDateString('en-US',{month:'long',year:'numeric'})}</b>
+      <button className="db-tool" onClick={()=>setCur(c=>{const m=c.m-1;
+        return m<0?{y:c.y-1,m:11}:{y:c.y,m};})}><Ic n="back"/></button>
+      <button className="db-tool" onClick={()=>{const d=new Date();
+        setCur({y:d.getFullYear(),m:d.getMonth()});}}>Today</button>
+      <button className="db-tool" onClick={()=>setCur(c=>{const m=c.m+1;
+        return m>11?{y:c.y+1,m:0}:{y:c.y,m};})}><Ic n="fwd"/></button>
+    </div>
+    <div className="cal-grid">
+      {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>
+        <div key={d} className="cal-dow">{d}</div>)}
+      {cells.map((d,i)=>{
+        const iso=d.toISOString().slice(0,10);
+        const evs=byDay[iso]||[];
+        return <div key={i} className={cx('cal-cell',d.getMonth()!==cur.m&&'other')}
+          onDoubleClick={()=>{const r=addRow({[dateProp.id]:iso});openRow(db,r.id);}}>
+          <div className={cx('cal-num',iso===tIso&&'today')}>{d.getDate()}</div>
+          {evs.map(r=><div key={r.id} className="cal-ev"
+            onClick={()=>openRow(db,r.id)}>{r.icon} {r.cells.p_title||'Untitled'}</div>)}
+        </div>;
+      })}
+    </div>
+    <div className="tree-empty" style={{paddingLeft:0,marginTop:6}}>
+      Double-click a day to add an entry.</div>
+  </div>;
+}
+
 function DatabaseView({db,onChange,openRow,onDelete,onDuplicate}){
   const view=db.views.find(v=>v.id===db.activeView)||db.views[0];
   const [addProp,setAddProp]=useState(false);
@@ -2255,168 +2449,6 @@ function DatabaseView({db,onChange,openRow,onDelete,onDuplicate}){
           <div className="mi-tx">Delete property</div></div></Fragment>}
     </div></Popup>;
 
-  /* ============ TABLE ============ */
-  function TableV(){
-    return <div className="tbl"><table><thead><tr>
-      <th className="row-num"> </th>
-      {db.props.map(p=><th key={p.id}>
-        <div className="th-in" onClick={e=>setPropMenu({rect:e.currentTarget.getBoundingClientRect(),prop:p})}>
-          <span>{PROP_TYPES.find(t=>t[0]===p.type)?.[2]||'≡'}</span>{p.name}</div></th>)}
-      <th className="add-col" onClick={e=>setAddProp(e.currentTarget.getBoundingClientRect())}>
-        <Ic n="plus" style={{width:14,height:14,margin:'0 auto'}}/></th>
-    </tr></thead><tbody>
-      {rows.map((r,i)=><tr key={r.id}>
-        <td className="row-num">{i+1}</td>
-        {db.props.map((p,pi)=><td key={p.id} className="cell">
-          {pi===0
-            ? <div style={{display:'flex',alignItems:'center'}}>
-                <span style={{padding:'0 4px 0 8px',cursor:'pointer'}}
-                  onClick={()=>openRow(db,r.id)}>{r.icon}</span>
-                <div style={{flex:1}}><PropCell prop={p} row={r}
-                  onSet={v=>setCell(r.id,p.id,v)} onProp={setProp}/></div>
-                <button className="db-tool" style={{padding:'2px 6px',margin:'0 4px'}}
-                  onClick={()=>openRow(db,r.id)}>Open</button>
-              </div>
-            : <PropCell prop={p} row={r} onSet={v=>setCell(r.id,p.id,v)} onProp={setProp}/>}
-        </td>)}
-        <td/>
-      </tr>)}
-    </tbody></table>
-    <div className="db-addrow" onClick={()=>addRow()}><Ic n="plus"/>New row</div>
-    </div>;
-  }
-
-  /* ============ BOARD ============ */
-  function BoardV(){
-    const gp=db.props.find(p=>p.id===view.groupProp)
-      ||db.props.find(p=>p.type==='status'||p.type==='select');
-    if(!gp) return <div className="empty-state">Add a Select or Status property to use Board view.</div>;
-    const [bdrag,setBdrag]=useState(null);
-    const opts=[...(gp.options||[]),{id:'__none',name:'No '+gp.name,color:'default'}];
-    return <div className="board">
-      {opts.map(o=>{
-        const cards=rows.filter(r=>(r.cells[gp.id]||'__none')===o.id);
-        return <div key={o.id} className="board-col"
-          onDragOver={e=>{e.preventDefault();}}
-          onDrop={e=>{ if(bdrag){ setCell(bdrag,gp.id,o.id==='__none'?'':o.id); setBdrag(null);} }}>
-          <div className="board-col-h">
-            <span className="chip" style={{background:colorVar(o.color)}}>{o.name}</span>
-            <span className="cnt">{cards.length}</span></div>
-          <div className="board-cards">
-            {cards.map(r=><div key={r.id} className={cx('board-card',bdrag===r.id&&'dragging')}
-              draggable onDragStart={()=>setBdrag(r.id)} onDragEnd={()=>setBdrag(null)}
-              onClick={()=>openRow(db,r.id)}>
-              <div className="bc-title">{r.icon} {r.cells.p_title||'Untitled'}</div>
-              <div className="bc-props">
-                {db.props.filter(p=>p.id!==gp.id&&p.type!=='title').map(p=>{
-                  const v=r.cells[p.id]; if(!v)return null;
-                  if(p.type==='select'||p.type==='status'){
-                    const op=(p.options||[]).find(x=>x.id===v); if(!op)return null;
-                    return <span key={p.id} className="chip"
-                      style={{background:colorVar(op.color)}}>{op.name}</span>;
-                  }
-                  if(p.type==='date')return <span key={p.id} className="chip"
-                    style={{background:'var(--c-default)'}}>📅 {fmtDate(v)}</span>;
-                  if(p.type==='person')return <span key={p.id} className="chip"
-                    style={{background:'var(--c-default)'}}>👤 {v}</span>;
-                  if(p.type==='checkbox')return <span key={p.id} className="chip"
-                    style={{background:'var(--c-default)'}}>{v?'☑':'☐'} {p.name}</span>;
-                  return null;
-                })}
-              </div></div>)}
-            <div className="board-add" onClick={()=>{ const r=addRow({[gp.id]:o.id==='__none'?'':o.id});
-              openRow(db,r.id); }}><Ic n="plus" style={{width:14,height:14}}/>New</div>
-          </div></div>;
-      })}
-    </div>;
-  }
-
-  /* ============ GALLERY ============ */
-  function GalleryV(){
-    return <div><div className="gallery">
-      {rows.map(r=><div key={r.id} className="gcard" onClick={()=>openRow(db,r.id)}>
-        <div className="gc-cover" style={{background:'var(--bg-input)'}}>{r.icon||'📄'}</div>
-        <div className="gc-body">
-          <div className="gc-title">{r.cells.p_title||'Untitled'}</div>
-          <div className="bc-props">
-            {db.props.filter(p=>p.type!=='title').slice(0,3).map(p=>{
-              const v=r.cells[p.id]; if(!v)return null;
-              if(p.type==='select'||p.type==='status'){
-                const op=(p.options||[]).find(x=>x.id===v); if(!op)return null;
-                return <span key={p.id} className="chip"
-                  style={{background:colorVar(op.color)}}>{op.name}</span>;
-              }
-              return <span key={p.id} className="chip" style={{background:'var(--c-default)'}}>
-                {p.type==='date'?fmtDate(v):(''+v)}</span>;
-            })}
-          </div></div></div>)}
-    </div>
-    <div className="db-addrow" style={{border:'none'}} onClick={()=>{const r=addRow();openRow(db,r.id);}}>
-      <Ic n="plus"/>New card</div></div>;
-  }
-
-  /* ============ LIST ============ */
-  function ListV(){
-    return <div><div className="listv">
-      {rows.map(r=><div key={r.id} className="list-item" onClick={()=>openRow(db,r.id)}>
-        <span>{r.icon||'📄'}</span>
-        <span className="li-title">{r.cells.p_title||'Untitled'}</span>
-        <div className="li-props">
-          {db.props.filter(p=>p.type!=='title').slice(0,3).map(p=>{
-            const v=r.cells[p.id]; if(!v)return null;
-            if(p.type==='select'||p.type==='status'){
-              const op=(p.options||[]).find(x=>x.id===v); if(!op)return null;
-              return <span key={p.id} className="chip"
-                style={{background:colorVar(op.color)}}>{op.name}</span>;
-            }
-            return <span key={p.id} style={{color:'var(--text-3)',fontSize:13}}>
-              {p.type==='date'?fmtDate(v):(''+v)}</span>;
-          })}
-        </div></div>)}
-    </div>
-    <div className="db-addrow" style={{border:'none'}} onClick={()=>{const r=addRow();openRow(db,r.id);}}>
-      <Ic n="plus"/>New</div></div>;
-  }
-
-  /* ============ CALENDAR ============ */
-  function CalendarV(){
-    const dateProp=db.props.find(p=>p.type==='date');
-    const [cur,setCur]=useState(()=>{const d=new Date();return {y:d.getFullYear(),m:d.getMonth()};});
-    if(!dateProp) return <div className="empty-state">Add a Date property to use Calendar view.</div>;
-    const first=new Date(cur.y,cur.m,1);
-    const start=new Date(first); start.setDate(1-first.getDay());
-    const cells=[]; for(let i=0;i<42;i++){const d=new Date(start);d.setDate(start.getDate()+i);cells.push(d);}
-    const tIso=todayISO();
-    const byDay={}; rows.forEach(r=>{const v=r.cells[dateProp.id];if(v){(byDay[v]=byDay[v]||[]).push(r);}});
-    return <div className="calv">
-      <div className="cal-head">
-        <b>{first.toLocaleDateString('en-US',{month:'long',year:'numeric'})}</b>
-        <button className="db-tool" onClick={()=>setCur(c=>{const m=c.m-1;
-          return m<0?{y:c.y-1,m:11}:{y:c.y,m};})}><Ic n="back"/></button>
-        <button className="db-tool" onClick={()=>{const d=new Date();
-          setCur({y:d.getFullYear(),m:d.getMonth()});}}>Today</button>
-        <button className="db-tool" onClick={()=>setCur(c=>{const m=c.m+1;
-          return m>11?{y:c.y+1,m:0}:{y:c.y,m};})}><Ic n="fwd"/></button>
-      </div>
-      <div className="cal-grid">
-        {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d=>
-          <div key={d} className="cal-dow">{d}</div>)}
-        {cells.map((d,i)=>{
-          const iso=d.toISOString().slice(0,10);
-          const evs=byDay[iso]||[];
-          return <div key={i} className={cx('cal-cell',d.getMonth()!==cur.m&&'other')}
-            onDoubleClick={()=>{const r=addRow({[dateProp.id]:iso});openRow(db,r.id);}}>
-            <div className={cx('cal-num',iso===tIso&&'today')}>{d.getDate()}</div>
-            {evs.map(r=><div key={r.id} className="cal-ev"
-              onClick={()=>openRow(db,r.id)}>{r.icon} {r.cells.p_title||'Untitled'}</div>)}
-          </div>;
-        })}
-      </div>
-      <div className="tree-empty" style={{paddingLeft:0,marginTop:6}}>
-        Double-click a day to add an entry.</div>
-    </div>;
-  }
-
   const dbCtxItems=[
     {header:'Table'},
     {label:'Rename view',action:()=>{
@@ -2435,11 +2467,13 @@ function DatabaseView({db,onChange,openRow,onDelete,onDuplicate}){
 
   return <div className="db" onContextMenu={e=>{e.preventDefault();e.stopPropagation();setDbCtx({x:e.clientX,y:e.clientY});}}>
     {bar}
-    {view.type==='table'&&<TableV/>}
-    {view.type==='board'&&<BoardV/>}
-    {view.type==='gallery'&&<GalleryV/>}
-    {view.type==='list'&&<ListV/>}
-    {view.type==='calendar'&&<CalendarV/>}
+    {view.type==='table'&&<TableV db={db} rows={rows} openRow={openRow} setCell={setCell}
+      setProp={setProp} addRow={addRow} setPropMenu={setPropMenu} setAddProp={setAddProp}/>}
+    {view.type==='board'&&<BoardV db={db} view={view} rows={rows} setCell={setCell}
+      addRow={addRow} openRow={openRow}/>}
+    {view.type==='gallery'&&<GalleryV db={db} rows={rows} openRow={openRow} addRow={addRow}/>}
+    {view.type==='list'&&<ListV db={db} rows={rows} openRow={openRow} addRow={addRow}/>}
+    {view.type==='calendar'&&<CalendarV db={db} rows={rows} addRow={addRow} openRow={openRow}/>}
     {propMenuPop}
     {addProp&&<Popup rect={addProp} onClose={()=>setAddProp(false)} width={210}>
       <div className="menu"><div className="menu-h">New property</div>
@@ -2555,10 +2589,9 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onDelete,onRec
   </Popup>;
 }
 
-function TreeItem({node,nodes,depth,currentId,expanded,toggleExp,openPage,addChild,
+function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,addChild,
   trashNode,archiveNode,onDrop,setModal,favorites,toggleFav,duplicate,exportPage,renameNode}){
-  const kids=Object.values(nodes).filter(n=>n.parentId===node.id&&!n.trashed&&!n.archived)
-    .sort((a,b)=>(a.sort||0)-(b.sort||0));
+  const kids=childrenMap[node.id]||[];
   const hasKids=kids.length>0;
   const isOpen=expanded[node.id];
   const [dragOver,setDragOver]=React.useState(false);
@@ -2617,7 +2650,7 @@ function TreeItem({node,nodes,depth,currentId,expanded,toggleExp,openPage,addChi
       </span>
     </div>
     {isOpen&&hasKids&&kids.map(k=>
-      <TreeItem key={k.id} node={k} nodes={nodes} depth={depth+1} currentId={currentId}
+      <TreeItem key={k.id} node={k} childrenMap={childrenMap} depth={depth+1} currentId={currentId}
         expanded={expanded} toggleExp={toggleExp} openPage={openPage}
         addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
         setModal={setModal} favorites={favorites} toggleFav={toggleFav}
@@ -2631,9 +2664,19 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
   trashNode,archiveNode,onDrop,addTop,setModal,workspaces,activeWorkspaceId,
   onSwitchWorkspace,onCreateWorkspace,onDeleteWorkspace,onReconnectLocal,
   toggleFav,duplicate,exportPage,renameNode,onGoHome}){
-  const roots=Object.values(nodes)
-    .filter(n=>n.parentId===null&&!n.trashed&&!n.archived)
-    .sort((a,b)=>(a.sort||0)-(b.sort||0));
+  // one O(n) pass instead of an O(n) filter per tree item — the sidebar
+  // re-renders on every store change, so this is hot
+  const childrenMap=React.useMemo(()=>{
+    const m={};
+    Object.values(nodes).forEach(n=>{
+      if(!n||n.trashed||n.archived) return;
+      const k=n.parentId||'';
+      (m[k]||(m[k]=[])).push(n);
+    });
+    Object.values(m).forEach(a=>a.sort((x,y)=>(x.sort||0)-(y.sort||0)));
+    return m;
+  },[nodes]);
+  const roots=childrenMap['']||[];
   const favNodes=favorites.map(id=>nodes[id]).filter(n=>n&&!n.trashed&&!n.archived);
   const [wsPop,setWsPop]=React.useState(null);
   const activeWs=(workspaces||[]).find(w=>w.id===activeWorkspaceId)||{id:'',name:'Workspace',type:'local'};
@@ -2688,7 +2731,7 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
       </div>
       <div className="nav">
         {roots.map(n=>
-          <TreeItem key={n.id} node={n} nodes={nodes} depth={0} currentId={currentId}
+          <TreeItem key={n.id} node={n} childrenMap={childrenMap} depth={0} currentId={currentId}
             expanded={expanded} toggleExp={toggleExp} openPage={openPage}
             addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
             setModal={setModal} favorites={favorites} toggleFav={toggleFav}
@@ -2722,6 +2765,25 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
 /* ---- Grid card (medium) ---- */
 /* ---- File preview modal ---- */
 const FP_MIN_W=280, FP_MAX_W=900, FP_DEFAULT_W=400;
+
+/* Text-file preview: uploads are blob/object URLs (not base64 data URLs), so
+   the body has to be fetched, not atob-decoded. */
+function TextFilePreview({url,maxH}){
+  const [txt,setTxt]=useState(null);
+  useEffect(()=>{
+    let alive=true;
+    setTxt(null);
+    fetch(url).then(r=>r.text()).then(t=>{ if(alive) setTxt(t); })
+      .catch(()=>{ if(alive) setTxt('Could not load the file contents.'); });
+    return ()=>{ alive=false; };
+  },[url]);
+  return <pre style={{
+    width:'100%',maxHeight:maxH,overflow:'auto',
+    background:'var(--bg-input)',borderRadius:6,padding:16,
+    fontSize:13,fontFamily:'var(--mono)',whiteSpace:'pre-wrap',wordBreak:'break-word'}}>
+    {txt==null?'Loading…':txt}
+  </pre>;
+}
 
 function FilePreviewModal({upload,onClose,onPrev,onNext,hasPrev,hasNext}){
   /* 'panel' = right-side drawer (default), 'modal' = centred overlay */
@@ -2806,12 +2868,7 @@ function FilePreviewModal({upload,onClose,onPrev,onNext,hasPrev,hasNext}){
       <audio src={upload.dataUrl} controls style={{width:'100%'}}/></div>;
     if(isPdf) return <iframe src={upload.dataUrl} title={upload.name}
       style={{width:'100%',height:maxH,border:'none',borderRadius:6}}/>;
-    if(isText) return <pre style={{
-      width:'100%',maxHeight:maxH,overflow:'auto',
-      background:'var(--bg-input)',borderRadius:6,padding:16,
-      fontSize:13,fontFamily:'var(--mono)',whiteSpace:'pre-wrap',wordBreak:'break-word'}}>
-      {atob(upload.dataUrl.split(',')[1]||'')}
-    </pre>;
+    if(isText) return <TextFilePreview url={upload.dataUrl} maxH={maxH}/>;
     return <div style={{padding:'48px 0',textAlign:'center'}}>
       <div style={{fontSize:56,marginBottom:12}}>{FILE_ICON(upload.type)}</div>
       <div style={{color:'var(--text-2)',fontSize:14,marginBottom:20}}>No preview available.</div>
@@ -3496,8 +3553,8 @@ function SearchModal({nodes,openPage,onClose}){
   const inRef=React.useRef();
   React.useEffect(()=>{inRef.current&&inRef.current.focus();},[]);
   const strip=h=>(h||'').replace(/<[^>]+>/g,'');
-  const all=Object.values(nodes).filter(n=>!n.trashed);
   const results=React.useMemo(()=>{
+    const all=Object.values(nodes).filter(n=>!n.trashed);
     const term=q.trim().toLowerCase();
     if(!term) return all.slice(0,8).map(n=>({n,snippet:''}));
     const out=[];
@@ -3513,7 +3570,7 @@ function SearchModal({nodes,openPage,onClose}){
       out.push({n,snippet});
     });
     return out.slice(0,30);
-  },[q]);
+  },[q,nodes]);
   const path=n=>{const p=[];let c=n.parentId?nodes[n.parentId]:null;
     while(c){p.unshift(c.title||'Untitled');c=c.parentId?nodes[c.parentId]:null;}
     return p.join(' / ');};
@@ -4312,7 +4369,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
         </div>
         <div className="set-row" style={{borderBottom:'none'}}>
           <div className="sr-l"><b>About</b></div>
-          <span style={{color:'var(--text-3)'}}>v2.1.1</span>
+          <span style={{color:'var(--text-3)'}}>{APP_VERSION?'v'+APP_VERSION:''}</span>
         </div>
       </div>
     </div>
@@ -4699,511 +4756,15 @@ function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onMan
 }
 
 /* =========================================================================
-   DOCS PAGE — full in-app documentation
-   ========================================================================= */
-const DOCS_TOC=[
-  ['overview','Overview'],
-  ['quick-start','Quick start & setup'],
-  ['workspace-types','Workspace types'],
-  ['data-on-disk','How your data is stored'],
-  ['interface','The interface'],
-  ['blocks','Blocks & the editor'],
-  ['slash','Slash commands'],
-  ['databases','Databases & views'],
-  ['pages','Pages & hierarchy'],
-  ['features','Features'],
-  ['managing','Managing workspaces'],
-  ['shortcuts','Keyboard shortcuts'],
-  ['persistence','Persistence & privacy'],
-  ['structure','Project structure'],
-  ['stack','Tech stack'],
-  ['deploy','Deployment'],
-  ['troubleshooting','Troubleshooting'],
-];
-
-function DocsPage({onBack,theme,onToggleTheme}){
-  const scroller=React.useRef(null);
-  const [active,setActive]=React.useState('overview');
-  const go=id=>{
-    const el=document.getElementById('doc-'+id);
-    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
-  };
-  React.useEffect(()=>{
-    const root=scroller.current; if(!root) return;
-    const onScroll=()=>{
-      // Bottom of the page → always highlight the last section (it can't scroll to the top).
-      if(root.scrollTop+root.clientHeight>=root.scrollHeight-4){
-        setActive(DOCS_TOC[DOCS_TOC.length-1][0]); return;
-      }
-      const rootTop=root.getBoundingClientRect().top;
-      const offset=110; // px below the sticky top bar
-      let current=DOCS_TOC[0][0];
-      for(const [id] of DOCS_TOC){
-        const el=document.getElementById('doc-'+id);
-        if(!el) continue;
-        if(el.getBoundingClientRect().top-rootTop<=offset) current=id; else break;
-      }
-      setActive(current);
-    };
-    onScroll();
-    root.addEventListener('scroll',onScroll,{passive:true});
-    return ()=>root.removeEventListener('scroll',onScroll);
-  },[]);
-  const H=({id,children})=><h2 id={'doc-'+id} className="docs-h2">{children}</h2>;
-
-  return <div className="docs-page">
-    <div className="docs-top">
-      <button className="docs-back" onClick={onBack} title="Back to homepage">
-        <Ic n="back" style={{width:16,height:16}}/> Back
-      </button>
-      <div className="docs-top-brand">
-        <span className="home-nav-mark">◧</span>
-        <span className="home-nav-title">Workspace</span>
-        <span className="docs-top-tag">Docs</span>
-      </div>
-      <div className="docs-top-actions">
-        <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
-          target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
-          <svg viewBox="0 0 16 16" width="17" height="17" fill="currentColor" aria-hidden="true">
-            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
-          </svg>
-        </a>
-        <button type="button" role="switch" aria-checked={theme==='dark'}
-          className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
-          title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
-          aria-label={theme==='dark'?'Switch to light mode':'Switch to dark mode'}>
-          <Ic n="sun" style={{width:13,height:13}}/>
-          <Ic n="moon" style={{width:13,height:13}}/>
-          <span className="theme-switch-knob"/>
-        </button>
-      </div>
-    </div>
-
-    <div className="docs-body">
-      <aside className="docs-toc">
-        <div className="docs-toc-title">On this page</div>
-        {DOCS_TOC.map(([id,label])=>
-          <button key={id} className={cx('docs-toc-link',active===id&&'on')}
-            onClick={()=>go(id)}>{label}</button>)}
-      </aside>
-
-      <main className="docs-main" ref={scroller}>
-        <div className="docs-content">
-          <div className="docs-hero">
-            <h1 className="docs-title">Workspace documentation</h1>
-            <p className="docs-lead">
-              A fast, block-based, Notion-style workspace built with <b>Vite + React 18</b>.
-              No accounts and no backend — everything you write is stored as ordinary folders
-              and Markdown files, either on your computer or mirrored to your Google Drive.
-            </p>
-            <div className="docs-badges">
-              <span className="docs-badge">Version 2.1.1</span>
-              <span className="docs-badge">React 18 · Vite 6</span>
-              <span className="docs-badge">Plain Markdown storage</span>
-            </div>
-          </div>
-
-          <H id="overview">Overview</H>
-          <p className="docs-p">Workspace is a single place for docs, wikis, tasks and databases.
-            Its defining idea: <b>your data is just files</b>. Pages are plain <code>.md</code> files
-            with a little YAML frontmatter, and the page hierarchy is mirrored as nested folders — so
-            your notes stay readable and usable even if this app goes away.</p>
-          <ul className="docs-list">
-            <li><b>No account, no login, no cloud lock-in</b> — nothing is sent anywhere except (optionally) your own Google Drive.</li>
-            <li><b>Two workspace types</b> — a Local folder (via the File System Access API) or Google Drive.</li>
-            <li><b>Block editor</b> — text, headings, to-dos, lists, toggles, quotes, callouts, dividers, code, images and file attachments.</li>
-            <li><b>Multi-view databases</b> — table, board, gallery, list and calendar.</li>
-            <li><b>Nested pages, slash commands, search, favorites, trash &amp; archive, templates, dark mode and keyboard shortcuts.</b></li>
-            <li><b>Import</b> — bring in <code>.docx</code> files.</li>
-          </ul>
-
-          <H id="quick-start">Quick start &amp; setup</H>
-          <p className="docs-p">You need <b>Node.js 18+</b>. Clone the repository, install dependencies, and start the dev server:</p>
-          <pre className="docs-code"><code>{`git clone https://github.com/MohanViswagnaMR/Workspace.git
-cd Workspace
-npm install
-npm run dev`}</code></pre>
-          <p className="docs-p">Open <code>http://localhost:5173</code> and pick <b>Local folder</b> or <b>Google Drive</b> from the homepage.</p>
-          <table className="docs-table"><thead><tr><th>Command</th><th>What it does</th></tr></thead><tbody>
-            <tr><td><code>npm run dev</code></td><td>Start the dev server with hot reload (port 5173)</td></tr>
-            <tr><td><code>npm run build</code></td><td>Production build into <code>dist/</code></td></tr>
-            <tr><td><code>npm run preview</code></td><td>Preview the production build locally</td></tr>
-          </tbody></table>
-          <div className="docs-note">
-            <b>Browser support:</b> Local folders require a Chromium browser (Chrome, Edge, Brave)
-            because they use the File System Access API. Google Drive works in any modern browser.
-          </div>
-
-          <H id="workspace-types">Workspace types</H>
-          <div className="docs-grid2">
-            <div className="docs-card">
-              <div className="docs-card-h">💻 Local folder</div>
-              <p>Saved on your computer via the File System Access API. Pick a location and the app
-              creates a folder you fully own. The directory handle is cached in IndexedDB; Chromium
-              asks you to re-grant access once per session (click <b>Reconnect</b>).</p>
-            </div>
-            <div className="docs-card">
-              <div className="docs-card-h">📁 Google Drive</div>
-              <p>A real, browsable folder in your Drive that mirrors the exact same layout. Uses the
-              <code>drive.file</code> OAuth scope so files are editable directly in Drive. The token
-              lives in <code>sessionStorage</code>; sign in again when it expires.</p>
-            </div>
-          </div>
-
-          <H id="data-on-disk">How your data is stored</H>
-          <p className="docs-p">Each workspace is a self-describing folder tree. Pages with children become
-            folders holding a <code>master page.md</code>; leaf pages are single <code>.md</code> files.
-            Ordering and metadata live in each file's YAML frontmatter. There is <b>no JSON</b> anywhere in your data.</p>
-          <pre className="docs-code"><code>{`My Workspace/                 (the folder you picked — its name is the title)
-├── Upload/                   uploaded images & file attachments
-│   └── sunset.jpg
-├── info.md                   appearance settings + description
-├── trash/                    trashed pages
-├── archive/                  archived pages
-└── Space/                    all top-level pages
-    ├── Meeting Notes.md      a page with no children
-    └── Homework/             a page WITH children → a folder
-        ├── master page.md    the "Homework" page's own content
-        ├── Essay.md
-        └── Math/
-            ├── master page.md
-            └── Problem set 1.md`}</code></pre>
-          <p className="docs-p">A page file is readable on its own — no app required:</p>
-          <pre className="docs-code"><code>{`---
-id: n_start
-title: Getting Started
-icon: 📓
-order: 0
-type: page
-favorite: true
----
-
-# 📓 Getting Started
-
-Welcome to your **connected workspace**.
-
-> 💡 Callouts are blockquotes with a leading emoji.
-
-- [x] To-dos are GitHub-style checkboxes`}</code></pre>
-          <p className="docs-p">Databases keep their structure (properties, rows and views) in the frontmatter
-            <code>db:</code> block and render a readable Markdown table in the body.</p>
-
-          <H id="interface">The interface</H>
-          <ul className="docs-list">
-            <li><b>Homepage</b> — a top navbar (logo, Docs, Manage workspaces, GitHub), your connected workspaces, a Google&nbsp;Drive connection cloud, connect panels, and a footer with a light/dark switch.</li>
-            <li><b>Sidebar</b> — the workspace switcher, a glowing <b>New page</b> button, Search &amp; Home, Favorites, your page tree, and Templates / Import / Storage / Archive / Trash. Settings and Close workspace sit at the bottom.</li>
-            <li><b>Topbar</b> — breadcrumbs, favorite toggle, share, and the page menu.</li>
-            <li><b>Editor</b> — the block canvas where you write. Hover the left margin of any line to drag it, or click <b>⊕</b> to add a block.</li>
-          </ul>
-
-          <H id="blocks">Blocks &amp; the editor</H>
-          <p className="docs-p">Everything you see is a <b>block</b>. Type <code>/</code> on an empty line to insert one,
-            or use Markdown-style shortcuts (e.g. <code>#</code> + space for a heading). Available block types:</p>
-          <div className="docs-chips">
-            {CMDS.filter(c=>c.g!=='Database').map(c=>
-              <span key={c.id} className="docs-chip"><span className="docs-chip-ic">{c.ic}</span>{c.label}</span>)}
-          </div>
-          <p className="docs-p">Inline formatting supports <b>bold</b>, <i>italic</i>, underline, strikethrough and
-            <code>inline code</code> (see shortcuts below).</p>
-
-          <H id="slash">Slash commands</H>
-          <p className="docs-p">Press <kbd className="docs-kbd">/</kbd> at the start of an empty block to open the
-            block menu, then type to filter. Commands are grouped into <b>Basic</b>, <b>Database</b> and <b>Media</b>.
-            The same menu is how you insert a database view or an embedded sub-page.</p>
-
-          <H id="databases">Databases &amp; views</H>
-          <p className="docs-p">A database is a collection of rows with typed properties, viewable five ways.
-            Add one from the slash menu, then switch or add views on the fly:</p>
-          <div className="docs-grid">
-            {CMDS.filter(c=>c.g==='Database').map(c=>
-              <div key={c.id} className="docs-mini"><span className="docs-mini-ic">{c.ic}</span>
-                <div><b>{c.label.replace(' view','')}</b><small>{c.desc}</small></div></div>)}
-          </div>
-          <p className="docs-p">Properties, rows and view configuration are serialized into the page's
-            <code>db:</code> frontmatter, and a plain Markdown table is written in the body so the data
-            stays human-readable outside the app.</p>
-
-          <H id="pages">Pages &amp; hierarchy</H>
-          <ul className="docs-list">
-            <li><b>Infinite nesting</b> — any page can contain sub-pages; the tree mirrors 1:1 to nested folders on disk.</li>
-            <li><b>Drag to reorder / nest</b> — drag pages in the sidebar to reorder them or drop one inside another.</li>
-            <li><b>Icons &amp; covers</b> — give pages an emoji icon; ordering is stored per file as <code>order</code>.</li>
-            <li><b>Embedded sub-pages</b> — the <b>Page</b> block links a child page inline within a parent.</li>
-          </ul>
-
-          <H id="features">Features</H>
-          <div className="docs-grid2">
-            <div className="docs-card"><div className="docs-card-h">🔍 Search</div><p>Instant fuzzy search across every page — open it with <kbd className="docs-kbd">⌘K</kbd>.</p></div>
-            <div className="docs-card"><div className="docs-card-h">⭐ Favorites</div><p>Pin pages to a Favorites section at the top of the sidebar.</p></div>
-            <div className="docs-card"><div className="docs-card-h">🗑️ Trash &amp; Archive</div><p>Deleted pages go to Trash (restore or purge); Archive hides pages you want to keep but not see. Both are full pages.</p></div>
-            <div className="docs-card"><div className="docs-card-h">🧩 Templates</div><p>Reusable page starters, available as a dedicated Templates page.</p></div>
-            <div className="docs-card"><div className="docs-card-h">📥 Import</div><p>Bring in <code>.docx</code> documents — converted to blocks via mammoth.</p></div>
-            <div className="docs-card"><div className="docs-card-h">📎 Storage</div><p>Browse every uploaded image and attachment in grid, gallery or list view.</p></div>
-            <div className="docs-card"><div className="docs-card-h">🌙 Dark mode &amp; accents</div><p>Light/dark themes plus 7 accent colours (indigo, blue, ocean, forest, rose, sunset, violet). Default is dark + violet.</p></div>
-            <div className="docs-card"><div className="docs-card-h">⌨️ Shortcuts</div><p>A full keyboard-driven flow — see the table below.</p></div>
-          </div>
-
-          <H id="managing">Managing workspaces</H>
-          <ul className="docs-list">
-            <li><b>Connect</b> — create a new workspace, open an existing folder, or open one from Drive.</li>
-            <li><b>Drive cloud icon</b> — next to “Your workspaces”; green ✓ when connected, grey ✗ when not. Click it to connect/refresh.</li>
-            <li><b>Manage workspaces</b> (navbar) — lists every Google Drive workspace with <b>Open</b>, <b>Edit</b> and <b>Delete</b>.</li>
-            <li><b>Edit</b> — rename a Drive workspace (renames the Drive folder) and change its description (stored in <code>info.md</code>).</li>
-            <li><b>Delete</b> — permanently removes the whole Drive folder and its files. This cannot be undone.</li>
-            <li><b>Unlink</b> — removes a workspace from your list without touching the underlying files.</li>
-          </ul>
-
-          <H id="shortcuts">Keyboard shortcuts</H>
-          <table className="docs-table"><thead><tr><th>Action</th><th>Shortcut</th></tr></thead><tbody>
-            {SHORTCUTS.map(([a,k])=><tr key={a}><td>{a}</td><td><kbd className="docs-kbd">{fmtShortcut(k)}</kbd></td></tr>)}
-          </tbody></table>
-
-          <H id="persistence">Persistence &amp; privacy</H>
-          <ul className="docs-list">
-            <li><b>Cookies</b> hold only small pointers — the active workspace (type, name, Drive folder id) and your theme/accent. Never workspace data.</li>
-            <li><b>IndexedDB</b> stores the Local folder's directory handle (it can't live in a cookie).</li>
-            <li><b>sessionStorage</b> holds the Google Drive OAuth token for the session.</li>
-            <li><b>Your content</b> only ever lives in the folder you picked — on your disk, or in your own Drive. Nothing is sent to any third-party server.</li>
-          </ul>
-
-          <H id="structure">Project structure</H>
-          <table className="docs-table"><thead><tr><th>File</th><th>Responsibility</th></tr></thead><tbody>
-            <tr><td><code>index.html</code></td><td>Boot screen and root mount point</td></tr>
-            <tr><td><code>vite.config.js</code></td><td>Vite config (vendor chunk splitting)</td></tr>
-            <tr><td><code>src/main.jsx</code></td><td>Entry point</td></tr>
-            <tr><td><code>src/App.jsx</code></td><td>Restores theme, renders the workspace</td></tr>
-            <tr><td><code>src/workspace.jsx</code></td><td>The full app: homepage, docs, editor, databases, sidebar, modals</td></tr>
-            <tr><td><code>src/markdown.js</code></td><td>Workspace ⇄ folder-of-Markdown serialization (pure)</td></tr>
-            <tr><td><code>src/localfs.js</code></td><td>Local folder storage (File System Access API + IndexedDB)</td></tr>
-            <tr><td><code>src/cloudstorage.js</code></td><td>Google Drive folder-tree mirror</td></tr>
-            <tr><td><code>src/cookies.js</code></td><td>Cookie helpers (active-workspace pointer + theme)</td></tr>
-            <tr><td><code>src/styles.css</code></td><td>Theme tokens, components, dark mode</td></tr>
-          </tbody></table>
-
-          <H id="stack">Tech stack</H>
-          <table className="docs-table"><thead><tr><th>Layer</th><th>Technology</th></tr></thead><tbody>
-            <tr><td>Build tool</td><td>Vite 6</td></tr>
-            <tr><td>UI</td><td>React 18</td></tr>
-            <tr><td>Storage</td><td>File System Access API · Google Drive API</td></tr>
-            <tr><td>Frontmatter</td><td>js-yaml</td></tr>
-            <tr><td>Icons</td><td>lucide-react</td></tr>
-            <tr><td>Import</td><td>mammoth (<code>.docx</code> → blocks)</td></tr>
-          </tbody></table>
-
-          <H id="deploy">Deployment</H>
-          <p className="docs-p">The built <code>dist/</code> folder is a static site — host it anywhere (Vercel, Netlify,
-            GitHub Pages, any static host). To use Google Drive on a deployed site:</p>
-          <ol className="docs-list">
-            <li>Add the site's origin as an <b>Authorised JavaScript origin</b> on your Google Cloud OAuth client.</li>
-            <li>Ensure the <b>Google Drive API</b> is enabled in the project.</li>
-            <li>If the OAuth app is in <b>Testing</b>, add your email as a Test User.</li>
-          </ol>
-
-          <H id="troubleshooting">Troubleshooting</H>
-          <div className="docs-grid2">
-            <div className="docs-card"><div className="docs-card-h">“Local folders need Chrome”</div><p>The File System Access API is Chromium-only. Use Chrome/Edge/Brave, or use a Google Drive workspace instead.</p></div>
-            <div className="docs-card"><div className="docs-card-h">Drive says “not connected”</div><p>Your session token expired. Click the cloud icon (or Manage workspaces) to reconnect — connecting needs a click because the OAuth popup requires a user gesture.</p></div>
-            <div className="docs-card"><div className="docs-card-h">Drive is slow to open</div><p>Reading a Drive workspace makes one network request per file; large workspaces take longer than local ones. This is expected.</p></div>
-            <div className="docs-card"><div className="docs-card-h">A local workspace needs access</div><p>Chromium re-asks for folder permission each session — click <b>Reconnect</b> / <b>Open</b> to re-grant.</p></div>
-          </div>
-
-          <div className="docs-foot">
-            © {new Date().getFullYear()} Workspace · Mohan Viswagna MR ·{' '}
-            <a href="https://github.com/MohanViswagnaMR/Workspace" target="_blank" rel="noopener noreferrer">GitHub</a>
-          </div>
-        </div>
-      </main>
-    </div>
-  </div>;
-}
-
-/* =========================================================================
-   ABOUT & SELF-HOSTING — simple single-column site pages (docs styling)
-   ========================================================================= */
-function SitePage({tag,onBack,theme,onToggleTheme,children}){
-  return <div className="docs-page">
-    <div className="docs-top">
-      <button className="docs-back" onClick={onBack} title="Back">
-        <Ic n="back" style={{width:16,height:16}}/> Back
-      </button>
-      <div className="docs-top-brand">
-        <span className="home-nav-mark">◧</span>
-        <span className="home-nav-title">Workspace</span>
-        <span className="docs-top-tag">{tag}</span>
-      </div>
-      <div className="docs-top-actions">
-        <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
-          target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
-          <GitHubIcon/>
-        </a>
-        <button type="button" role="switch" aria-checked={theme==='dark'}
-          className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
-          title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
-          aria-label={theme==='dark'?'Switch to light mode':'Switch to dark mode'}>
-          <Ic n="sun" style={{width:13,height:13}}/>
-          <Ic n="moon" style={{width:13,height:13}}/>
-          <span className="theme-switch-knob"/>
-        </button>
-      </div>
-    </div>
-    <div className="docs-body">
-      <main className="docs-main">
-        <div className="docs-content">
-          {children}
-          <div className="docs-foot">
-            © {new Date().getFullYear()} Workspace · Mohan Viswagna MR ·{' '}
-            <a href="https://github.com/MohanViswagnaMR/Workspace" target="_blank" rel="noopener noreferrer">GitHub</a>
-          </div>
-        </div>
-      </main>
-    </div>
-  </div>;
-}
-
-function AboutPage({onBack,theme,onToggleTheme,onDocs,onSelfHost}){
-  return <SitePage tag="About" onBack={onBack} theme={theme} onToggleTheme={onToggleTheme}>
-    <div className="docs-hero">
-      <h1 className="docs-title">About Workspace</h1>
-      <p className="docs-lead">
-        A fast, block-based, Notion-style workspace with a simple promise:
-        <b> your notes are yours</b> — as plain, readable files, with no account
-        and no backend between you and your own words.
-      </p>
-    </div>
-
-    <h2 className="docs-h2">Why it exists</h2>
-    <p className="docs-p">
-      Modern note apps are wonderful to write in but keep your work inside their
-      own databases, behind their own accounts. If the app changes, breaks, or
-      shuts down, your notes go with it. Workspace keeps the writing experience —
-      blocks, slash commands, nested pages, databases with views — but stores
-      everything as ordinary folders and Markdown files that outlive any app.
-    </p>
-
-    <h2 className="docs-h2">The principles</h2>
-    <ul className="docs-list">
-      <li><b>Files over databases.</b> Every page is a plain <code>.md</code> file with a
-        little YAML frontmatter; folders mirror the page hierarchy. No JSON, no
-        proprietary formats.</li>
-      <li><b>No accounts.</b> There is nothing to sign up for. Your workspace lives in a
-        folder on your computer, or — if you choose — a real, browsable folder in your
-        own Google Drive.</li>
-      <li><b>No lock-in.</b> Stop using the app any day and your notes remain a tidy
-        folder of Markdown, readable in any editor, importable anywhere.</li>
-      <li><b>Local-first.</b> Installable as an app; local workspaces work fully
-        offline. The network is only used for Google Drive, if you connect it.</li>
-    </ul>
-
-    <h2 className="docs-h2">What's inside</h2>
-    <p className="docs-p">
-      A block editor (text, headings, to-dos, lists, toggles, quotes, callouts, code,
-      images, files), infinite nested pages, multi-view databases (table, board,
-      gallery, list, calendar), instant search, favorites, templates, trash &amp;
-      archive, dark mode, and <code>.docx</code> import. See the{' '}
-      <button type="button" className="home-demo-link" onClick={onDocs}>full documentation</button>.
-    </p>
-
-    <h2 className="docs-h2">Open source &amp; self-hostable</h2>
-    <p className="docs-p">
-      Workspace is a static site — a Vite + React app with no server of its own. The
-      source is on <a href="https://github.com/MohanViswagnaMR/Workspace" target="_blank"
-      rel="noopener noreferrer">GitHub</a>, and you can{' '}
-      <button type="button" className="home-demo-link" onClick={onSelfHost}>host it yourself</button>{' '}
-      on any static host.
-    </p>
-
-    <h2 className="docs-h2">Tech</h2>
-    <table className="docs-table"><tbody>
-      <tr><td>Build tool</td><td>Vite 6</td></tr>
-      <tr><td>UI</td><td>React 18</td></tr>
-      <tr><td>Storage</td><td>File System Access API · Google Drive API</td></tr>
-      <tr><td>Frontmatter</td><td>js-yaml</td></tr>
-      <tr><td>Icons</td><td>lucide-react</td></tr>
-      <tr><td>Import</td><td>mammoth (<code>.docx</code> → blocks)</td></tr>
-    </tbody></table>
-  </SitePage>;
-}
-
-function SelfHostPage({onBack,theme,onToggleTheme}){
-  return <SitePage tag="Self-hosting" onBack={onBack} theme={theme} onToggleTheme={onToggleTheme}>
-    <div className="docs-hero">
-      <h1 className="docs-title">Self-hosting Workspace</h1>
-      <p className="docs-lead">
-        Workspace has no backend — the production build is a folder of static files.
-        If you can serve HTML, you can host it: Vercel, Netlify, GitHub Pages, an
-        nginx box, a Raspberry Pi.
-      </p>
-    </div>
-
-    <h2 className="docs-h2">1 · Build</h2>
-    <pre className="docs-code"><code>{`git clone https://github.com/MohanViswagnaMR/Workspace.git
-cd Workspace
-npm install
-npm run build     # → static site in dist/`}</code></pre>
-    <p className="docs-p">
-      That's the whole build. <code>npm run preview</code> serves <code>dist/</code> locally
-      so you can check it (including the PWA service worker) before deploying.
-    </p>
-
-    <h2 className="docs-h2">2 · Deploy the <code>dist/</code> folder</h2>
-    <ul className="docs-list">
-      <li><b>Vercel / Netlify</b> — point it at the repo; build command <code>npm run build</code>,
-        output directory <code>dist</code>. Nothing else to configure.</li>
-      <li><b>GitHub Pages</b> — publish the <code>dist/</code> folder (e.g. with an Actions
-        workflow). Prefer a custom domain or user site served from the root — see the
-        sub-path note below.</li>
-      <li><b>Your own server</b> — copy <code>dist/</code> behind nginx/Apache/Caddy. It's
-        static files; no Node process is needed in production. Serve over <b>HTTPS</b> —
-        the File System Access API, service worker, and Google sign-in all require a
-        secure origin (plain <code>http://localhost</code> is fine for testing).</li>
-    </ul>
-    <p className="docs-note">
-      Local-folder workspaces and the offline PWA work out of the box on any HTTPS
-      host — no configuration at all. Google Drive is the only feature that needs setup.
-    </p>
-
-    <h2 className="docs-h2">3 · (Optional) Google Drive on your domain</h2>
-    <p className="docs-p">
-      Drive workspaces use Google's browser OAuth flow with a client ID that is public
-      by design (there is no secret). To run it on your own domain:
-    </p>
-    <ul className="docs-list">
-      <li>In <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer">Google
-        Cloud Console</a>, create a project and enable the <b>Google Drive API</b>.</li>
-      <li>Create an <b>OAuth client ID</b> of type <i>Web application</i> and add your
-        site's origin (e.g. <code>https://notes.example.com</code>) as an
-        <b> Authorised JavaScript origin</b>.</li>
-      <li>Put your client ID in <code>src/cloudstorage.js</code> (the
-        <code> GDRIVE_CLIENT_ID</code> constant at the top) and rebuild.</li>
-    </ul>
-    <p className="docs-p">
-      Skip all of this if you only want local-folder workspaces — the Drive option
-      simply won't authenticate.
-    </p>
-
-    <h2 className="docs-h2">Deploying under a sub-path</h2>
-    <p className="docs-p">
-      The manifest and service worker assume the site is served from the origin root
-      (<code>/</code>). If you deploy under a sub-path (e.g.
-      <code> example.com/workspace/</code>), set Vite's <code>base</code> in
-      <code> vite.config.js</code> and adjust the paths in
-      <code> public/manifest.webmanifest</code>, <code>public/sw.js</code>, and the
-      service-worker registration in <code>src/main.jsx</code> to match.
-    </p>
-
-    <h2 className="docs-h2">Updating</h2>
-    <p className="docs-p">
-      Pull the new version, <code>npm run build</code>, redeploy <code>dist/</code>.
-      The service worker uses the classic lifecycle: a new version activates once all
-      tabs are closed — no forced reloads, and your notes are never touched (they live
-      in your folders, not on the site).
-    </p>
-  </SitePage>;
-}
-
-/* =========================================================================
    WORKSPACE  (the app surface)
    ========================================================================= */
+/* Docs / About / Self-hosting are website pages most sessions never open —
+   they load as a separate chunk on first visit (see sitepages.jsx). */
+const DocsPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.DocsPage})));
+const AboutPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.AboutPage})));
+const SelfHostPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.SelfHostPage})));
+const BootScreen=()=><div className="app-loading"><div className="app-loading-logo">◧</div><div className="app-loading-bar"><i /></div></div>;
+
 function Workspace(){
   const [store,setStore]=React.useState(null);   // connected workspace, or null → home
   const [booting,setBooting]=React.useState(true);
@@ -5600,15 +5161,21 @@ function Workspace(){
     }
   };
 
-  if(booting) return <div className="app-loading"><div className="app-loading-logo">◧</div><div className="app-loading-bar"><i /></div></div>;
+  if(booting) return <BootScreen/>;
 
   if(sitePage==='docs')
-    return <DocsPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>;
+    return <React.Suspense fallback={<BootScreen/>}>
+      <DocsPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>
+    </React.Suspense>;
   if(sitePage==='about')
-    return <AboutPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}
-      onDocs={()=>setSitePage('docs')} onSelfHost={()=>setSitePage('selfhost')}/>;
+    return <React.Suspense fallback={<BootScreen/>}>
+      <AboutPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}
+        onDocs={()=>setSitePage('docs')} onSelfHost={()=>setSitePage('selfhost')}/>
+    </React.Suspense>;
   if(sitePage==='selfhost')
-    return <SelfHostPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>;
+    return <React.Suspense fallback={<BootScreen/>}>
+      <SelfHostPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>
+    </React.Suspense>;
 
   /* First visit (no workspace data in this browser) → the Welcome landing.
      Any browser memory — known workspaces, an active pointer, a live Drive
@@ -5786,8 +5353,8 @@ function Workspace(){
     const url=URL.createObjectURL(file);
     let localName=null;
     if(active.type==='local'){
-      const dataUrl=await readAsDataUrl(file);
-      localName=await writeLocalUploadFile(active.id,file.name,dataUrl).catch(()=>null);
+      // write the File object directly — no base64 round trip in memory
+      localName=await writeLocalUploadFile(active.id,file.name,file).catch(()=>null);
     }else if(active.type==='gdrive'){
       const safe=Date.now()+'_'+(file.name||'file').replace(/[^a-zA-Z0-9._-]/g,'_');
       localName=await writeDriveUpload(active.folderId,safe,file).catch(()=>null);
@@ -6137,4 +5704,6 @@ function mergePagesToHTML(tree){
 }
 
 /* ---- exported as the authenticated workspace surface ---- */
+/* Named exports are shared with the lazy-loaded site pages (sitepages.jsx). */
+export { CMDS, SHORTCUTS, fmtShortcut, cx, Ic, APP_VERSION, GitHubIcon };
 export default Workspace;
