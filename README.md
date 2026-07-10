@@ -1,6 +1,6 @@
 # Workspace
 
-**Version 2.3.0**
+**Version 2.4.0**
 
 A fast, block-based, Notion-style workspace built with **Vite + React 18**. There
 are no accounts and no backend. Everything you write is stored as **ordinary
@@ -28,10 +28,20 @@ away.
   dividers, code blocks, images and file attachments. Inline formatting via a
   right-click menu: bold, italic, underline, strikethrough, code, text colour
   and highlight; bare URLs become clickable links automatically.
-- **Nested pages** — infinite page hierarchy, mirrored as nested folders on disk.
-- **Multi-view databases** — table, board, gallery, list and calendar views.
+- **Nested pages & folders** — infinite page hierarchy, mirrored as nested
+  folders on disk; folders are plain directories that group pages without
+  content of their own.
+- **Two kinds of tables** — a **simple table** (plain rows & columns, stored
+  as a GFM markdown table) and a **smart table** (multi-view database with
+  table, board, gallery, list and calendar views, where every row is a page).
+- **Per-page table of contents** — a floating "On this page" rail with
+  click-to-scroll and scrollspy, toggled from the page menu.
+- **Templates you can share** — save any page as a template, import templates
+  from `.md` files, or connect a public GitHub repo as a template repository.
+- **Appearance control** — 7 accent colors, font size, and Google Fonts
+  imported by name, applied across the whole workspace.
 - **Slash commands, instant search, favorites, trash & archive, templates,
-  dark mode and keyboard shortcuts.**
+  dark mode, live word/paragraph/block counts and keyboard shortcuts.**
 - **Installable PWA** — install it to your desktop or phone and launch it in its
   own window; a service worker caches the app shell so it opens offline (your
   data is already local files or Drive).
@@ -74,7 +84,9 @@ My Workspace/                 (the folder you picked — its name is the workspa
 │   └── sunset.jpg
 └── Space/                    all top-level pages
     ├── Meeting Notes.md      a page with no children
-    └── Homework/             a page WITH children → a folder
+    ├── Projects/             a directory WITHOUT master page.md → a FOLDER
+    │   └── Roadmap.md
+    └── Homework/             a page WITH children (has master page.md)
         ├── master page.md    the "Homework" page's own content
         ├── Essay.md
         └── Math/
@@ -196,11 +208,12 @@ client, and ensure the Google Drive API is enabled.
 
 ## Versions
 
-Current release: **2.3.0**. Full release notes live in the [`versions/`](./versions)
+Current release: **2.4.0**. Full release notes live in the [`versions/`](./versions)
 folder.
 
 | Version | Date       | Highlights                                                        |
 |---------|------------|-------------------------------------------------------------------|
+| [2.4.0](./versions/v2.4.0.md) | 2026-07-11 | Folders, tables & customization — **folders** (bare directories, no master page), **simple tables** (GFM) + **smart tables** (multi-view, rows are pages), per-page **table of contents**, custom templates + **GitHub template repositories**, sectioned Settings with font size & **Google Fonts**, md-mark default icons, icon+title header row, word/paragraph/block counts, sidebar collapse button & icon rail, multi-block turn-into fix |
 | [2.3.0](./versions/v2.3.0.md) | 2026-07-11 | Performance release — typing re-renders only the edited block (memoized editor), O(n) sidebar tree, database views keep state across edits (calendar/board fix), **Google Drive opens ~5–10× faster** (parallel I/O), lighter saves, lazy-loaded Docs/About pages (−30 KB main bundle), deferred spell-check dictionary, text-preview & upload-memory fixes |
 | [2.2.1](./versions/v2.2.1.md) | 2026-07-11 | Editor polish release — selection-aware backspace/delete, backspace merges text up (caret at the junction), slash only opens after whitespace and converts the block in place, combined right-click menu with a format toolbar on top, inline-code styling + toggle-off, **offline spell-check with inline suggestions**, undo/redo merge-duplication fix, click-empty-space adds a block, and **/bold · /italic · /red · /yellow-highlight** slash formatting commands |
 | [2.2.0](./versions/v2.2.0.md) | 2026-07-08 | First-impression release — **Welcome page** for first-time visitors (with About & Self-hosting pages) vs the classic **Start page** for returning users; one-click in-memory **demo workspace** with "Keep this workspace" conversion; version badge; empty new workspaces; subpage-only sidebar chevrons |

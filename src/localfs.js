@@ -254,10 +254,11 @@ export function revokeLocalURLs(id) {
 }
 
 /* ================================================================ read tree */
-async function _collectMd(dirHandle, relPath, out) {
+async function _collectMd(dirHandle, relPath, out, dirs) {
   for await (const [name, handle] of dirHandle.entries()) {
     if (handle.kind === 'directory') {
-      await _collectMd(handle, relPath + '/' + name, out);
+      if (dirs) dirs.push(relPath + '/' + name);
+      await _collectMd(handle, relPath + '/' + name, out, dirs);
     } else if (name.toLowerCase().endsWith('.md')) {
       const file = await handle.getFile();
       out.push({ path: relPath + '/' + name, text: await file.text() });
@@ -297,9 +298,10 @@ function _hydrateBlocks(blocks, map) {
 async function _readTreeFromHandle(id, root) {
   revokeLocalURLs(id);
   const files = [];
+  const spaceDirs = [];   // every directory under Space/ (folders may be empty)
   try {
     const space = await root.getDirectoryHandle(SPACE_DIR);
-    await _collectMd(space, SPACE_DIR, files);
+    await _collectMd(space, SPACE_DIR, files, spaceDirs);
   } catch (_) { /* no Space/ yet */ }
   try {
     const trash = await root.getDirectoryHandle(TRASH_DIR);
@@ -314,7 +316,7 @@ async function _readTreeFromHandle(id, root) {
     files.push({ path: 'info.md', text: await (await fh.getFile()).text() });
   } catch (_) { /* no info.md yet */ }
 
-  const { nodes, favorites, currentId, info } = parseFolderTree(files);
+  const { nodes, favorites, currentId, info } = parseFolderTree(files, spaceDirs);
   const { uploads, map } = await _readUploads(root, id);
 
   for (const n of Object.values(nodes)) {
@@ -327,6 +329,9 @@ async function _readTreeFromHandle(id, root) {
   // writes real differences — and still creates files that don't exist yet (e.g.
   // info.md in an older workspace).
   _treeCache[id] = new Map(files.map(f => [f.path, f.text]));
+  const masterDirs = new Set(files.filter(f => f.path.toLowerCase().endsWith('/master page.md'))
+    .map(f => f.path.split('/').slice(0, -1).join('/')));
+  _dirCache[id] = new Set(spaceDirs.filter(d => !masterDirs.has(d)));
 
   return { nodes, favorites, currentId, uploads, info };
 }
@@ -342,6 +347,7 @@ export async function readWorkspaceTree(id) {
 
 /* ================================================================ write tree */
 const _treeCache = {};        // id -> Map(path -> lastWrittenText)
+const _dirCache = {};         // id -> Set(folder-node dir paths at last save)
 const _uploadNameCache = {};  // id -> Set(upload names at last reconcile)
 const _writeTimers = {};
 
@@ -367,9 +373,19 @@ async function _doWriteTree(id, store) {
       try { await _writeFileAtPath(root, path, text); }
       catch (e) { console.warn('[localfs] write failed:', path, e.message); }
     }
-    // 3) remove folders that became empty — only a deletion can empty one, so
-    //    skip the full-tree walk on ordinary saves
-    if (deletedAny) await _pruneEmptyDirs(root, SPACE_DIR).catch(() => {});
+    // 3) remove directories that became empty — a file deletion or a removed
+    //    folder-node can empty one; skip the full-tree walk on ordinary saves
+    const planDirs = new Set(plan.dirs || []);
+    const prevDirs = _dirCache[id] || new Set();
+    const dirsGone = [...prevDirs].some(d => !planDirs.has(d));
+    if (deletedAny || dirsGone) await _pruneEmptyDirs(root, SPACE_DIR).catch(() => {});
+    // 3b) (re)create folder-node directories — folders have no master page.md,
+    //     so an empty one exists on disk only as a bare directory
+    for (const d of plan.dirs || []) {
+      try { await _dir(root, d.split('/'), true); }
+      catch (e) { console.warn('[localfs] mkdir failed:', d, e.message); }
+    }
+    _dirCache[id] = planDirs;
     // 4) reconcile uploads (delete files no longer referenced) — only when the
     //    referenced set changed since the last save; it walks Upload/ each time
     const uploadNames = new Set((plan.uploads || []).map(u => u.name));

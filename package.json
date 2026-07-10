@@ -1,7 +1,7 @@
 {
   "name": "workspace",
   "private": true,
-  "version": "2.3.0",
+  "version": "2.4.0",
   "type": "module",
   "description": "A Notion-style workspace stored as plain Markdown files — Vite + React",
   "scripts": {

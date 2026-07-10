@@ -18,7 +18,7 @@
              └── <child>.md …     recurses (folders for children-with-children)
 
    Each .md file is YAML frontmatter (id, title, icon, cover, order, type,
-   favorite, and — for databases — the full db structure) followed by a GFM
+   favorite, template, and — for databases — the full db structure) followed by a GFM
    body. Node hierarchy is reconstructed from the folder nesting; ordering
    from the `order` frontmatter field. No JSON is used anywhere on disk.
    ========================================================================= */
@@ -139,6 +139,10 @@ function dbToTable(db) {
   return out + '\n';
 }
 
+/* Comment line written before an inline smart table (database block) so the
+   reader can tell it apart from a simple table — both render as GFM tables. */
+const SMART_TABLE_MARK = '<!--smart-table-->';
+
 /* ---------------------------------------------------------- block → md --- */
 function blockToMd(b, nodesMap) {
   const t = htmlInlineToMd(b.html);
@@ -173,7 +177,19 @@ function blockToMd(b, nodesMap) {
       const label = (child && child.title) || 'Sub-page';
       return b.pageId ? '📄 [' + label + '](#' + b.pageId + ')\n\n' : '';
     }
-    case 'database': return dbToTable(b.db);
+    case 'table': {
+      // simple table → plain GFM table
+      const tb = b.table || { header: [''], rows: [] };
+      const esc = c => String(c ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
+      let out = '| ' + tb.header.map(esc).join(' | ') + ' |\n';
+      out += '| ' + tb.header.map(() => '---').join(' | ') + ' |\n';
+      (tb.rows || []).forEach(r => {
+        out += '| ' + tb.header.map((_, ci) => esc(r[ci] || '')).join(' | ') + ' |\n';
+      });
+      return out + '\n';
+    }
+    // the marker keeps smart tables distinguishable from simple ones on read
+    case 'database': return SMART_TABLE_MARK + '\n' + dbToTable(b.db);
     case 'text':
     default: return t ? t + '\n\n' : '\n';
   }
@@ -192,11 +208,15 @@ function bodyToBlocks(body) {
   const lines = (body || '').split('\n');
   const blocks = [];
   let i = 0;
+  let smartNext = false;   // set by the smart-table marker comment
   const push = b => blocks.push({ id: nid(), ...b });
 
   while (i < lines.length) {
     const l = lines[i];
     const trimmed = l.trim();
+
+    // marker: the next pipe table is a smart table (inline database)
+    if (trimmed === SMART_TABLE_MARK) { smartNext = true; i++; continue; }
 
     // <details> … </details>  → toggle
     if (/^<details>/i.test(trimmed)) {
@@ -226,18 +246,22 @@ function bodyToBlocks(body) {
       continue;
     }
 
-    // pipe table → embedded database (inline DB fidelity is best-effort)
+    // pipe table → simple table block; with the marker → smart table
+    // (inline database — fidelity is best-effort)
     if (trimmed.startsWith('|')) {
       const pipe = [];
       while (i < lines.length && lines[i].trim().startsWith('|')) { pipe.push(lines[i].trim()); i++; }
-      const parse = row => row.split('|').slice(1, -1).map(c => c.trim().replace(/\\\|/g, '|'));
+      const parse = row => row.split(/(?<!\\)\|/).slice(1, -1).map(c => c.trim().replace(/\\\|/g, '|'));
       const isSep = row => !row.replace(/[|\-:\s]/g, '').length;
       const dataRows = pipe.filter(r => !isSep(r));
       if (dataRows.length >= 1) {
         const headers = parse(dataRows[0]);
         const rows = dataRows.slice(1).map(parse);
-        push(buildTableBlock(headers, rows));
+        if (smartNext) push(buildTableBlock(headers, rows));
+        else push({ type: 'table', table: { header: headers,
+          rows: rows.map(r => headers.map((_, ci) => r[ci] || '')) } });
       }
+      smartNext = false;
       continue;
     }
 
@@ -349,12 +373,14 @@ export function nodeToMarkdown(node, opts = {}) {
   const fm = {
     id: node.id,
     title: node.title || 'Untitled',
-    type: node.kind === 'database' ? 'database' : 'page',
+    type: node.kind === 'database' ? 'database' : node.kind === 'folder' ? 'folder' : 'page',
     order: node.sort || 0,
   };
   if (node.icon) fm.icon = node.icon;
   if (node.cover) fm.cover = node.cover;
   if (opts.isFavorite) fm.favorite = true;
+  if (node.template) fm.template = true;
+  if (node.toc) fm.toc = true;   // show the side table of contents
   // Trashed / archived pages live flat in trash/ or archive/ — record the flag +
   // parentId so they restore to their original place (live pages derive parentId
   // from folder nesting).
@@ -373,7 +399,7 @@ export function nodeToMarkdown(node, opts = {}) {
 export function markdownToNode(text) {
   const { meta, body } = splitFrontmatter(text);
   const id = meta.id || nid();
-  const kind = meta.type === 'database' ? 'database' : 'page';
+  const kind = meta.type === 'database' ? 'database' : meta.type === 'folder' ? 'folder' : 'page';
   const node = {
     id, kind,
     title: meta.title || 'Untitled',
@@ -384,8 +410,12 @@ export function markdownToNode(text) {
   };
   if (meta.trashed) node.trashed = true;
   if (meta.archived) node.archived = true;
+  if (meta.template) node.template = true;
+  if (meta.toc) node.toc = true;
   if (kind === 'database') {
     node.db = meta.db || emptyDb();
+  } else if (kind === 'folder') {
+    node.blocks = [];       // folders have no content of their own
   } else {
     node.blocks = bodyToBlocks(stripLeadingTitle(body));
   }
@@ -404,6 +434,9 @@ export function infoToMarkdown(info = {}) {
   };
   if (info.description) fm.description = info.description;
   if (info.pageBg) fm.pageBackground = info.pageBg;   // Upload/ filename
+  if (info.templateRepo) fm.templateRepo = info.templateRepo;   // "owner/repo" on GitHub
+  if (info.fontSize && info.fontSize !== 'default') fm.fontSize = info.fontSize;
+  if ((info.customFonts || []).length) fm.customFonts = info.customFonts;   // Google Fonts names
   const front = '---\n' + yaml.dump(fm, { lineWidth: -1, noRefs: true }) + '---\n\n';
   return front +
     '# Workspace info\n\n' +
@@ -420,6 +453,10 @@ export function markdownToInfo(text) {
     font: meta.font || 'default',
     description: meta.description || '',
     pageBg: meta.pageBackground || null,
+    templateRepo: meta.templateRepo || '',
+    fontSize: meta.fontSize || 'default',
+    customFonts: Array.isArray(meta.customFonts)
+      ? meta.customFonts.filter(f => typeof f === 'string') : [],
   };
 }
 
@@ -454,10 +491,21 @@ export function buildFolderPlan(store) {
     return name;
   };
 
+  const dirs = [];   // folder-kind directories (no master page.md inside)
   const walk = (parentKey, dirPath) => {
     for (const node of childrenOf[parentKey] || []) {
       const hasKids = (childrenOf[node.id] || []).length > 0;
       const base = slugifyTitle(node.title);
+      // A folder is a directory WITHOUT a master page.md — that absence is
+      // exactly what distinguishes it from a page-with-subpages on disk.
+      if (node.kind === 'folder') {
+        const folderName = uniqueName(dirPath, base);
+        const folderPath = dirPath + '/' + folderName;
+        usedByDir[folderPath] = new Set();
+        dirs.push(folderPath);
+        walk(node.id, folderPath);
+        continue;
+      }
       const text = nodeToMarkdown(node, { nodesMap: nodes, isFavorite: favSet.has(node.id) });
       if (hasKids) {
         const folderName = uniqueName(dirPath, base);
@@ -490,7 +538,7 @@ export function buildFolderPlan(store) {
     .filter(u => u.localName || u.dataUrl)
     .map(u => ({ name: u.localName || (slugifyTitle(u.name || 'file') || 'file'), record: u }));
 
-  return { files, uploads };
+  return { files, dirs, uploads };
 }
 
 /* Relative on-disk path of one node within its workspace folder, consistent
@@ -524,17 +572,23 @@ export function nodeDiskPath(store, nodeId) {
   for (let k = 0; k < chain.length; k++) {
     const node = chain[k];
     const parentId = k === 0 ? null : chain[k - 1].id;
-    const base = nameOf(node, parentId, k > 0); // nested node-folders reserve master page.md
+    // page-dirs reserve master page.md; folder-dirs don't have one
+    const base = nameOf(node, parentId, k > 0 && chain[k - 1].kind !== 'folder');
     const hasKids = kidsOf(node.id).length > 0;
-    segs.push(k === chain.length - 1 ? (hasKids ? base + '/master page.md' : base + '.md') : base);
+    segs.push(k === chain.length - 1
+      ? (node.kind === 'folder' ? base : hasKids ? base + '/master page.md' : base + '.md')
+      : base);
   }
   return segs.join('/');
 }
 
 /* Reconstruct nodes from a flat list of parsed .md files.
    `files` = [{ path, text }] where path is relative to the root and begins
-   with "Space/". Returns { nodes, favorites, currentId }. */
-export function parseFolderTree(files) {
+   with "Space/". `dirs` (optional) lists every directory under the root the
+   reader saw (e.g. "Space/Projects") so folders that hold no files still
+   appear. A directory WITHOUT a master page.md is a folder; one WITH it is a
+   page-with-subpages. Returns { nodes, favorites, currentId }. */
+export function parseFolderTree(files, dirs) {
   const parsed = [];       // { node, dir, isMaster }
   const folderNode = {};   // folder-relative-path (under Space) → node id
   const favorites = [];
@@ -566,7 +620,34 @@ export function parseFolderTree(files) {
     }
   }
 
+  // Directories that exist but have no master page.md are FOLDERS — synthesize
+  // a folder node for each (metadata-free on disk: title = directory name).
   const nodes = {};
+  const allDirs = new Set();
+  const addDirChain = dir => {
+    const parts = dir.split('/').filter(Boolean);
+    for (let i = 1; i <= parts.length; i++) allDirs.add(parts.slice(0, i).join('/'));
+  };
+  parsed.forEach(p => { if (p.dir) addDirChain(p.dir); });
+  (dirs || []).forEach(d => {
+    const rel = String(d).replace(/^\/+/, '');
+    if (rel.startsWith('Space/')) addDirChain(rel.slice('Space/'.length));
+  });
+  [...allDirs].sort((a, b) => a.split('/').length - b.split('/').length).forEach((dir, i) => {
+    if (folderNode[dir] !== undefined) return;   // has a master page → a page
+    const node = { id: nid(), kind: 'folder', title: dir.split('/').pop(),
+      icon: '', cover: '', sort: 1e6 + i, parentId: null, blocks: [] };
+    folderNode[dir] = node.id;
+    nodes[node.id] = node;
+    node._dir = dir;   // resolved to parentId below, then removed
+  });
+  Object.values(nodes).forEach(n => {
+    if (!n._dir) return;
+    const enclosing = n._dir.split('/').slice(0, -1).join('/');
+    n.parentId = enclosing ? (folderNode[enclosing] ?? null) : null;
+    delete n._dir;
+  });
+
   for (const p of parsed) {
     let parentId = null;
     if (p.isMaster) {
@@ -580,9 +661,9 @@ export function parseFolderTree(files) {
   }
   for (const n of flatNodes) nodes[n.id] = n;
 
-  // currentId = first LIVE top-level node by order
+  // currentId = first LIVE top-level page by order (folders can't be opened)
   const tops = Object.values(nodes)
-    .filter(n => !n.parentId && !n.trashed && !n.archived)
+    .filter(n => !n.parentId && !n.trashed && !n.archived && n.kind !== 'folder')
     .sort((a, b) => (a.sort || 0) - (b.sort || 0));
   const currentId = tops.length ? tops[0].id : null;
 

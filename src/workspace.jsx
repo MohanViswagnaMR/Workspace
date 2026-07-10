@@ -13,7 +13,8 @@ import {
   Filter, ArrowUpDown, Sun, Moon, Menu, ChevronLeft, Maximize2,
   Share2, Users, Archive, Upload, LayoutDashboard, RotateCcw, Download,
   Monitor, CloudCheck, CloudUpload, Key, ExternalLink, Copy, Keyboard,
-  Cloud, HardDrive, Paperclip, Database, Eye, PanelRight, LogOut, Unlink,
+  Cloud, HardDrive, Paperclip, Database, Eye, PanelRight, PanelLeftClose, LogOut, Unlink,
+  Puzzle, Info, FolderPlus, Folder, FolderOpen,
   Play,
 } from 'lucide-react';
 import {
@@ -64,7 +65,7 @@ import {
   readActivePointer, writeActivePointer, clearActivePointer,
   readTheme, writeTheme, getCookie, setCookie,
 } from './cookies.js';
-import { nodeDiskPath } from './markdown.js';
+import { nodeDiskPath, markdownToNode } from './markdown.js';
 
 /* ---------- utils ---------- */
 const nid = () => 'n'+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3);
@@ -113,11 +114,12 @@ const CMDS = [
   {g:'Basic',id:'callout',label:'Callout',desc:'Make text stand out',ic:'💡',kw:'callout highlight info'},
   {g:'Basic',id:'divider',label:'Divider',desc:'Visually divide blocks',ic:'—',kw:'divider line separator hr'},
   {g:'Basic',id:'page',label:'Page',desc:'Embed a sub-page',ic:'📄',kw:'page subpage nested'},
-  {g:'Database',id:'db-table',label:'Table view',desc:'Database as a table',ic:'⊞',kw:'table database grid'},
-  {g:'Database',id:'db-board',label:'Board view',desc:'Kanban-style board',ic:'▥',kw:'board kanban database'},
-  {g:'Database',id:'db-gallery',label:'Gallery view',desc:'Cards in a grid',ic:'▦',kw:'gallery cards database'},
-  {g:'Database',id:'db-list',label:'List view',desc:'Minimal database list',ic:'☰',kw:'list database'},
-  {g:'Database',id:'db-calendar',label:'Calendar view',desc:'Database on a calendar',ic:'📅',kw:'calendar database date'},
+  {g:'Table',id:'table',label:'Simple table',desc:'Plain rows and columns of text',ic:'⊞',kw:'table simple grid rows columns'},
+  {g:'Smart table',id:'db-table',label:'Table view',desc:'Every row is a page; switch views anytime',ic:'⊟',kw:'smart table database grid'},
+  {g:'Smart table',id:'db-board',label:'Board view',desc:'Kanban-style board',ic:'▥',kw:'board kanban database smart'},
+  {g:'Smart table',id:'db-gallery',label:'Gallery view',desc:'Cards in a grid',ic:'▦',kw:'gallery cards database smart'},
+  {g:'Smart table',id:'db-list',label:'List view',desc:'Minimal list',ic:'☰',kw:'list database smart'},
+  {g:'Smart table',id:'db-calendar',label:'Calendar view',desc:'Rows on a calendar',ic:'📅',kw:'calendar database date smart'},
   {g:'Media',id:'image',label:'Image',desc:'Upload or embed an image',ic:'🖼️',kw:'image picture photo upload'},
   {g:'Media',id:'file',label:'File attachment',desc:'Attach any file or document',ic:'📎',kw:'file attach upload pdf doc'},
   {g:'Media',id:'bookmark',label:'Web bookmark',desc:'Save a link as a card',ic:'🔗',kw:'bookmark link url web'},
@@ -179,6 +181,8 @@ const ICON_MAP = {
   key: Key, 'external-link': ExternalLink, copy: Copy, keyboard: Keyboard,
   cloud: Cloud, 'hard-drive': HardDrive,
   paperclip: Paperclip, database: Database, eye: Eye, 'panel-right': PanelRight,
+  'panel-left-close': PanelLeftClose, puzzle: Puzzle, info: Info, 'folder-plus': FolderPlus,
+  folder: Folder, 'folder-open': FolderOpen,
   'log-out': LogOut, unlink: Unlink, play: Play,
 };
 
@@ -199,6 +203,21 @@ function Ic({n, style}) {
   return <Icon width={sz} height={sz} strokeWidth={1.8}
     {...(Object.keys(rest).length ? {style: rest} : {})}/>;
 }
+
+/* Default page icon: the Markdown mark — pages ARE .md files. Shown whenever
+   the user hasn't picked a custom emoji icon. */
+function MdMark({size=16}){
+  return <svg className="md-mark" viewBox="0 0 208 128" aria-hidden="true"
+    style={{width:size,height:Math.round(size*0.62)}}>
+    <rect x="7" y="7" width="194" height="114" rx="14" fill="none"
+      stroke="currentColor" strokeWidth="14"/>
+    <path fill="currentColor"
+      d="M30 98V30h20l20 25 20-25h20v68H90V59L70 84 50 59v39zm125 0l-30-33h20V30h20v35h20z"/>
+  </svg>;
+}
+/* Default folder icon (simple outline, not an emoji). */
+const FolderMark=({open,size=15})=>
+  <Ic n={open?'folder-open':'folder'} style={{width:size,height:size,color:'var(--text-2)'}}/>;
 
 /* Persistence lives in ./localfs.js (folders) and ./cloudstorage.js (Google Drive). */
 
@@ -1095,11 +1114,11 @@ function BlockMenu({rect,block,onClose,onAction,onFmt,canFormat,spell,onSpell}){
             </div>)}
             <div className="menu-sep"/>
           </>}
-          <div className={cx('mi',sub==='turn'&&'hi')}
+          {block.type!=='table'&&<div className={cx('mi',sub==='turn'&&'hi')}
             onMouseEnter={e=>openSub('turn',e)}
             onMouseDown={e=>{e.preventDefault();openSub('turn',e);}}>
             <div className="mi-ic">⇄</div><div className="mi-tx">Turn into</div>
-            <Ic n="chevron" style={{width:13,height:13}}/></div>
+            <Ic n="chevron" style={{width:13,height:13}}/></div>}
           <div className="mi" onMouseDown={e=>{e.preventDefault();onAction('duplicate');}}>
             <div className="mi-ic">⧉</div><div className="mi-tx">Duplicate</div>
             <span className="mi-kbd">⌘D</span></div>
@@ -1516,7 +1535,7 @@ const Block=React.memo(function Block(props){
   else if(T==='subpage'){
     const pg=props.lookupNode(block.pageId);
     body=<div className="subpage" onClick={()=>pg&&openPage(block.pageId)}>
-      <span className="sp-emoji">{pg?pg.icon||'📄':'📄'}</span>
+      <span className="sp-emoji">{pg?pg.icon||<MdMark/>:<MdMark/>}</span>
       <span className="sp-title">{pg?(pg.title||'Untitled'):'(deleted page)'}</span>
     </div>;
   }
@@ -1525,6 +1544,9 @@ const Block=React.memo(function Block(props){
       onChange={ndb=>onChange({...block,db:ndb})} openRow={props.openRow}
       onDelete={()=>onBlockAction(block,'delete')}
       onDuplicate={()=>onBlockAction(block,'duplicate')}/></div>;
+  }
+  else if(T==='table'){
+    body=<SimpleTableBlock block={block} onChange={onChange}/>;
   }
   else body=renderText('Type something…');
 
@@ -1561,8 +1583,99 @@ const Block=React.memo(function Block(props){
 
 window.__NOTION_PART2_DONE=true;
 /* =========================================================================
+   SIMPLE TABLE BLOCK — plain rows & columns (a GFM table on disk); for
+   multi-view tables whose rows are pages, use the smart table (database).
+   ========================================================================= */
+function SimpleTableBlock({block,onChange}){
+  const tb=block.table||{header:[''],rows:[]};
+  const set=nt=>onChange({...block,table:nt});
+  const setHeader=(ci,v)=>{const header=[...tb.header];header[ci]=v;set({...tb,header});};
+  const setCell=(ri,ci,v)=>set({...tb,rows:tb.rows.map((r,i)=>{
+    if(i!==ri) return r; const nr=[...r]; nr[ci]=v; return nr;})});
+  const addRow=()=>set({...tb,rows:[...tb.rows,tb.header.map(()=>'')]});
+  const addCol=()=>set({header:[...tb.header,''],rows:tb.rows.map(r=>[...r,''])});
+  const delRow=ri=>set({...tb,rows:tb.rows.filter((_,i)=>i!==ri)});
+  const delCol=ci=>{if(tb.header.length<=1)return;
+    set({header:tb.header.filter((_,i)=>i!==ci),rows:tb.rows.map(r=>r.filter((_,i)=>i!==ci))});};
+  const stop=e=>{if(e.key!=='Escape')e.stopPropagation();};
+  return <div className="stbl" onKeyDown={stop}>
+    <div className="stbl-scroll">
+      <table>
+        <thead><tr>
+          {tb.header.map((h,ci)=><th key={ci}>
+            <input value={h} placeholder={'Column '+(ci+1)}
+              onChange={e=>setHeader(ci,e.target.value)}/>
+            <button className="stbl-del" title="Delete column"
+              onClick={()=>delCol(ci)}><Ic n="x" style={{width:11,height:11}}/></button>
+          </th>)}
+          <th className="stbl-addcol">
+            <button title="Add column" onClick={addCol}><Ic n="plus" style={{width:13,height:13}}/></button>
+          </th>
+        </tr></thead>
+        <tbody>
+          {tb.rows.map((r,ri)=><tr key={ri}>
+            {tb.header.map((_,ci)=><td key={ci}>
+              <input value={r[ci]||''} onChange={e=>setCell(ri,ci,e.target.value)}/>
+            </td>)}
+            <td className="stbl-rowend">
+              <button className="stbl-del" title="Delete row"
+                onClick={()=>delRow(ri)}><Ic n="x" style={{width:11,height:11}}/></button>
+            </td>
+          </tr>)}
+        </tbody>
+      </table>
+    </div>
+    <button className="stbl-addrow" onClick={addRow}>
+      <Ic n="plus" style={{width:13,height:13}}/> New row
+    </button>
+  </div>;
+}
+
+/* =========================================================================
    PAGE EDITOR
    ========================================================================= */
+/* ---- side table of contents (per-page, toggled from the ••• menu) ---- */
+const stripHtml=h=>{const d=document.createElement('div');d.innerHTML=h||'';return (d.textContent||'').trim();};
+
+function TocRail({headings}){
+  const ref=React.useRef();
+  const [active,setActive]=React.useState(null);
+  /* highlight the section currently at the top of the viewport */
+  React.useEffect(()=>{
+    const scroller=ref.current?.closest('.scroll');
+    if(!scroller||!headings.length){ setActive(null); return; }
+    const onScroll=()=>{
+      const top=scroller.getBoundingClientRect().top;
+      let cur=headings[0].id;
+      for(const h of headings){
+        const el=scroller.querySelector(`[data-block-id="${CSS.escape(h.id)}"]`);
+        if(el&&el.getBoundingClientRect().top<=top+130) cur=h.id;
+      }
+      setActive(cur);
+    };
+    onScroll();
+    scroller.addEventListener('scroll',onScroll,{passive:true});
+    return()=>scroller.removeEventListener('scroll',onScroll);
+  },[headings]);
+  const go=id=>{
+    const scroller=ref.current?.closest('.scroll');
+    const el=scroller&&scroller.querySelector(`[data-block-id="${CSS.escape(id)}"]`);
+    if(!el) return;
+    el.scrollIntoView({behavior:'smooth',block:'start'});
+    el.classList.add('toc-flash');
+    setTimeout(()=>el.classList.remove('toc-flash'),1300);
+  };
+  return <div className="toc-wrap" ref={ref}>
+    <nav className="toc">
+      <div className="toc-title">On this page</div>
+      {headings.length===0
+        ? <div className="toc-empty">Add headings to this page to build its table of contents.</div>
+        : headings.map(h=><div key={h.id}
+            className={cx('toc-item','toc-l'+h.level,active===h.id&&'on')}
+            onClick={()=>go(h.id)} title={h.text}>{h.text||'Untitled'}</div>)}
+    </nav>
+  </div>;
+}
 function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=[],onUploadFile,uploads}){
   const [focus,setFocus]=useState(null);
   const [slash,setSlash]=useState(null); // {blockId,rect,el}
@@ -1819,12 +1932,22 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
   const blockAction=useCallback((b,action,val)=>{
     const bs=liveBlocks.current;
     const i=bs.findIndex(x=>x.id===b.id);
+    // when a multi-block selection is active and includes the clicked block,
+    // the action applies to every selected block
+    const sel=blockSelRef.current;
+    const lo=sel?Math.min(sel.a,sel.b):-1, hi=sel?Math.max(sel.a,sel.b):-1;
+    const multi=!!sel&&hi>lo&&i>=lo&&i<=hi;
     if(action==='delete'){
-      const nb=bs.filter(x=>x.id!==b.id);
+      const nb=multi?bs.filter((_,idx)=>idx<lo||idx>hi):bs.filter(x=>x.id!==b.id);
       if(!nb.length)nb.push({id:nid(),type:'text',html:''});
+      if(multi)setBlockSel(null);
       setBlocksH(nb); return;
     }
     if(action==='duplicate'){
+      if(multi){
+        const copies=bs.slice(lo,hi+1).map(x=>({...clone(x),id:nid()}));
+        const nb=[...bs]; nb.splice(hi+1,0,...copies); setBlocksH(nb); return;
+      }
       const copy={...clone(b),id:nid()};
       const nb=[...bs]; nb.splice(i+1,0,copy); setBlocksH(nb); return;
     }
@@ -1832,11 +1955,15 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       insertAfter(b.id,{id:nid(),type:'text',html:''}); return;
     }
     if(action==='turn'){
-      const patch={...b,type:val};
-      if(val==='todo')patch.checked=patch.checked||false;
-      if(val==='toggle'){patch.collapsed=false;patch.children=patch.children||[];}
-      if(val==='callout')patch.emoji=patch.emoji||'💡';
-      updateBlock(patch); return;
+      const conv=x=>{
+        const p={...x,type:val};
+        if(val==='todo')p.checked=p.checked||false;
+        if(val==='toggle'){p.collapsed=false;p.children=p.children||[];}
+        if(val==='callout')p.emoji=p.emoji||'💡';
+        return p;
+      };
+      if(multi){ setBlocksH(bs.map((x,idx)=>idx>=lo&&idx<=hi?conv(x):x)); return; }
+      updateBlock(conv(b)); return;
     }
   },[setBlocksH,insertAfter,updateBlock]);
   // slash apply
@@ -1888,6 +2015,9 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
         case 'file': return {id,type:'file',url:'',fileName:'',fileType:'',fileSize:0};
         case 'bookmark': return {id,type:'bookmark',url:''};
         case 'code': return {id,type:'code',code:'',lang:'plain text'};
+        case 'table': return {id,type:'table',table:{
+          header:['Column 1','Column 2','Column 3'],
+          rows:[['','',''],['','','']]}};
         case 'page': {
           const child=createChild(node.id);
           return {id,type:'subpage',pageId:child};
@@ -1928,7 +2058,8 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     const read=()=>{
       const t=el.textContent||'';
       const m=t.match(/\/([a-z0-9 ]*)$/i);
-      if(!m){ setSlash(s=>s?{...s}:s); setSlashQuery(null); return; }
+      // the "/" was deleted (backspace) → close the menu
+      if(!m){ setSlash(null); setSlashQuery(''); return; }
       setSlashQuery(m[1]);
     };
     el.addEventListener('input',read);
@@ -2005,7 +2136,27 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
     return map;
   },[blocks]);
 
-  return <div className="scroll" key={node.id}>
+  const headings=useMemo(()=>blocks
+    .filter(b=>b.type==='h1'||b.type==='h2'||b.type==='h3')
+    .map(b=>({id:b.id,level:+b.type[1],text:stripHtml(b.html)})),[blocks]);
+  const showToc=!!node.toc&&node.kind!=='database';
+
+  // word, paragraph & block counts over the page (code excluded from words)
+  const stats=useMemo(()=>{
+    const TEXTY=['text','h1','h2','h3','bullet','number','todo','toggle','quote','callout'];
+    let words=0,paras=0;
+    blocks.forEach(b=>{
+      if(!TEXTY.includes(b.type)) return;
+      const t=stripHtml(b.html);
+      if(!t) return;
+      paras++;
+      words+=t.split(/\s+/).filter(Boolean).length;
+    });
+    return {words,paras,blocks:blocks.length};
+  },[blocks]);
+
+  return <div className={cx('scroll','page-scroll',showToc&&'has-toc')} key={node.id}>
+    {showToc&&<TocRail headings={headings}/>}
     {node.cover && <div className="cover" style={{background:node.cover}}>
       <div className="cover-tools">
         <button onClick={()=>setCoverPick(true)}>Change cover</button>
@@ -2013,23 +2164,25 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
       </div></div>}
     <div className="page-wrap">
       <div className="page-head">
-        <div className={cx('icon-big',!node.cover&&'nocover')}
-          onClick={e=>setIconPick(e.currentTarget.getBoundingClientRect())}>
-          {node.icon||'📄'}</div>
+        <div className={cx('page-head-row',!node.cover&&'nocover')}>
+          <div className="icon-big"
+            onClick={e=>setIconPick(e.currentTarget.getBoundingClientRect())}>
+            {node.icon||<MdMark size={58}/>}</div>
+          <textarea className="title-input" placeholder="Untitled" rows={1}
+            value={node.title} onChange={e=>{update(node.id,{title:e.target.value});
+              e.target.style.height='auto';e.target.style.height=e.target.scrollHeight+'px';}}
+            ref={el=>{if(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';}}}
+            onKeyDown={e=>{ if(e.key==='Enter'){e.preventDefault();
+              if(blocks[0])setFocus({id:blocks[0].id,pos:'start'}); }}}/>
+        </div>
         {iconPick&&<EmojiPicker rect={iconPick} onClose={()=>setIconPick(false)}
-          onPick={em=>{update(node.id,{icon:em||'📄'});setIconPick(false);}}/>}
+          onPick={em=>{update(node.id,{icon:em||''});setIconPick(false);}}/>}
         <div className="page-meta-tools">
           {!node.icon&&<button className="meta-btn" onClick={e=>setIconPick(
             e.currentTarget.getBoundingClientRect())}>😀 Add icon</button>}
           {!node.cover&&<button className="meta-btn" onClick={()=>setCoverPick(true)}>
             <Ic n="image"/> Add cover</button>}
         </div>
-        <textarea className="title-input" placeholder="Untitled" rows={1}
-          value={node.title} onChange={e=>{update(node.id,{title:e.target.value});
-            e.target.style.height='auto';e.target.style.height=e.target.scrollHeight+'px';}}
-          ref={el=>{if(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';}}}
-          onKeyDown={e=>{ if(e.key==='Enter'){e.preventDefault();
-            if(blocks[0])setFocus({id:blocks[0].id,pos:'start'}); }}}/>
       </div>
 
       {node.kind==='database'
@@ -2062,13 +2215,17 @@ function Editor({node,update,createChild,openPage,lookupNode,openRow,childPages=
           return <div className="child-pages-list">
             {unembedded.map(child=>
               <div key={child.id} className="subpage child-page-row" onClick={()=>openPage(child.id)}>
-                <span className="sp-emoji">{child.icon||'📄'}</span>
+                <span className="sp-emoji">{child.icon||<MdMark/>}</span>
                 <span className="sp-title">{child.title||'Untitled'}</span>
               </div>)}
           </div>;
         })()}
       </div>}
     </div>
+    {node.kind!=='database'&&
+      <div className="page-stats">
+        {stats.words} word{stats.words===1?'':'s'} · {stats.paras} paragraph{stats.paras===1?'':'s'} · {stats.blocks} block{stats.blocks===1?'':'s'}
+      </div>}
 
     {slash&&<SlashMenu rect={slash.rect} query={slashQuery}
       onPick={applySlash} onClose={()=>setSlash(null)}/>}
@@ -2590,9 +2747,10 @@ function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onDelete,onRec
 }
 
 function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,addChild,
-  trashNode,archiveNode,onDrop,setModal,favorites,toggleFav,duplicate,exportPage,renameNode}){
+  addFolder,trashNode,archiveNode,onDrop,setModal,favorites,toggleFav,duplicate,exportPage,renameNode}){
   const kids=childrenMap[node.id]||[];
   const hasKids=kids.length>0;
+  const isFolder=node.kind==='folder';
   const isOpen=expanded[node.id];
   const [dragOver,setDragOver]=React.useState(false);
   const [ctxMenu,setCtxMenu]=React.useState(null);
@@ -2604,7 +2762,19 @@ function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,
     setCtxMenu({x:e.clientX,y:e.clientY});
   }
 
-  const ctxItems=[
+  const ctxItems=isFolder?[
+    {header:'Folder'},
+    {label:'Rename',action:()=>{
+      const t=prompt('Rename',node.title||'');
+      if(t!==null&&t.trim()!=='') renameNode&&renameNode(node.id,t.trim());
+    }},
+    {sep:true},
+    {label:'Add page inside',action:()=>{toggleExp(node.id,true);addChild(node.id);}},
+    {label:'Add folder inside',action:()=>addFolder&&addFolder(node.id)},
+    {sep:true},
+    {label:'Archive',action:()=>archiveNode&&archiveNode(node.id)},
+    {label:'Move to Trash',action:()=>trashNode&&trashNode(node.id),danger:true},
+  ]:[
     {header: node.kind==='database'?'Database':'Page'},
     {label:'Open',action:()=>openPage(node.id)},
     {label:'Rename',action:()=>{
@@ -2613,6 +2783,7 @@ function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,
     }},
     {sep:true},
     {label:'Add sub-page',action:()=>{toggleExp(node.id,true);addChild(node.id);}},
+    {label:'Add folder inside',action:()=>addFolder&&addFolder(node.id)},
     {label:'Duplicate',action:()=>duplicate&&duplicate(node.id)},
     {label:'Export as Markdown',action:()=>exportPage&&exportPage(node.id)},
     {sep:true},
@@ -2632,14 +2803,14 @@ function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,
       onDragLeave={()=>setDragOver(false)}
       onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);
         const id=e.dataTransfer.getData('node'); if(id&&id!==node.id) onDrop(id,node.id);}}
-      onClick={()=>openPage(node.id)}
+      onClick={()=>isFolder?toggleExp(node.id):openPage(node.id)}
       onContextMenu={openCtx}>
-      {hasKids
+      {(hasKids||isFolder)
         ? <span className={cx('twist',isOpen&&'open')}
             onClick={e=>{e.stopPropagation();toggleExp(node.id);}}>
             <Ic n="chevron"/></span>
         : <span className="twist blank"/>}
-      <span className="tree-emoji">{node.icon||(node.kind==='database'?'🗄️':'📄')}</span>
+      <span className="tree-emoji">{isFolder?<FolderMark open={!!isOpen}/>:node.icon||(node.kind==='database'?'🗄️':<MdMark/>)}</span>
       <span className="tree-label">{node.title||'Untitled'}</span>
       <span className="tree-actions">
         <button title="More options" onClick={openCtx}>
@@ -2649,10 +2820,12 @@ function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,
           <Ic n="plus"/></button>
       </span>
     </div>
+    {isOpen&&isFolder&&!hasKids&&
+      <div className="tree-empty" style={{paddingLeft:30+depth*16}}>Empty folder</div>}
     {isOpen&&hasKids&&kids.map(k=>
       <TreeItem key={k.id} node={k} childrenMap={childrenMap} depth={depth+1} currentId={currentId}
         expanded={expanded} toggleExp={toggleExp} openPage={openPage}
-        addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
+        addChild={addChild} addFolder={addFolder} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
         setModal={setModal} favorites={favorites} toggleFav={toggleFav}
         duplicate={duplicate} exportPage={exportPage} renameNode={renameNode}/>)}
     {ctxMenu&&<ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxItems} onClose={()=>setCtxMenu(null)}/>}
@@ -2661,9 +2834,9 @@ function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,
 
 /* ---------------- Sidebar ---------------- */
 function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,addChild,
-  trashNode,archiveNode,onDrop,addTop,setModal,workspaces,activeWorkspaceId,
+  trashNode,archiveNode,onDrop,addTop,addFolder,setModal,workspaces,activeWorkspaceId,
   onSwitchWorkspace,onCreateWorkspace,onDeleteWorkspace,onReconnectLocal,
-  toggleFav,duplicate,exportPage,renameNode,onGoHome}){
+  toggleFav,duplicate,exportPage,renameNode,onGoHome,toggleSidebar}){
   // one O(n) pass instead of an O(n) filter per tree item — the sidebar
   // re-renders on every store change, so this is hot
   const childrenMap=React.useMemo(()=>{
@@ -2697,6 +2870,11 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
           <small>{wsSub}</small>
         </div>
       </div>
+      <button className="icon-btn sb-collapse" onClick={toggleSidebar}
+        title={`Close sidebar (${fmtShortcut('Ctrl/⌘ + \\')})`}
+        aria-label="Close sidebar">
+        <Ic n="panel-left-close"/>
+      </button>
       {wsPop&&<WorkspaceSwitcher rect={wsPop} workspaces={workspaces||[activeWs]}
         activeId={activeWorkspaceId} onSwitch={onSwitchWorkspace}
         onCreate={onCreateWorkspace} onDelete={onDeleteWorkspace}
@@ -2720,34 +2898,40 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
             <div key={n.id} className={cx('tree-item',currentId===n.id&&'sel')}
               onClick={()=>openPage(n.id)}>
               <span className="twist"/>
-              <span className="tree-emoji">{n.icon||'📄'}</span>
+              <span className="tree-emoji">{n.icon||<MdMark/>}</span>
               <span className="tree-label">{n.title||'Untitled'}</span>
             </div>)}
         </div>
       </>}
 
       <div className="sec-title"><span>Pages</span>
+        <button title="Add a folder" onClick={()=>addFolder(null)}><Ic n="folder-plus"/></button>
         <button title="Add a page" onClick={()=>addTop()}><Ic n="plus"/></button>
       </div>
       <div className="nav">
         {roots.map(n=>
           <TreeItem key={n.id} node={n} childrenMap={childrenMap} depth={0} currentId={currentId}
             expanded={expanded} toggleExp={toggleExp} openPage={openPage}
-            addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
+            addChild={addChild} addFolder={addFolder} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
             setModal={setModal} favorites={favorites} toggleFav={toggleFav}
             duplicate={duplicate} exportPage={exportPage} renameNode={renameNode}/>)}
         {roots.length===0&&<div className="tree-empty">No pages yet</div>}
       </div>
 
-      <div className="nav" style={{marginTop:10}}>
-        {navRow('layout','Templates',()=>openPage(TEMPLATES_ID),null,currentId===TEMPLATES_ID)}
-        {navRow('import','Import',()=>setModal({type:'import'}))}
-        {navRow('database','Storage',()=>openPage(STORAGE_ID),null,currentId===STORAGE_ID)}
-        {navRow('archive','Archive',()=>openPage(ARCHIVE_ID),null,currentId===ARCHIVE_ID)}
-        {navRow('trash','Trash',()=>openPage(TRASH_ID),null,currentId===TRASH_ID)}
-      </div>
     </div>
     <div className="sidebar-foot">
+      <div className="foot-icons">
+        {[['template','Templates',()=>openPage(TEMPLATES_ID),currentId===TEMPLATES_ID],
+          ['import','Import',()=>setModal({type:'import'}),false],
+          ['database','Storage',()=>openPage(STORAGE_ID),currentId===STORAGE_ID],
+          ['archive','Archive',()=>openPage(ARCHIVE_ID),currentId===ARCHIVE_ID],
+          ['trash','Trash',()=>openPage(TRASH_ID),currentId===TRASH_ID]]
+          .map(([ic,label,fn,active])=>
+            <button key={label} className={cx(active&&'on')} title={label}
+              aria-label={label} onClick={fn}>
+              <Ic n={ic} style={{width:16,height:16}}/>
+            </button>)}
+      </div>
       {navRow('settings','Settings',()=>setModal({type:'settings'}))}
       {navRow('keyboard','Keyboard shortcuts',()=>setModal({type:'shortcuts'}),fmtShortcut('Ctrl/⌘ + /'))}
       <div className="tree-item ws-close" onClick={onGoHome}
@@ -3273,7 +3457,7 @@ function Topbar({node,nodes,openPage,toggleSidebar,sidebarOpen,toggleFav,isFav,s
       {chain.map((n,i)=><React.Fragment key={n.id}>
         {i>0&&<span className="crumb-sep">/</span>}
         <div className="crumb" onClick={()=>openPage(n.id)}>
-          <span>{n.icon||'📄'}</span>
+          <span>{n.icon||<MdMark/>}</span>
           <span>{n.title||'Untitled'}</span>
         </div>
       </React.Fragment>)}
@@ -3554,7 +3738,7 @@ function SearchModal({nodes,openPage,onClose}){
   React.useEffect(()=>{inRef.current&&inRef.current.focus();},[]);
   const strip=h=>(h||'').replace(/<[^>]+>/g,'');
   const results=React.useMemo(()=>{
-    const all=Object.values(nodes).filter(n=>!n.trashed);
+    const all=Object.values(nodes).filter(n=>!n.trashed&&n.kind!=='folder');
     const term=q.trim().toLowerCase();
     if(!term) return all.slice(0,8).map(n=>({n,snippet:''}));
     const out=[];
@@ -3592,7 +3776,7 @@ function SearchModal({nodes,openPage,onClose}){
         {results.map((r,i)=>
           <div key={r.n.id} className={cx('sr',i===hi&&'hi')}
             onMouseEnter={()=>setHi(i)} onClick={()=>go(i)}>
-            <span className="sr-em">{r.n.icon||'📄'}</span>
+            <span className="sr-em">{r.n.icon||<MdMark/>}</span>
             <div className="sr-tx">
               <b>{r.n.title||'Untitled'}</b>
               {r.snippet&&<small>{r.snippet}</small>}
@@ -3629,7 +3813,7 @@ function BinPage({emoji,title,subtitle,folder,rows,searchLabel,emptyText,onPrima
       : <div className="binpage-list">
           {list.map(n=>
             <div key={n.id} className="bp-row">
-              <span className="bp-em">{n.icon||(n.kind==='database'?'🗄️':'📄')}</span>
+              <span className="bp-em">{n.kind==='folder'?<FolderMark/>:n.icon||(n.kind==='database'?'🗄️':<MdMark/>)}</span>
               <div className="bp-tx"><b>{n.title||'Untitled'}</b>
                 <small>{n.kind==='database'?'Database':'Page'}</small></div>
               <button className="btn ghost" onClick={()=>onPrimary(n.id)}>{primaryLabel}</button>
@@ -4288,55 +4472,162 @@ const ACCENT_COLORS=[
   {id:'violet', label:'Violet',  light:'#8b5cf6', dark:'#c084fc'},
 ];
 
-/* Workspace font choices (applied to page content, saved in info.md). */
+/* Workspace font choices (applied to page content, saved in info.md).
+   Imported Google Fonts are stored as `g:<Family>` values on top of these. */
 const FONT_OPTIONS=[
   {id:'default', label:'Default (Sans)', stack:"'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif"},
   {id:'serif',   label:'Serif',          stack:"Georgia,'Iowan Old Style','Times New Roman',serif"},
   {id:'mono',    label:'Monospace',      stack:"'JetBrains Mono','SFMono-Regular',Menlo,Consolas,monospace"},
 ];
-const fontStack=id=>(FONT_OPTIONS.find(f=>f.id===id)||FONT_OPTIONS[0]).stack;
+const fontStack=id=>{
+  if(id&&id.startsWith('g:')) return `'${id.slice(2)}','Inter',-apple-system,sans-serif`;
+  return (FONT_OPTIONS.find(f=>f.id===id)||FONT_OPTIONS[0]).stack;
+};
+
+/* Page-content font size (a scale factor over the default sizes). */
+const FONT_SIZES=[
+  {id:'small',   label:'Small',       scale:.9},
+  {id:'default', label:'Default',     scale:1},
+  {id:'large',   label:'Large',       scale:1.15},
+  {id:'xl',      label:'Extra large', scale:1.3},
+];
+const fontScale=id=>(FONT_SIZES.find(f=>f.id===id)||FONT_SIZES[1]).scale;
+
+/* Load a Google Font by injecting its stylesheet (regular weight; the browser
+   synthesizes bold). Cross-origin, so the service worker never caches it —
+   offline it falls back to the default stack. */
+const ensureGoogleFont=name=>{
+  const id='gf-'+name.toLowerCase().replace(/[^a-z0-9]+/g,'-');
+  if(document.getElementById(id)) return;
+  const l=document.createElement('link');
+  l.id=id; l.rel='stylesheet';
+  l.href=`https://fonts.googleapis.com/css2?family=${name.replace(/ /g,'+')}&display=swap`;
+  document.head.appendChild(l);
+};
 
 /* ---------------- Settings modal ---------------- */
+/* ---- external template repositories ----
+   A "template repository" is any public GitHub repo holding pages in this
+   app's own .md format — in a templates/ folder or at the repo root. It's
+   fetched client-side via the GitHub API (CORS-friendly, no auth needed). */
+const parseRepoRef=s=>{
+  s=(s||'').trim()
+    .replace(/^https?:\/\//i,'').replace(/^www\./i,'').replace(/^github\.com\//i,'')
+    .replace(/\.git$/i,'').replace(/\/+$/,'');
+  const p=s.split('/');
+  return p.length>=2&&p[0]&&p[1]?`${p[0]}/${p[1]}`:null;
+};
+async function fetchRepoTemplates(ref){
+  const listDir=async dir=>{
+    const r=await fetch(`https://api.github.com/repos/${ref}/contents/${dir}`);
+    if(r.status===403) throw new Error('GitHub rate limit reached — try again in a little while.');
+    if(!r.ok) return null;
+    const items=await r.json();
+    return Array.isArray(items)
+      ?items.filter(i=>i.type==='file'&&/\.md$/i.test(i.name)&&!/^readme\.md$/i.test(i.name))
+      :null;
+  };
+  let files=await listDir('templates');
+  if(!files||!files.length){
+    const root=await listDir('');
+    if(root===null&&files===null) throw new Error('Repository not found — check the address (it must be public).');
+    files=root||[];
+  }
+  files=files.slice(0,30);   // keep well inside API limits
+  const texts=await Promise.all(files.map(async f=>{
+    try{ const r=await fetch(f.download_url); return r.ok?await r.text():null; }
+    catch{ return null; }
+  }));
+  const out=[];
+  files.forEach((f,i)=>{
+    if(texts[i]==null) return;
+    try{
+      const {node}=markdownToNode(texts[i]);
+      out.push({name:f.name,title:node.title||f.name.replace(/\.md$/i,''),icon:node.icon||'',text:texts[i]});
+    }catch{/* skip unparsable files */}
+  });
+  if(!out.length) throw new Error('No template .md files found in this repository (looked in templates/ and the root).');
+  return out;
+}
+
+const SETTINGS_TABS=[
+  {id:'general',   label:'General',   icon:'settings'},
+  {id:'theme',     label:'Appearance', icon:'sun'},
+  {id:'templates', label:'Templates', icon:'template'},
+  {id:'plugins',   label:'Plugins',   icon:'puzzle'},
+  {id:'about',     label:'About',     icon:'info'},
+];
 function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description,setDescription,
-  pageBgUrl,onUploadBg,onClearBg,nodeCount,activeWorkspace,onGoHome,onClose,onRestartTutorial}){
+  pageBgUrl,onUploadBg,onClearBg,nodeCount,activeWorkspace,onGoHome,onClose,onRestartTutorial,
+  onOpenTemplates,customTemplates,onUseTemplate,onRemoveTemplate,
+  templateRepo,setTemplateRepo,onImportTemplates,onAddRepoTemplate,
+  fontSize,setFontSize,customFonts,onAddFont,onRemoveFont}){
   const bgInput=React.useRef();
-  return <div className="overlay" onClick={onClose}>
-    <div className="modal" onClick={e=>e.stopPropagation()}>
-      <div className="modal-h"><h3>Settings</h3>
-        <div className="x" onClick={onClose}><Ic n="x"/></div></div>
-      <div className="set-body">
-        <div className="set-row">
-          <div className="sr-l"><b>Mode</b><small>Switch between light and dark interface.</small></div>
-          <CustomSelect value={theme} onChange={setTheme} options={[
-            {value:'light', label:'Light'},
-            {value:'dark',  label:'Dark'},
-          ]}/>
-        </div>
-        <div className="set-row set-row-col">
-          <div className="sr-l"><b>Accent color</b><small>Choose a color for buttons, links and highlights.</small></div>
-          <div className="accent-swatches">
-            {ACCENT_COLORS.map(c=><button key={c.id}
-              className={cx('accent-swatch',accent===c.id&&'sel')}
-              title={c.label}
-              style={{'--sw-color':theme==='dark'?c.dark:c.light}}
-              onClick={()=>setAccent(c.id)}>
-              {accent===c.id&&<Ic n="check"/>}
-            </button>)}
-          </div>
-        </div>
-        <div className="set-row">
-          <div className="sr-l"><b>Font</b><small>Typeface used for your page content.</small></div>
-          <CustomSelect value={font||'default'} onChange={setFont}
-            options={FONT_OPTIONS.map(f=>({value:f.id,label:f.label}))}/>
-        </div>
-        <div className="set-row set-row-col">
-          <div className="sr-l"><b>Page background</b><small>Upload a photo to show behind your pages. Stored in the workspace’s Upload/ folder.</small></div>
-          <div style={{display:'flex',alignItems:'center',gap:12,marginTop:8}}>
-            <div style={{width:88,height:56,borderRadius:8,flexShrink:0,border:'1px solid var(--border)',
-              background:pageBgUrl?`center/cover no-repeat url("${pageBgUrl}")`:'var(--bg-input)',
-              display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-3)',fontSize:11}}>
-              {pageBgUrl?'':'None'}
-            </div>
+  const tplInput=React.useRef();
+  const [tab,setTab]=React.useState('general');
+  /* connected-repository state */
+  const [repoInput,setRepoInput]=React.useState('');
+  const [repoBusy,setRepoBusy]=React.useState(false);
+  const [repoErr,setRepoErr]=React.useState('');
+  const [repoTpls,setRepoTpls]=React.useState(null);   // null = not fetched yet
+  /* Google Fonts import state */
+  const [gfInput,setGfInput]=React.useState('');
+  const [gfBusy,setGfBusy]=React.useState(false);
+  const [gfErr,setGfErr]=React.useState('');
+  const addFont=async()=>{
+    if(!gfInput.trim()||gfBusy) return;
+    setGfBusy(true); setGfErr('');
+    try{ await onAddFont(gfInput); setGfInput(''); }
+    catch(e){ setGfErr(e.message); }
+    finally{ setGfBusy(false); }
+  };
+  const loadRepo=async ref=>{
+    setRepoBusy(true); setRepoErr('');
+    try{ setRepoTpls(await fetchRepoTemplates(ref)); return true; }
+    catch(e){ setRepoErr(e.message); setRepoTpls([]); return false; }
+    finally{ setRepoBusy(false); }
+  };
+  const connectRepo=async()=>{
+    const ref=parseRepoRef(repoInput);
+    if(!ref){ setRepoErr('Enter a public GitHub repository, e.g. github.com/user/templates'); return; }
+    if(await loadRepo(ref)){ setTemplateRepo(ref); setRepoInput(''); }
+  };
+  const disconnectRepo=()=>{ setTemplateRepo(''); setRepoTpls(null); setRepoErr(''); };
+  /* fetch the connected repo's list the first time the tab is opened */
+  React.useEffect(()=>{
+    if(tab==='templates'&&templateRepo&&repoTpls===null&&!repoBusy) loadRepo(templateRepo);
+  },[tab]);  // eslint-disable-line react-hooks/exhaustive-deps
+  const body=
+    tab==='general'?<>
+      <div className="set-row set-row-col">
+        <div className="sr-l"><b>Description</b><small>A short note about this workspace (saved in info.md).</small></div>
+        <input className="fld" style={{width:'100%',boxSizing:'border-box',marginTop:8}}
+          placeholder="Description (optional)" value={description||''}
+          onChange={e=>setDescription(e.target.value)}/>
+      </div>
+      <div className="set-row">
+        <div className="sr-l"><b>Pages</b><small>Total pages & databases in this workspace.</small></div>
+        <span>{nodeCount}</span>
+      </div>
+      <div className="set-row">
+        <div className="sr-l"><b>Storage</b><small>{activeWorkspace?.type==='gdrive'?'Mirrored to your Google Drive as Markdown files.':'Saved on this computer as Markdown files.'}</small></div>
+        <span style={{color:'var(--text-3)'}}>{activeWorkspace?.type==='gdrive'?'Google Drive':'Local'}</span>
+      </div>
+      <div className="set-row">
+        <div className="sr-l"><b>Tutorial</b><small>Replay the guided tour of the workspace.</small></div>
+        <button className="btn ghost" onClick={onRestartTutorial}>Start tour</button>
+      </div>
+      <div className="set-row" style={{borderBottom:'none'}}>
+        <div className="sr-l"><b>Workspace</b><small>Close this workspace and return to the homepage.</small></div>
+        <button className="btn ghost" onClick={onGoHome}>Close workspace</button>
+      </div>
+    </>
+    :tab==='theme'?<>
+      <div className="set-row set-bg-row">
+        <div className="sr-l">
+          <b>Page background</b>
+          <small>Upload a photo to show behind your pages. Stored in the workspace’s Upload/ folder.</small>
+          <div className="set-bg-actions">
             <input ref={bgInput} type="file" accept="image/*" style={{display:'none'}}
               onChange={e=>{const f=e.target.files?.[0]; if(f) onUploadBg(f); e.target.value='';}}/>
             <button className="btn ghost" onClick={()=>bgInput.current?.click()}>
@@ -4345,32 +4636,176 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
             {pageBgUrl&&<button className="btn ghost" onClick={onClearBg}>Remove</button>}
           </div>
         </div>
-        <div className="set-row set-row-col">
-          <div className="sr-l"><b>Description</b><small>A short note about this workspace (saved in info.md).</small></div>
-          <input className="fld" style={{width:'100%',boxSizing:'border-box',marginTop:8}}
-            placeholder="Description (optional)" value={description||''}
-            onChange={e=>setDescription(e.target.value)}/>
+        <div className="set-bg-preview"
+          style={pageBgUrl?{background:`center/cover no-repeat url("${pageBgUrl}")`}:undefined}>
+          {pageBgUrl?'':'No background'}
         </div>
-        <div className="set-row">
-          <div className="sr-l"><b>Pages</b><small>Total pages & databases in this workspace.</small></div>
-          <span>{nodeCount}</span>
+      </div>
+      <div className="set-row">
+        <div className="sr-l"><b>Mode</b><small>Switch between light and dark interface.</small></div>
+        <CustomSelect value={theme} onChange={setTheme} options={[
+          {value:'light', label:'Light'},
+          {value:'dark',  label:'Dark'},
+        ]}/>
+      </div>
+      <div className="set-row set-row-col">
+        <div className="sr-l"><b>Accent color</b><small>Choose a color for buttons, links and highlights.</small></div>
+        <div className="accent-swatches">
+          {ACCENT_COLORS.map(c=><button key={c.id}
+            className={cx('accent-swatch',accent===c.id&&'sel')}
+            title={c.label}
+            style={{'--sw-color':theme==='dark'?c.dark:c.light}}
+            onClick={()=>setAccent(c.id)}>
+            {accent===c.id&&<Ic n="check"/>}
+          </button>)}
         </div>
-        <div className="set-row">
-          <div className="sr-l"><b>Storage</b><small>{activeWorkspace?.type==='gdrive'?'Mirrored to your Google Drive as Markdown files.':'Saved on this computer as Markdown files.'}</small></div>
-          <span style={{color:'var(--text-3)'}}>{activeWorkspace?.type==='gdrive'?'Google Drive':'Local'}</span>
+      </div>
+      <div className="set-row">
+        <div className="sr-l"><b>Font</b><small>Typeface used for your page content.</small></div>
+        <CustomSelect value={font||'default'} onChange={setFont}
+          options={[...FONT_OPTIONS.map(f=>({value:f.id,label:f.label})),
+            ...(customFonts||[]).map(n=>({value:'g:'+n,label:n}))]}/>
+      </div>
+      <div className="set-row">
+        <div className="sr-l"><b>Font size</b><small>Size of your page content text.</small></div>
+        <CustomSelect value={fontSize||'default'} onChange={setFontSize}
+          options={FONT_SIZES.map(f=>({value:f.id,label:f.label}))}/>
+      </div>
+      <div className="set-row set-row-col" style={{borderBottom:'none'}}>
+        <div className="sr-l"><b>Google Fonts</b><small>Import any font from{' '}
+          <a href="https://fonts.google.com" target="_blank" rel="noopener noreferrer"
+            className="home-demo-link">fonts.google.com</a> by name — it appears in the Font menu above. Needs a network connection to load.</small></div>
+        <div className="set-repo-bar">
+          <input className="fld" placeholder="e.g. Roboto, Lora, Open Sans"
+            value={gfInput} onChange={e=>setGfInput(e.target.value)}
+            onKeyDown={e=>{if(e.key==='Enter')addFont();}}/>
+          <button className="btn primary" disabled={gfBusy} onClick={addFont}>
+            {gfBusy?'Adding…':'Add font'}
+          </button>
         </div>
-        <div className="set-row">
-          <div className="sr-l"><b>Workspace</b><small>Close this workspace and return to the homepage.</small></div>
-          <button className="btn ghost" onClick={onGoHome}>Close workspace</button>
-        </div>
-        <div className="set-row">
-          <div className="sr-l"><b>Tutorial</b><small>Replay the guided tour of the workspace.</small></div>
-          <button className="btn ghost" onClick={onRestartTutorial}>Start tour</button>
-        </div>
-        <div className="set-row" style={{borderBottom:'none'}}>
-          <div className="sr-l"><b>About</b></div>
-          <span style={{color:'var(--text-3)'}}>{APP_VERSION?'v'+APP_VERSION:''}</span>
-        </div>
+        {gfErr&&<div className="set-repo-err">{gfErr}</div>}
+        {(customFonts||[]).length>0&&<div className="gf-chips">
+          {customFonts.map(n=><span key={n} className="gf-chip" style={{fontFamily:`'${n}',sans-serif`}}>
+            {n}
+            <button title={`Remove ${n}`} onClick={()=>onRemoveFont(n)}><Ic n="x" style={{width:11,height:11}}/></button>
+          </span>)}
+        </div>}
+      </div>
+    </>
+    :tab==='templates'?<>
+      <div className="set-sec-h set-sec-row"><span>Custom templates</span>
+        <input ref={tplInput} type="file" accept=".md,.markdown,text/markdown" multiple
+          style={{display:'none'}}
+          onChange={e=>{onImportTemplates(e.target.files); e.target.value='';}}/>
+        <button className="btn ghost sm" title="Import template pages from .md files"
+          onClick={()=>tplInput.current?.click()}>
+          <Ic n="import" style={{width:13,height:13}}/> Import…
+        </button>
+      </div>
+      {(customTemplates||[]).length===0
+        ? <div className="set-note">
+            No custom templates yet. Open a page’s <b>•••</b> menu and choose{' '}
+            <b>Save as template</b>, or <b>Import…</b> template <code>.md</code> files.
+          </div>
+        : (customTemplates||[]).map(n=>
+            <div className="set-row" key={n.id}>
+              <div className="sr-l set-tpl-name">
+                <span className="set-tpl-ic">{n.icon||<MdMark/>}</span>
+                <b>{n.title||'Untitled'}</b>
+              </div>
+              <div style={{display:'flex',gap:8,flexShrink:0}}>
+                <button className="btn primary sm" onClick={()=>onUseTemplate(n.id)}>Use</button>
+                <button className="btn ghost sm" title="Remove from templates (the page itself is kept)"
+                  onClick={()=>onRemoveTemplate(n.id)}>Remove</button>
+              </div>
+            </div>)}
+      <div className="set-sec-h">Repository</div>
+      <div className="set-row">
+        <div className="sr-l"><b>Built-in templates</b><small>{TEMPLATES.length} ready-made layouts — meeting notes, trackers, wikis, planners and more.</small></div>
+        <button className="btn primary" onClick={onOpenTemplates}>
+          <Ic n="template" style={{width:15,height:15}}/> Open Templates
+        </button>
+      </div>
+      {!templateRepo
+        ? <div className="set-row set-row-col" style={{borderBottom:'none'}}>
+            <div className="sr-l"><b>Connect to repository</b><small>Add templates shared by others: any public GitHub repository holding template <code>.md</code> pages (in a <code>templates/</code> folder or at its root).</small></div>
+            <div className="set-repo-bar">
+              <input className="fld" placeholder="github.com/user/template-repo"
+                value={repoInput} onChange={e=>setRepoInput(e.target.value)}
+                onKeyDown={e=>{if(e.key==='Enter')connectRepo();}}/>
+              <button className="btn primary" disabled={repoBusy} onClick={connectRepo}>
+                {repoBusy?'Connecting…':'Connect'}
+              </button>
+            </div>
+            {repoErr&&<div className="set-repo-err">{repoErr}</div>}
+          </div>
+        : <div className="set-row set-row-col" style={{borderBottom:'none'}}>
+            <div className="set-repo-head">
+              <div className="sr-l set-tpl-name">
+                <span className="set-tpl-ic"><GitHubIcon/></span>
+                <div><b>{templateRepo}</b>
+                  <small style={{display:'block',color:'var(--text-3)'}}>
+                    Connected repository{repoTpls?` · ${repoTpls.length} template${repoTpls.length===1?'':'s'}`:repoBusy?' · loading…':''}
+                  </small></div>
+              </div>
+              <div style={{display:'flex',gap:8,flexShrink:0}}>
+                <button className="btn ghost sm" disabled={repoBusy}
+                  onClick={()=>loadRepo(templateRepo)}>Refresh</button>
+                <button className="btn ghost sm" onClick={disconnectRepo}>Disconnect</button>
+              </div>
+            </div>
+            {repoErr&&<div className="set-repo-err">{repoErr}</div>}
+            <div className="set-repo-list">
+              {(repoTpls||[]).map(t=>
+                <div className="set-row" key={t.name}>
+                  <div className="sr-l set-tpl-name">
+                    <span className="set-tpl-ic">{t.icon||<MdMark/>}</span>
+                    <b>{t.title}</b>
+                    <small style={{color:'var(--text-3)',flexShrink:0}}>{t.name}</small>
+                  </div>
+                  <button className="btn primary sm" style={{flexShrink:0}}
+                    title="Add to your custom templates"
+                    onClick={()=>onAddRepoTemplate(t.text)}>Add</button>
+                </div>)}
+            </div>
+          </div>}
+    </>
+    :tab==='plugins'?
+      <div className="set-empty">
+        <span className="set-empty-ic"><Ic n="puzzle" style={{width:28,height:28}}/></span>
+        <b>No plugins yet</b>
+        <small>Plugin support is planned for a future release. Extensions will be able to add new block types, database views and importers.</small>
+      </div>
+    :<>{/* about */}
+      <div className="set-row">
+        <div className="sr-l"><b>Version</b><small>The release of Workspace you’re running.</small></div>
+        <span style={{color:'var(--text-3)'}}>{APP_VERSION?'v'+APP_VERSION:'—'}</span>
+      </div>
+      <div className="set-row">
+        <div className="sr-l"><b>Release notes</b><small>What changed in each version.</small></div>
+        <a className="btn ghost" href="https://github.com/MohanViswagnaMR/Workspace/tree/main/versions"
+          target="_blank" rel="noopener noreferrer">View</a>
+      </div>
+      <div className="set-row" style={{borderBottom:'none'}}>
+        <div className="sr-l"><b>Source code</b><small>Workspace is free and open source.</small></div>
+        <a className="btn ghost" href="https://github.com/MohanViswagnaMR/Workspace"
+          target="_blank" rel="noopener noreferrer">GitHub</a>
+      </div>
+    </>;
+  return <div className="overlay" onClick={onClose}>
+    <div className="modal wide set-modal" onClick={e=>e.stopPropagation()}>
+      <div className="set-side">
+        <div className="set-side-title">Settings</div>
+        {SETTINGS_TABS.map(t=>
+          <div key={t.id} className={cx('set-tab',tab===t.id&&'sel')} onClick={()=>setTab(t.id)}>
+            <Ic n={t.icon} style={{width:15,height:15}}/>
+            <span>{t.label}</span>
+          </div>)}
+      </div>
+      <div className="set-main">
+        <div className="modal-h"><h3>{SETTINGS_TABS.find(t=>t.id===tab)?.label}</h3>
+          <div className="x" onClick={onClose}><Ic n="x"/></div></div>
+        <div className="set-body">{body}</div>
       </div>
     </div>
   </div>;
@@ -4383,7 +4818,7 @@ function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace}){
   const pageCount=allNodes.filter(n=>n.kind==='page').length;
   const dbCount=allNodes.filter(n=>n.kind==='database').length;
   const favNodes=favorites.map(id=>nodes[id]).filter(n=>n&&!n.trashed&&!n.archived);
-  const privatePages=allNodes.filter(n=>n.parentId===null)
+  const privatePages=allNodes.filter(n=>n.parentId===null&&n.kind!=='folder')
     .sort((a,b)=>(a.sort||0)-(b.sort||0)).slice(0,6);
   const hour=new Date().getHours();
   const greeting=hour<12?'Good morning':hour<17?'Good afternoon':'Good evening';
@@ -4416,7 +4851,7 @@ function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace}){
       <div className="dash-page-grid">
         {favNodes.map(n=><div key={n.id} className="dash-page-card" onClick={()=>openPage(n.id)}>
           <div className="dpc-cover" style={{background:n.cover||'var(--bg-2)'}}/>
-          <div className="dpc-icon">{n.icon||'📄'}</div>
+          <div className="dpc-icon">{n.icon||<MdMark size={22}/>}</div>
           <div className="dpc-title">{n.title||'Untitled'}</div>
           <div className="dpc-kind">{n.kind==='database'?'Database':'Page'}</div>
         </div>)}
@@ -4427,7 +4862,7 @@ function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace}){
       <div className="dash-page-grid">
         {privatePages.map(n=><div key={n.id} className="dash-page-card" onClick={()=>openPage(n.id)}>
           <div className="dpc-cover" style={{background:n.cover||'var(--bg-2)'}}/>
-          <div className="dpc-icon">{n.icon||'📄'}</div>
+          <div className="dpc-icon">{n.icon||<MdMark size={22}/>}</div>
           <div className="dpc-title">{n.title||'Untitled'}</div>
           <div className="dpc-kind">{n.kind==='database'?'Database':'Page'}</div>
         </div>)}
@@ -4437,7 +4872,7 @@ function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace}){
 }
 
 /* ---------------- Page actions menu ---------------- */
-function PageMenu({node,nodes,onClose,trashNode,duplicate,setModal,downloadPage}){
+function PageMenu({node,nodes,onClose,trashNode,duplicate,setModal,downloadPage,toggleTemplate,toggleToc}){
   const item=(ic,label,fn)=><div className="mi" onClick={()=>{fn();onClose();}}>
     <span className="mi-ic"><Ic n={ic}/></span><span className="mi-tx">{label}</span></div>;
   const hasSub=nodes&&Object.values(nodes).some(n=>n.parentId===node.id&&!n.trashed&&!n.archived);
@@ -4450,6 +4885,10 @@ function PageMenu({node,nodes,onClose,trashNode,duplicate,setModal,downloadPage}
     <div className="pop menu" style={{position:'absolute',top:50,right:14,width:230}}
       onClick={e=>e.stopPropagation()}>
       {item('copy','Duplicate page',()=>duplicate(node.id))}
+      {item('template',node.template?'Remove from templates':'Save as template',
+        ()=>toggleTemplate(node.id))}
+      {node.kind!=='database'&&item('list',node.toc?'Hide table of contents':'Show table of contents',
+        ()=>toggleToc(node.id))}
       <div className="menu-sep"/>
       <div className="menu-h">This page only</div>
       {dlRow('md','📝','Markdown','.md',false)}
@@ -4541,8 +4980,8 @@ const GitHubIcon=({size=17})=>
    data in this browser yet). Explains the app; "Get Started" leads to the
    start page (HomeScreen).
    ========================================================================= */
-function WelcomePage({onGetStarted,onDemo,onDocs,onAbout,onSelfHost,theme,onToggleTheme}){
-  return <div className="home-screen welcome-page">
+function WelcomePage({onGetStarted,onDemo,onDocs,onAbout,onSelfHost,theme,onToggleTheme,accent,onAccent}){
+  return <div className="home-screen welcome-page has-fixed-foot">
     <div className="home-aurora" aria-hidden="true">
       <span className="orb o1"/><span className="orb o2"/><span className="orb o3"/><span className="orb o4"/>
       <span className="home-grid"/>
@@ -4631,10 +5070,12 @@ function WelcomePage({onGetStarted,onDemo,onDocs,onAbout,onSelfHost,theme,onTogg
             └── Problem set 2.md`}</code></pre>
       </section>
 
-      <div className="home-foot home-rise" style={{animationDelay:'320ms'}}>
-        <div className="home-foot-copy">
-          © {new Date().getFullYear()} Workspace · Mohan Viswagna MR. All rights reserved.
-        </div>
+    </div>
+    <div className="home-foot home-foot-fixed home-rise" style={{animationDelay:'320ms'}}>
+      <div className="home-foot-copy">
+        © {new Date().getFullYear()} Workspace · Mohan Viswagna MR. All rights reserved.
+      </div>
+      <div className="home-foot-controls">
         <button type="button" role="switch" aria-checked={theme==='dark'}
           className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
           title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
@@ -4643,15 +5084,18 @@ function WelcomePage({onGetStarted,onDemo,onDocs,onAbout,onSelfHost,theme,onTogg
           <Ic n="moon" style={{width:13,height:13}}/>
           <span className="theme-switch-knob"/>
         </button>
+        <CustomSelect value={accent} onChange={onAccent}
+          options={ACCENT_COLORS.map(c=>({value:c.id,label:c.label,
+            dot:theme==='dark'?c.dark:c.light}))}/>
       </div>
     </div>
   </div>;
 }
 
-function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onManage,onDocs,onWelcome,theme,onToggleTheme,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
+function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onManage,onDocs,onWelcome,theme,onToggleTheme,accent,onAccent,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
   const known=list||[];
   const lastId=pointer?pointer.id:null;
-  return <div className="home-screen">
+  return <div className="home-screen has-fixed-foot">
     <div className="home-aurora" aria-hidden="true">
       <span className="orb o1"/><span className="orb o2"/><span className="orb o3"/><span className="orb o4"/>
       <span className="home-grid"/>
@@ -4738,10 +5182,12 @@ function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onMan
         </div>
       </div>
 
-      <div className="home-foot home-rise" style={{animationDelay:'300ms'}}>
-        <div className="home-foot-copy">
-          © {new Date().getFullYear()} Workspace · Mohan Viswagna MR. All rights reserved.
-        </div>
+    </div>
+    <div className="home-foot home-foot-fixed home-rise" style={{animationDelay:'300ms'}}>
+      <div className="home-foot-copy">
+        © {new Date().getFullYear()} Workspace · Mohan Viswagna MR. All rights reserved.
+      </div>
+      <div className="home-foot-controls">
         <button type="button" role="switch" aria-checked={theme==='dark'}
           className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
           title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
@@ -4750,6 +5196,9 @@ function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onMan
           <Ic n="moon" style={{width:13,height:13}}/>
           <span className="theme-switch-knob"/>
         </button>
+        <CustomSelect value={accent} onChange={onAccent}
+          options={ACCENT_COLORS.map(c=>({value:c.id,label:c.label,
+            dot:theme==='dark'?c.dark:c.light}))}/>
       </div>
     </div>
   </div>;
@@ -4777,6 +5226,7 @@ function Workspace(){
   const [sitePage,setSitePage]=React.useState(null); // 'docs' | 'about' | 'selfhost'
   const [entry,setEntry]=React.useState(null);       // null (auto) | 'start' | 'welcome'
   const [homeTheme,setHomeTheme]=React.useState(()=>readTheme().theme);
+  const [homeAccent,setHomeAccent]=React.useState(()=>readTheme().accent);
   const [saveState,setSaveState]=React.useState('saved'); // 'saved' | 'saving' | 'error'
   const driveTimer=React.useRef(null);
   const savedRef=React.useRef({id:null});
@@ -4790,6 +5240,14 @@ function Workspace(){
       document.body.classList.toggle('dark',next==='dark');
       return next;
     });
+  };
+
+  /* ---- homepage accent picker (persists to cookie + <body>) ---- */
+  const changeHomeAccent=id=>{
+    setHomeAccent(id);
+    writeTheme({theme:readTheme().theme,accent:id});
+    ACCENT_COLORS.forEach(c=>document.body.classList.remove(`t-${c.id}`));
+    document.body.classList.add(`t-${id}`);
   };
 
   /* ---- build the switcher list from local index + the active workspace ---- */
@@ -4830,7 +5288,9 @@ function Workspace(){
       uploads:data.uploads||[],
       theme:info.theme||theme, accent:info.accent||accent,
       font:info.font||'default', description:info.description||'',
+      fontSize:info.fontSize||'default', customFonts:info.customFonts||[],
       pageBg:info.pageBg||null, pageBgUrl:info.pageBgUrl||null,
+      templateRepo:info.templateRepo||'',
       active, localList:localList||[],
       tutorialCompleted:getCookie('ws_tutorial')==='1',
     });
@@ -4889,6 +5349,8 @@ function Workspace(){
     document.body.classList.toggle('dark',store.theme==='dark');
     ['indigo','blue','ocean','forest','rose','sunset','violet'].forEach(a=>document.body.classList.remove(`t-${a}`));
     document.body.classList.add(`t-${store.accent||'violet'}`);
+    // expose the workspace font to popups portaled to <body> (block menus etc.)
+    document.body.style.setProperty('--ws-font',fontStack(store.font));
 
     const active=store.active;
     // Demo workspaces live only in memory — nothing is ever written.
@@ -4896,7 +5358,7 @@ function Workspace(){
     // Freshly opened / switched workspace → nothing to save yet; don't rewrite it.
     if(savedRef.current.id!==active.id){ savedRef.current.id=active.id; setSaveState('saved'); return; }
 
-    const info={theme:store.theme,accent:store.accent,font:store.font,description:store.description,pageBg:store.pageBg};
+    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo};
     const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
     setSaveState('saving');
     clearTimeout(driveTimer.current);
@@ -4914,6 +5376,11 @@ function Workspace(){
   React.useEffect(()=>{
     if(store&&!store.tutorialCompleted&&!tutorialShown.current){ tutorialShown.current=true; setShowTutorial(true); }
   },[store]);
+
+  /* ---- make sure this workspace's imported Google Fonts are loaded ---- */
+  React.useEffect(()=>{
+    (store?.customFonts||[]).forEach(ensureGoogleFont);
+  },[store?.customFonts]);
 
   /* ---- global keyboard (declared before early return to keep hook order stable) ---- */
   React.useEffect(()=>{
@@ -5110,7 +5577,7 @@ function Workspace(){
   const flushCurrent=async()=>{
     if(!store) return;
     const a=store.active;
-    const info={theme:store.theme,accent:store.accent,font:store.font,description:store.description,pageBg:store.pageBg};
+    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo};
     const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
     try{
       if(a?.type==='local') await writeWorkspaceTreeNow(a.id,payload);
@@ -5187,7 +5654,8 @@ function Workspace(){
     return <WelcomePage onGetStarted={()=>setEntry('start')} onDemo={openDemo}
       onDocs={()=>setSitePage('docs')} onAbout={()=>setSitePage('about')}
       onSelfHost={()=>setSitePage('selfhost')}
-      theme={homeTheme} onToggleTheme={toggleHomeTheme}/>;
+      theme={homeTheme} onToggleTheme={toggleHomeTheme}
+      accent={homeAccent} onAccent={changeHomeAccent}/>;
 
   if(!store) return <>
     <HomeScreen pointer={home.pointer} list={home.list} busy={home.busy} error={home.error}
@@ -5195,6 +5663,7 @@ function Workspace(){
       onManage={()=>setModal({type:'manage-ws'})} onDocs={()=>setSitePage('docs')}
       onWelcome={()=>setEntry('welcome')}
       theme={homeTheme} onToggleTheme={toggleHomeTheme}
+      accent={homeAccent} onAccent={changeHomeAccent}
       onOpen={openKnownWorkspace} onRemove={removeKnownWorkspace} onReconnect={reconnectActive}
       onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
       onDriveNew={connectDriveNew} onDriveExisting={()=>connectDriveExisting(null)}/>
@@ -5234,7 +5703,11 @@ function Workspace(){
   const patch=p=>setStore(s=>({...s,...p}));
   const setNodes=fn=>setStore(s=>({...s,nodes:fn(s.nodes)}));
   const updateNode=(id,np)=>setNodes(n=>({...n,[id]:{...n[id],...np}}));
-  const openPage=id=>{setStore(s=>({...s,currentId:id}));setPeek(null);setModal(null);};
+  const openPage=id=>{
+    // folders have no content — clicking one just expands/collapses it
+    if(nodes[id]?.kind==='folder'){setExpanded(e=>({...e,[id]:!e[id]}));return;}
+    setStore(s=>({...s,currentId:id}));setPeek(null);setModal(null);
+  };
   const toggleExp=(id,force)=>setExpanded(e=>({...e,[id]:force!==undefined?force:!e[id]}));
 
   const addNode=(parentId,extra={})=>{
@@ -5248,6 +5721,12 @@ function Workspace(){
   const addTop=()=>{const id=addNode(null);openPage(id);};
   const addChild=parentId=>{const id=addNode(parentId);setExpanded(e=>({...e,[parentId]:true}));openPage(id);};
   const createChild=parentId=>addNode(parentId); // for subpage blocks (no nav)
+  const addFolder=parentId=>{
+    const name=prompt('Folder name','New folder');
+    if(name===null) return;
+    addNode(parentId||null,{kind:'folder',title:name.trim()||'New folder',blocks:[]});
+    if(parentId) setExpanded(e=>({...e,[parentId]:true}));
+  };
 
   const collectDesc=(id,acc)=>{acc.push(id);
     Object.values(nodes).filter(n=>n.parentId===id).forEach(c=>collectDesc(c.id,acc));};
@@ -5299,6 +5778,61 @@ function Workspace(){
     openPage(copy.id);
   };
 
+  /* ---- custom templates: a `template` flag on the page, saved in frontmatter ---- */
+  const toggleTemplate=id=>setNodes(n=>n[id]?{...n,[id]:{...n[id],template:!n[id].template}}:n);
+  /* ---- side table of contents: a `toc` flag on the page, saved in frontmatter ---- */
+  const toggleToc=id=>setNodes(n=>n[id]?{...n,[id]:{...n[id],toc:!n[id].toc}}:n);
+
+  /* ---- imported Google Fonts: validated by name, listed in info.md ---- */
+  const addCustomFont=async raw=>{
+    // normalize to Google's Title Case family names ("open sans" → "Open Sans")
+    const name=raw.trim().replace(/\s+/g,' ').split(' ')
+      .map(w=>w[0]?w[0].toUpperCase()+w.slice(1):'').join(' ');
+    if(!name) throw new Error('Enter a font name.');
+    if((store.customFonts||[]).includes(name)) return;
+    let r=null;
+    try{ r=await fetch(`https://fonts.googleapis.com/css2?family=${name.replace(/ /g,'+')}&display=swap`); }
+    catch{ throw new Error('Couldn’t reach Google Fonts — check your connection.'); }
+    if(!r.ok) throw new Error(`“${name}” wasn’t found on Google Fonts — check the spelling.`);
+    ensureGoogleFont(name);
+    setStore(s=>({...s,customFonts:[...(s.customFonts||[]),name]}));
+  };
+  const removeCustomFont=name=>setStore(s=>({...s,
+    customFonts:(s.customFonts||[]).filter(f=>f!==name),
+    ...(s.font===`g:${name}`?{font:'default'}:{})}));
+
+  const useCustomTemplate=id=>{
+    const src=nodes[id];if(!src) return;
+    const copy={...clone(src),id:nid(),template:undefined,parentId:null,
+      blocks:(src.blocks||[]).map(b=>({...clone(b),id:nid()})),
+      db:src.db?clone(src.db):undefined,
+      sort:Object.values(nodes).filter(n=>n.parentId===null).length};
+    setNodes(n=>({...n,[copy.id]:copy}));
+    openPage(copy.id);   // openPage also closes the settings modal
+  };
+  /* Add pages (as Markdown text) to the workspace as custom templates — used by
+     the settings Import… button and by "Add" from a connected repository. */
+  const addTemplatesFromTexts=texts=>{
+    setNodes(n=>{
+      const out={...n};
+      let sort=Object.values(n).filter(x=>x.parentId===null&&!x.trashed&&!x.archived).length;
+      texts.forEach(t=>{
+        try{
+          const {node}=markdownToNode(t);
+          const nn={...node,id:nid(),parentId:null,template:true,
+            trashed:undefined,archived:undefined,sort:sort++};
+          out[nn.id]=nn;
+        }catch(e){ console.warn('[templates] import failed:',e.message); }
+      });
+      return out;
+    });
+  };
+  const importTemplateFiles=async fileList=>{
+    const files=Array.from(fileList||[]).filter(f=>/\.(md|markdown)$/i.test(f.name));
+    if(!files.length) return;
+    addTemplatesFromTexts(await Promise.all(files.map(f=>f.text())));
+  };
+
   const exportPage=id=>downloadPage(id,'md',false);
 
   const downloadPage=(id,format,withSubPages=false)=>{
@@ -5339,7 +5873,7 @@ function Workspace(){
   const importPage=({title,blocks})=>{
     const id=nid();
     const sort=Object.values(nodes).filter(n=>n.parentId===null&&!n.trashed).length;
-    setNodes(n=>({...n,[id]:{id,kind:'page',title:title||'Imported',icon:'📄',cover:'',
+    setNodes(n=>({...n,[id]:{id,kind:'page',title:title||'Imported',icon:'',cover:'',
       parentId:null,sort,blocks}}));
     openPage(id);
   };
@@ -5377,6 +5911,8 @@ function Workspace(){
     try{
       const rec=await uploadFile(file);
       if(rec?.localName) setStore(s=>({...s,pageBg:rec.localName,pageBgUrl:rec.url}));
+      // demo workspaces have no disk to write to — show it for the session
+      else if(store.active?.type==='demo') setStore(s=>({...s,pageBg:null,pageBgUrl:rec.url}));
     }catch(e){ alert('Could not set the background: '+(e?.message||e)); }
   };
   const clearPageBackground=()=>setStore(s=>({...s,pageBg:null,pageBgUrl:null}));
@@ -5428,18 +5964,19 @@ function Workspace(){
     </div>;
 
   return <div className={cx('app',theme==='dark'&&'dark',`t-${accent}`)}
-    style={{'--ws-font':fontStack(store.font)}}>
+    style={{'--ws-font':fontStack(store.font),'--ws-fs':fontScale(store.fontSize)}}>
     <Sidebar open={sidebarOpen} nodes={nodes} favorites={favorites} currentId={currentId}
       expanded={expanded} toggleExp={toggleExp} openPage={openPage}
       addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={moveNode}
-      addTop={addTop} setModal={setModal}
+      addTop={addTop} addFolder={addFolder} setModal={setModal}
       workspaces={workspaces} activeWorkspaceId={activeWorkspaceId}
       onSwitchWorkspace={switchWorkspace}
       onCreateWorkspace={()=>setModal({type:'create-workspace'})}
       onDeleteWorkspace={deleteWorkspace}
       onReconnectLocal={switchWorkspace}
       toggleFav={toggleFav} duplicate={duplicate} exportPage={exportPage}
-      renameNode={renameNode} onGoHome={goHome}/>
+      renameNode={renameNode} onGoHome={goHome}
+      toggleSidebar={()=>setSidebarOpen(o=>!o)}/>
 
     <div className={cx('main',store.pageBgUrl&&'has-page-bg')}
       style={store.pageBgUrl?{'--page-bg':`url("${store.pageBgUrl}")`}:undefined}>
@@ -5502,7 +6039,7 @@ function Workspace(){
               createChild={createChild} openPage={openPage}
               lookupNode={lookupNode} openRow={editorOpenRow}
               onUploadFile={uploadFile} uploads={scopedUploads}
-              childPages={Object.values(nodes).filter(n=>n.parentId===node.id&&!n.trashed&&!n.archived)
+              childPages={Object.values(nodes).filter(n=>n.parentId===node.id&&!n.trashed&&!n.archived&&n.kind!=='folder')
                 .sort((a,b)=>(a.sort||0)-(b.sort||0))}/>}
           </>}
     </div>
@@ -5534,15 +6071,25 @@ function Workspace(){
       <SettingsModal theme={theme} setTheme={t=>patch({theme:t})}
         accent={accent} setAccent={a=>patch({accent:a})}
         font={store.font} setFont={f=>patch({font:f})}
+        fontSize={store.fontSize} setFontSize={v=>patch({fontSize:v})}
+        customFonts={store.customFonts||[]} onAddFont={addCustomFont} onRemoveFont={removeCustomFont}
         description={store.description} setDescription={d=>patch({description:d})}
         pageBgUrl={store.pageBgUrl} onUploadBg={setPageBackground} onClearBg={clearPageBackground}
         nodeCount={Object.values(nodes).filter(n=>!n.trashed&&!n.archived).length}
         activeWorkspace={activeWorkspace} onGoHome={goHome}
         onClose={()=>setModal(null)}
+        onOpenTemplates={()=>{setModal(null);openPage(TEMPLATES_ID);}}
+        customTemplates={Object.values(nodes).filter(n=>n.template&&!n.trashed&&!n.archived)
+          .sort((a,b)=>(a.title||'').localeCompare(b.title||''))}
+        onUseTemplate={useCustomTemplate} onRemoveTemplate={toggleTemplate}
+        templateRepo={store.templateRepo||''} setTemplateRepo={v=>patch({templateRepo:v})}
+        onImportTemplates={importTemplateFiles}
+        onAddRepoTemplate={t=>addTemplatesFromTexts([t])}
         onRestartTutorial={()=>{setModal(null);setShowTutorial(true);}}/>}
     {modal&&modal.type==='page-menu'&&node&&
       <PageMenu node={node} nodes={nodes} onClose={()=>setModal(null)} trashNode={trashNode}
-        duplicate={duplicate} setModal={setModal} downloadPage={downloadPage}/>}
+        duplicate={duplicate} setModal={setModal} downloadPage={downloadPage}
+        toggleTemplate={toggleTemplate} toggleToc={toggleToc}/>}
     {modal&&modal.type==='browse-cloud'&&
       <CloudWorkspacesModal
         connectedWorkspaces={workspaces}

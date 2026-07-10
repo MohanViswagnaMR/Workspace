@@ -264,12 +264,28 @@ export async function writeGdriveWorkspaceTree(rootId, store) {
     cache.text.delete(path); cache.fileId.delete(path);
   }));
 
+  // remove folder-node directories that no longer exist in the plan (deepest
+  // first; their contents were already deleted or moved by the file pass)
+  const planDirs = new Set(plan.dirs || []);
+  const prevDirs = cache.dirPaths || new Set();
+  const goneDirs = [...prevDirs].filter(d => !planDirs.has(d)
+    && ![...desired.keys()].some(p => p.startsWith(d + '/')));
+  goneDirs.sort((a, b) => b.split('/').length - a.split('/').length);
+  for (const d of goneDirs) {
+    const id = cache.folderId.get(d);
+    if (id) await _deleteFile(token, id).catch(() => {});
+    for (const key of [...cache.folderId.keys()]) if (key === d || key.startsWith(d + '/')) cache.folderId.delete(key);
+  }
+
   // upsert changed / new files: ensure the folders first (sequential — the
   // folderId cache makes this a no-op after the first save), then upload the
   // file bodies in parallel
   const changed = [...desired].filter(([path, text]) => cache.text.get(path) !== text);
   const dirs = [...new Set(changed.map(([path]) => path.split('/').slice(0, -1).join('/')))];
   for (const dir of dirs) if (dir) await _ensureFolderPath(token, rootId, dir.split('/'), cache);
+  // folder-node directories exist even when empty
+  for (const dir of plan.dirs || []) await _ensureFolderPath(token, rootId, dir.split('/'), cache);
+  cache.dirPaths = planDirs;
   await Promise.all(changed.map(async ([path, text]) => {
     const parts = path.split('/');
     const name = parts.pop();
@@ -308,14 +324,15 @@ export async function writeDriveUpload(rootId, name, blob) {
   return name;
 }
 
-async function _collectMd(token, dirId, relPath, out, cache) {
+async function _collectMd(token, dirId, relPath, out, cache, dirs) {
   const children = await _listChildren(token, dirId);
   // fetch sub-folders and file bodies in parallel; _driveFetch caps the burst
   await Promise.all(children.map(async c => {
     const p = relPath + '/' + c.name;
     if (c.mimeType === FOLDER_MIME) {
       cache.folderId.set(p, c.id);
-      await _collectMd(token, c.id, p, out, cache);
+      if (dirs) dirs.push(p);
+      await _collectMd(token, c.id, p, out, cache, dirs);
     } else if (c.name.toLowerCase().endsWith('.md')) {
       const text = await _downloadText(token, c.id);
       out.push({ path: p, text });
@@ -352,12 +369,13 @@ export async function readGdriveWorkspaceTree(rootId) {
 
   // …then read every section (and every file inside it) in parallel
   const files = [];
+  const spaceDirs = [];   // every directory under Space/ (folders may be empty)
   const uploads = [];
   const map = {};
   const jobs = [];
   if (spaceFolders.length) {
     cache.folderId.set('Space', spaceFolders[0].id);
-    jobs.push(_collectMd(token, spaceFolders[0].id, 'Space', files, cache));
+    jobs.push(_collectMd(token, spaceFolders[0].id, 'Space', files, cache, spaceDirs));
   }
   if (trashFolders.length) {
     cache.folderId.set('trash', trashFolders[0].id);
@@ -391,10 +409,13 @@ export async function readGdriveWorkspaceTree(rootId) {
   }
   await Promise.all(jobs);
 
-  const { nodes, favorites, currentId, info } = parseFolderTree(files);
+  const { nodes, favorites, currentId, info } = parseFolderTree(files, spaceDirs);
   for (const n of Object.values(nodes)) if (n.blocks) n.blocks = _hydrateBlocks(n.blocks, map);
   if (info && info.pageBg && map[info.pageBg]) info.pageBgUrl = map[info.pageBg];
   cache.uploadNames = new Set(uploads.map(u => u.name));
+  const masterDirs = new Set(files.filter(f => f.path.toLowerCase().endsWith('/master page.md'))
+    .map(f => f.path.split('/').slice(0, -1).join('/')));
+  cache.dirPaths = new Set(spaceDirs.filter(d => !masterDirs.has(d)));
 
   return { nodes, favorites, currentId, uploads, info };
 }
