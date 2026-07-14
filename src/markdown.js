@@ -92,10 +92,10 @@ export function slugifyTitle(title) {
 function splitFrontmatter(text) {
   const t = (text || '').replace(/^﻿/, '');
   const m = t.match(/^---\n([\s\S]*?)\n---\n?/);
-  if (!m) return { meta: {}, body: t };
+  if (!m) return { meta: {}, body: t, hasFm: false };
   let meta = {};
   try { meta = yaml.load(m[1]) || {}; } catch (_) { meta = {}; }
-  return { meta, body: t.slice(m[0].length) };
+  return { meta, body: t.slice(m[0].length), hasFm: true };
 }
 
 function stripLeadingTitle(body) {
@@ -373,7 +373,9 @@ export function nodeToMarkdown(node, opts = {}) {
   const fm = {
     id: node.id,
     title: node.title || 'Untitled',
-    type: node.kind === 'database' ? 'database' : node.kind === 'folder' ? 'folder' : 'page',
+    type: node.kind === 'database' ? 'database'
+      : node.kind === 'folder' ? 'folder'
+      : node.kind === 'md' ? 'markdown' : 'page',
     order: node.sort || 0,
   };
   if (node.icon) fm.icon = node.icon;
@@ -389,6 +391,12 @@ export function nodeToMarkdown(node, opts = {}) {
   if (node.kind === 'database') fm.db = node.db || emptyDb();
 
   const front = '---\n' + yaml.dump(fm, { lineWidth: -1, noRefs: true }) + '---\n\n';
+  // Simple markdown pages are saved VERBATIM — no generated "# title" line
+  // (it would be stripped back out on read, mangling the user's own content).
+  if (node.kind === 'md') {
+    const raw = node.md || '';
+    return front + raw + (raw.endsWith('\n') || raw === '' ? '' : '\n');
+  }
   const head = '# ' + (node.icon ? node.icon + ' ' : '') + (node.title || 'Untitled') + '\n\n';
   const body = node.kind === 'database'
     ? dbToTable(node.db || emptyDb())
@@ -396,13 +404,19 @@ export function nodeToMarkdown(node, opts = {}) {
   return front + head + body;
 }
 
-export function markdownToNode(text) {
-  const { meta, body } = splitFrontmatter(text);
+export function markdownToNode(text, opts = {}) {
+  const { meta, body, hasFm } = splitFrontmatter(text);
   const id = meta.id || nid();
-  const kind = meta.type === 'database' ? 'database' : meta.type === 'folder' ? 'folder' : 'page';
+  // `type: markdown` → a SIMPLE page (raw markdown, no blocks). A file with
+  // no frontmatter at all (dropped into the folder by hand) is treated the
+  // same way — it IS plain markdown, so it opens verbatim instead of being
+  // converted into blocks.
+  const kind = meta.type === 'database' ? 'database'
+    : meta.type === 'folder' ? 'folder'
+    : (meta.type === 'markdown' || !hasFm) ? 'md' : 'page';
   const node = {
     id, kind,
-    title: meta.title || 'Untitled',
+    title: meta.title || opts.fallbackTitle || 'Untitled',
     icon: meta.icon || '',
     cover: meta.cover || '',
     sort: typeof meta.order === 'number' ? meta.order : 0,
@@ -416,6 +430,11 @@ export function markdownToNode(text) {
     node.db = meta.db || emptyDb();
   } else if (kind === 'folder') {
     node.blocks = [];       // folders have no content of their own
+  } else if (kind === 'md') {
+    // verbatim — no title-strip, no block conversion. Only the single blank
+    // separator line the writer emits after the frontmatter is consumed, so
+    // repeated save/load cycles never drift the content.
+    node.md = body.replace(/^\n/, '');
   } else {
     node.blocks = bodyToBlocks(stripLeadingTitle(body));
   }
@@ -601,20 +620,24 @@ export function parseFolderTree(files, dirs) {
     if (rel === 'info.md') { info = markdownToInfo(f.text); continue; }
     if (rel.startsWith('Space/')) {
       const sub = rel.slice('Space/'.length);
-      const { node, favorite } = markdownToNode(f.text);
       const parts = sub.split('/');
       const fileBase = parts.pop();
       const dir = parts.join('/');
       const isMaster = fileBase.toLowerCase() === 'master page.md';
+      // frontmatter-less files fall back to their filename (or, for a
+      // master page, the enclosing folder name) as the title
+      const fallbackTitle = isMaster ? (dir.split('/').pop() || 'Untitled')
+        : fileBase.replace(/\.md$/i, '');
+      const { node, favorite } = markdownToNode(f.text, { fallbackTitle });
       parsed.push({ node, dir, isMaster });
       if (favorite) favorites.push(node.id);
       if (isMaster) folderNode[dir] = node.id;
     } else if (rel.startsWith('trash/')) {
-      const { node } = markdownToNode(f.text);
+      const { node } = markdownToNode(f.text, { fallbackTitle: rel.split('/').pop().replace(/\.md$/i, '') });
       node.trashed = true;                 // keep node.parentId from frontmatter
       flatNodes.push(node);
     } else if (rel.startsWith('archive/')) {
-      const { node } = markdownToNode(f.text);
+      const { node } = markdownToNode(f.text, { fallbackTitle: rel.split('/').pop().replace(/\.md$/i, '') });
       node.archived = true;                // keep node.parentId from frontmatter
       flatNodes.push(node);
     }
