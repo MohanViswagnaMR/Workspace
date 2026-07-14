@@ -18,6 +18,7 @@ in-app **Docs → Plugins & permissions** section must be kept in sync.
   "name": "My Plugin",
   "version": "1.0.0",
   "type": "page",
+  "layout": "all",
   "entry": "page.jsx",
   "icon": "🧩",
   "description": "One line",
@@ -31,6 +32,12 @@ file handler via `"handles"`) — is the default and the only type supported
 today; the registry is `SUPPORTED_PLUGIN_TYPES` in `src/plugins.jsx`. Future
 types will be added there, and a plugin with an unsupported type fails the
 compatibility test cleanly instead of misrendering.
+
+`layout` says which app layout the plugin's pages render in: `"home"` (the
+Notion-style layout), `"code"` (the VS Code-style layout) or `"all"` (the
+default). A page whose plugin is scoped to the other layout shows a
+"switch layouts" card instead of rendering, and layout-scoped plugins are
+offered only in their layout's creation menus.
 
 ## Available permissions
 

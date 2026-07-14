@@ -266,15 +266,10 @@ input,textarea{font-family:inherit;}
   padding:8px 12px;margin:2px 0 6px;border:none;border-radius:10px;cursor:pointer;
   font-size:13.5px;font-weight:650;color:#fff;letter-spacing:.01em;
   background:linear-gradient(135deg,var(--accent),var(--accent-2));
-  box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 45%,transparent),
-    0 4px 16px color-mix(in srgb,var(--accent) 45%,transparent),
-    0 0 22px color-mix(in srgb,var(--accent-2) 40%,transparent);
-  transition:transform .15s ease, box-shadow .25s ease, filter .15s ease;
-  animation:npGlow 2.8s ease-in-out infinite;}
+  box-shadow:0 1px 3px color-mix(in srgb,var(--accent) 22%,transparent);
+  transition:transform .15s ease, box-shadow .25s ease, filter .15s ease;}
 .new-page-btn:hover{transform:translateY(-1px);filter:brightness(1.06);
-  box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 60%,transparent),
-    0 6px 20px color-mix(in srgb,var(--accent) 60%,transparent),
-    0 0 30px color-mix(in srgb,var(--accent-2) 60%,transparent);}
+  box-shadow:0 2px 6px color-mix(in srgb,var(--accent) 30%,transparent);}
 .new-page-btn:active{transform:translateY(0) scale(.99);}
 .new-page-btn .np-ic{display:flex;align-items:center;justify-content:center;}
 .new-page-btn .np-ic svg{width:16px;height:16px;}
@@ -329,7 +324,8 @@ input,textarea{font-family:inherit;}
 .twist.blank{cursor:default;pointer-events:none;}
 .twist svg{width:11px;height:11px;transition:transform .15s cubic-bezier(.4,0,.2,1);}
 .twist.open svg{transform:rotate(90deg);}
-.tree-emoji{width:20px;text-align:center;flex:0 0 20px;font-size:14px;
+/* wide enough for a 4-letter extension mark ("html") at readable size */
+.tree-emoji{width:28px;text-align:center;flex:0 0 28px;font-size:14px;
   display:inline-flex;align-items:center;justify-content:center;}
 /* the Markdown mark — default icon for pages without a custom emoji */
 .md-mark{color:#519aba;display:inline-block;vertical-align:-.08em;flex-shrink:0;}
@@ -1002,6 +998,95 @@ input,textarea{font-family:inherit;}
 .plugin-check.pass span{color:#3f9d63;}
 .plugin-check.fail span{color:#d44c47;}
 .plugin-check small{color:var(--text-3);}
+
+/* =========================================================================
+   LAYOUT SWITCH (sidebar) + CODE LAYOUT (codeview.jsx — VS Code-style)
+   ========================================================================= */
+.layout-switch{display:flex;gap:4px;margin:12px 10px 16px;padding:3px;
+  background:var(--bg-input);border-radius:10px;
+  box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 25%,transparent);}
+.ls-btn{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;
+  padding:6px 0;border:none;border-radius:7px;background:none;cursor:pointer;
+  font:inherit;font-size:12.5px;font-weight:650;color:var(--text-3);
+  transition:background .15s,color .15s,box-shadow .25s;}
+.ls-btn:hover{color:var(--text);}
+.ls-btn.on{color:#fff;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));
+  box-shadow:0 1px 3px color-mix(in srgb,var(--accent) 22%,transparent);}
+
+/* VS Code STRUCTURE, the app's OWN theme — colors all come from the app's
+   theme tokens, so the code layout follows light/dark and the accent. */
+.code-layout{--cl-bg:var(--bg);--cl-side:var(--bg-card);
+  --cl-border:var(--border);--cl-text:var(--text);--cl-text2:var(--text-3);
+  --cl-hi:var(--bg-active);--cl-status:var(--accent);
+  position:fixed;inset:0;display:grid;z-index:50;
+  grid-template-columns:260px 1fr;grid-template-rows:1fr 22px;
+  grid-template-areas:"side main" "status status";
+  background:var(--cl-bg);color:var(--cl-text);
+  font-family:var(--ws-font,var(--font));font-size:13px;}
+/* the left column IS the home sidebar (same classes) placed in the grid */
+.cl-sidebar{grid-area:side;height:100%;}
+.cl-caret{width:12px;flex-shrink:0;font-size:10px;color:var(--cl-text2);}
+.cl-caret.none{visibility:hidden;}
+.cl-caret-ic{display:inline-flex;color:#dcb67a;}
+.cl-caret-ic svg{width:14px;height:14px;}
+.cl-filedot{min-width:26px;flex-shrink:0;display:inline-flex;align-items:center;
+  justify-content:center;font-size:10px;font-weight:800;font-family:var(--mono);
+  letter-spacing:-0.3px;}
+.cl-name{overflow:hidden;text-overflow:ellipsis;}
+.cl-main{grid-area:main;display:flex;flex-direction:column;min-width:0;min-height:0;}
+.cl-tabs{display:flex;background:var(--cl-side);overflow-x:auto;flex-shrink:0;
+  border-bottom:1px solid var(--cl-border);scrollbar-width:thin;}
+.cl-tab{display:flex;align-items:center;gap:6px;padding:7px 10px 7px 12px;
+  font-size:12.5px;cursor:pointer;color:var(--cl-text2);white-space:nowrap;
+  border-right:1px solid var(--cl-border);background:var(--bg-input);}
+.cl-tab.on{background:var(--cl-bg);color:var(--text);border-top:2px solid var(--cl-status);padding-top:5px;}
+.cl-tab-x{background:none;border:none;color:inherit;cursor:pointer;font-size:14px;
+  padding:0 2px;border-radius:4px;opacity:.5;}
+.cl-tab:hover .cl-tab-x,.cl-tab.on .cl-tab-x{opacity:1;}
+.cl-tab-x:hover{background:var(--bg-hover);}
+.cl-editor{flex:1;min-height:0;display:flex;flex-direction:column;position:relative;}
+/* the hosted page editors keep the APP's theme variables inside this shell */
+.cl-editor-host{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;}
+.cl-editor-host>.scroll{flex:1;min-height:0;}
+.cl-welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  color:var(--cl-text2);gap:6px;}
+.cl-welcome-mark{font-size:56px;opacity:.35;}
+.cl-welcome h2{margin:0;color:var(--cl-text);font-weight:600;font-size:18px;}
+.cl-welcome p{margin:0;font-size:13px;}
+.cl-welcome code{font-family:var(--mono);color:var(--cl-text);}
+.cl-term{height:220px;flex-shrink:0;display:flex;flex-direction:column;
+  border-top:1px solid var(--cl-border);background:var(--cl-bg);}
+.cl-term-head{display:flex;align-items:center;justify-content:space-between;
+  font-size:10.5px;letter-spacing:.08em;color:var(--cl-text2);padding:6px 12px 4px;}
+.cl-term-x{background:none;border:none;color:var(--cl-text2);cursor:pointer;font-size:15px;}
+.cl-term-x:hover{color:#fff;}
+.cl-term-body{flex:1;overflow-y:auto;padding:2px 12px 10px;font-family:var(--mono);
+  font-size:12.5px;line-height:1.55;cursor:text;}
+.cl-term-xterm{flex:1;min-height:0;padding:0 4px 4px 10px;}
+.cl-term-xterm .xterm{height:100%;}
+.cl-term-off{flex:1;overflow-y:auto;padding:4px 14px 12px;font-family:var(--mono);
+  font-size:12.5px;line-height:1.6;}
+.cl-term-cmd{margin:8px 0;padding:10px 12px;border:1px solid var(--cl-border);
+  border-radius:8px;background:var(--bg-input);color:var(--cl-text);
+  font-family:var(--mono);font-size:12px;white-space:pre;overflow-x:auto;user-select:all;}
+.cl-term-btns{display:flex;gap:8px;margin-top:2px;}
+.cl-term-retry{padding:5px 14px;border-radius:8px;cursor:pointer;
+  border:1px solid var(--cl-border);background:var(--bg-input);color:var(--cl-text);font:inherit;}
+.cl-term-retry:hover{border-color:var(--accent);}
+.cl-term-line{white-space:pre-wrap;word-break:break-word;color:var(--cl-text);}
+.cl-term-line.err{color:#d44c47;}
+.cl-term-line.in{color:var(--text-2);}
+.cl-prompt{color:var(--accent);font-weight:700;}
+.cl-term-body input{background:none;border:none;outline:none;color:var(--text-2);
+  font:inherit;width:70%;}
+.cl-status{grid-area:status;display:flex;align-items:center;background:var(--cl-status);
+  color:#fff;font-size:11.5px;overflow:hidden;}
+.cl-status-item{display:flex;align-items:center;gap:4px;padding:0 9px;height:100%;
+  background:none;border:none;color:#fff;font:inherit;white-space:nowrap;}
+button.cl-status-item{cursor:pointer;}
+button.cl-status-item:hover{background:#ffffff22;}
+.cl-status-branch{font-weight:600;}
 
 /* the copyable "build a plugin with AI" prompt */
 .set-ai-prompt{width:100%;box-sizing:border-box;max-height:200px;overflow:auto;margin:0;

@@ -164,19 +164,30 @@ function Ic({n, style}) {
 
 /* Default icon for SIMPLE markdown pages: just the text "md" — plain styled
    text (no SVG box), so at default size it matches the page-title text size. */
-function MdMark({size=16}){
+/* Text icon for file-backed pages: the extension itself ("md", "py", "txt")
+   rendered as the icon — no box, just the letters. */
+const EXT_MARK_COLORS={md:'#519aba',py:'#4B8BBE',js:'#e8d44d',jsx:'#61dafb',ts:'#3178c6',
+  html:'#e37933',css:'#9575cd',json:'#cbcb41',csv:'#89e051',sh:'#89e051',
+  yaml:'#cb4b16',xml:'#e37933',sql:'#c0c0c0',txt:'#9aa0a6'};
+function ExtMark({ext='md',size=16}){
+  const t=String(ext||'md').toLowerCase().slice(0,4);
   return <span className="md-mark" aria-hidden="true"
-    style={{fontSize:Math.round(size*0.9),fontWeight:800,lineHeight:1,
+    style={{fontSize:Math.round(size*(t.length>2?0.72:0.9)),fontWeight:800,lineHeight:1,
       fontFamily:"ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace",
-      letterSpacing:'-0.5px'}}>md</span>;
+      letterSpacing:'-0.5px',color:EXT_MARK_COLORS[t]}}>{t}</span>;
 }
+const MdMark=({size=16})=><ExtMark ext="md" size={size}/>;
 /* Default icon for SMART (block) pages: the lucide page/document icon. */
 const PageMark=({size=15})=>
   <Ic n="doc" style={{width:size,height:size,color:'var(--text-2)'}}/>;
-/* Kind-aware default: "md" badge for simple pages, page icon otherwise.
-   (Used wherever a node has no custom emoji icon.) */
+/* Kind-aware default (used wherever a node has no custom emoji icon):
+   smart pages → document icon; file-backed pages → their extension as text
+   ("md" for simple md + plugin pages, "py"/"txt"/… for file pages). */
 const NodeMark=({node,size=15})=>
-  node&&node.kind==='md'?<MdMark size={size}/>:<PageMark size={size}/>;
+  !node?<PageMark size={size}/>
+  :node.kind==='md'||node.kind==='plugin'?<ExtMark ext="md" size={size}/>
+  :node.kind==='file'?<ExtMark ext={node.ext||'txt'} size={size}/>
+  :<PageMark size={size}/>;
 /* Default folder icon (simple outline, not an emoji). */
 const FolderMark=({open,size=15})=>
   <Ic n={open?'folder-open':'folder'} style={{width:size,height:size,color:'var(--text-2)'}}/>;
@@ -2753,7 +2764,7 @@ export {
   SEL_COLORS, TEXT_COLORS, COVERS, EMOJI, ALL_EMOJI, PAGE_EMOJI, CODE_LANGS,
   CMDS, SHORTCUTS, IS_MAC, fmtShortcut, ICON_MAP, APP_VERSION,
   DASH_ID, STORAGE_ID, TRASH_ID, ARCHIVE_ID, TEMPLATES_ID,
-  Ic, MdMark, PageMark, NodeMark, FolderMark,
+  Ic, MdMark, ExtMark, PageMark, NodeMark, FolderMark,
   newDB, mkRow, buildSeed,
   Popup, EmojiPicker, ConfirmHint, ImagePicker, FILE_ICON, FilePicker,
   FILE_TYPE_COLOR, fileAccentColor, FileBlockBody, ContextMenu,

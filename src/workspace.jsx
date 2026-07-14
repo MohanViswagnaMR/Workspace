@@ -331,8 +331,8 @@ function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,
 function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,addChild,
   trashNode,archiveNode,onDrop,addTop,addFolder,setModal,workspaces,activeWorkspaceId,
   onSwitchWorkspace,onCreateWorkspace,onDeleteWorkspace,onReconnectLocal,
-  toggleFav,duplicate,exportPage,renameNode,onGoHome,toggleSidebar,plugins,addFile,addNamedPage}){
-  const [plugMenu,setPlugMenu]=React.useState(null);
+  toggleFav,duplicate,exportPage,renameNode,onGoHome,toggleSidebar,addNamedPage,
+  layout,setLayout}){
   // one O(n) pass instead of an O(n) filter per tree item — the sidebar
   // re-renders on every store change, so this is hot
   const childrenMap=React.useMemo(()=>{
@@ -377,6 +377,19 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
         onReconnect={onReconnectLocal}
         onClose={()=>setWsPop(null)}/>}
     </div>
+    {/* layout switch — Home (this Notion-style layout) ⟷ Code (VS Code-style) */}
+    <div className="layout-switch">
+      <button className={cx('ls-btn',layout!=='code'&&'on')}
+        title="Home layout — pages & databases"
+        onClick={()=>{ setLayout&&setLayout('home'); openPage(DASH_ID); }}>
+        <Ic n="home" style={{width:14,height:14}}/> Home
+      </button>
+      <button className={cx('ls-btn',layout==='code'&&'on')}
+        title="Code layout — explorer, tabs & terminal"
+        onClick={()=>setLayout&&setLayout('code')}>
+        <span style={{fontFamily:'var(--mono)',fontWeight:700,fontSize:12}}>&lt;/&gt;</span> Code
+      </button>
+    </div>
     <div className="nav">
       <button className="new-page-btn" onClick={()=>addNamedPage(null)}
         title={`Create a new page — name it first: hello.py, notes.md, or a plain name for a smart page (${fmtShortcut('Alt + N')})`}>
@@ -385,7 +398,6 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
         <span className="np-kbd">{fmtShortcut('Alt + N')}</span>
       </button>
       {navRow('search','Search',()=>setModal({type:'search'}),fmtShortcut('Ctrl/⌘ + K'))}
-      {navRow('dashboard','Home',()=>openPage(DASH_ID),null,currentId===DASH_ID)}
     </div>
     <div className="nav-scroll">
       {favNodes.length>0&&<>
@@ -402,28 +414,10 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
       </>}
 
       <div className="sec-title"><span>Pages</span>
-        {(plugins||[]).length>0&&<button title="Add a plugin page"
-          onClick={e=>setPlugMenu(e.currentTarget.getBoundingClientRect())}
-          style={{fontSize:12}}>🧩</button>}
-        <button title="Add a file (asks for its name first — .py, .html, .csv…)"
-          onClick={()=>addFile(null)}><Ic n="paperclip"/></button>
         <button title="Add a folder" onClick={()=>addFolder(null)}><Ic n="folder-plus"/></button>
-        <button title="Add a Markdown page (plain .md, no blocks)" onClick={()=>addTop('md')}><MdMark size={14}/></button>
-        <button title="Add a page" onClick={()=>addTop()}><Ic n="plus"/></button>
+        <button title="Add a page — the name decides the kind: hello.py, notes.md, or a plain name"
+          onClick={()=>addNamedPage(null)}><Ic n="plus"/></button>
       </div>
-      {plugMenu&&<Popup rect={plugMenu} onClose={()=>setPlugMenu(null)} width={250}>
-        <div className="menu">
-          <div className="menu-h">Plugin pages</div>
-          {(plugins||[]).map(p=>
-            <div className="mi" key={p.id}
-              onMouseDown={e=>{e.preventDefault();addTop('plugin:'+p.id);setPlugMenu(null);}}>
-              <div className="mi-ic">{p.manifest.icon}</div>
-              <div className="mi-tx">{p.manifest.name}
-                <small style={{color:'var(--text-3)'}}>{p.manifest.description||('v'+p.manifest.version)}</small>
-              </div>
-            </div>)}
-        </div>
-      </Popup>}
       <div className="nav">
         {roots.map(n=>
           <TreeItem key={n.id} node={n} childrenMap={childrenMap} depth={0} currentId={currentId}
@@ -1977,6 +1971,7 @@ manifest.json:
   "name": "My Plugin",
   "version": "1.0.0",
   "type": "page",       ← the plugin type; "page" is the only supported type today
+  "layout": "all",      ← which app layout it works in: "home", "code" or "all"
   "entry": "page.jsx",
   "icon": "🧩",
   "description": "One line describing it",
@@ -2861,6 +2856,7 @@ function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onMan
 /* Docs / About / Self-hosting are website pages most sessions never open —
    they load as a separate chunk on first visit (see sitepages.jsx). */
 const PluginHost=React.lazy(()=>import('./plugins.jsx').then(m=>({default:m.PluginHost})));
+const CodeLayout=React.lazy(()=>import('./codeview.jsx'));
 const DocsPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.DocsPage})));
 const AboutPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.AboutPage})));
 const SelfHostPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.SelfHostPage})));
@@ -2889,6 +2885,14 @@ function Workspace(){
      runs a variable number of times per mount. */
   const [plugins,setPlugins]=React.useState([]);
   const [pendingRename,setPendingRename]=React.useState(null); // node id → topbar auto-rename
+  /* app layout: 'home' (Notion-style) | 'code' (VS Code-style). Persisted. */
+  const [layout,setLayoutState]=React.useState(()=>{
+    try{ return localStorage.getItem('ws_layout')==='code'?'code':'home'; }catch(_){ return 'home'; }
+  });
+  const setLayout=l=>{
+    setLayoutState(l);
+    try{ localStorage.setItem('ws_layout',l); }catch(_){}
+  };
   // id of a just-created page whose typed NAME decides its kind
   // (hello.py → file, notes.md → simple md, plain name → smart page)
   const creatingRef=React.useRef(null);
@@ -3502,17 +3506,15 @@ function Workspace(){
     setPendingRename(id);
     openPage(id);
   };
-  /* New FILE page — created as untitled.txt and dropped straight into the
-     topbar rename (name pre-selected), because the name carries the extension
-     that decides which page opens it. */
-  const addFile=parentId=>{
-    const id=addNode(parentId||null,{kind:'file',title:'untitled.txt',ext:'txt',
-      plugin:'',data:'',blocks:undefined,icon:''});
-    if(parentId) setExpanded(e=>({...e,[parentId]:true}));
-    setPendingRename(id);
+  /* Non-interactive variant (code-layout terminal / explorer +): the name is
+     already known — create and apply the same name-decides-kind logic. */
+  const createNamed=(name,parentId)=>{
+    const id=addNode(parentId||null,{});
+    creatingRef.current=id;
+    commitRename({id,kind:'page'},name);
     openPage(id);
+    return id;
   };
-
   const collectDesc=(id,acc)=>{acc.push(id);
     Object.values(nodes).filter(n=>n.parentId===id).forEach(c=>collectDesc(c.id,acc));};
   const trashNode=id=>{
@@ -3748,8 +3750,36 @@ function Workspace(){
       <div className="topbar-actions"/>
     </div>;
 
+  /* One editor router for BOTH layouts (home + code). */
+  const renderPageEditor=n=>
+    n.kind==='md'
+      ? <MarkdownEditor key={n.id} node={n} update={updateNode}/>
+      : n.kind==='plugin'||n.kind==='file'
+      ? <React.Suspense fallback={<div className="scroll page-scroll"/>}>
+          <PluginHost key={n.id} node={n}
+            plugin={n.kind==='plugin'
+              ? plugins.find(p=>p.id===n.plugin)
+              : resolveHandler(n)}
+            update={updateNode} api={pluginApi} layout={layout}/>
+        </React.Suspense>
+      : <Editor key={n.id} node={n} update={updateNode}
+          createChild={createChild} openPage={openPage}
+          lookupNode={lookupNode} openRow={editorOpenRow}
+          onUploadFile={uploadFile} uploads={scopedUploads}
+          childPages={Object.values(nodes).filter(x=>x.parentId===n.id&&!x.trashed&&!x.archived&&x.kind!=='folder')
+            .sort((a,b)=>(a.sort||0)-(b.sort||0))}/>;
+
   return <div className={cx('app',theme==='dark'&&'dark',`t-${accent}`)}
     style={{'--ws-font':fontStack(store.font),'--ws-fs':fontScale(store.fontSize)}}>
+    {layout==='code'
+    ? <React.Suspense fallback={<BootScreen/>}>
+        <CodeLayout nodes={nodes} currentId={currentId} openPage={openPage}
+          renderEditor={renderPageEditor} createNamed={createNamed} addFolder={addFolder}
+          trashNode={trashNode} wsName={activeWorkspace?.name}
+          plugins={plugins} saveState={saveState}
+          setLayout={setLayout} setModal={setModal} dashId={DASH_ID}/>
+      </React.Suspense>
+    : <>
     <Sidebar open={sidebarOpen} nodes={nodes} favorites={favorites} currentId={currentId}
       expanded={expanded} toggleExp={toggleExp} openPage={openPage}
       addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={moveNode}
@@ -3761,8 +3791,8 @@ function Workspace(){
       onReconnectLocal={switchWorkspace}
       toggleFav={toggleFav} duplicate={duplicate} exportPage={exportPage}
       renameNode={renameNode} onGoHome={goHome}
-      toggleSidebar={()=>setSidebarOpen(o=>!o)} plugins={plugins} addFile={addFile}
-      addNamedPage={addNamedPage}/>
+      toggleSidebar={()=>setSidebarOpen(o=>!o)}
+      addNamedPage={addNamedPage} layout={layout} setLayout={setLayout}/>
 
     <div className={cx('main',store.pageBgUrl&&'has-page-bg')}
       style={store.pageBgUrl?{'--page-bg':`url("${store.pageBgUrl}")`}:undefined}>
@@ -3824,24 +3854,10 @@ function Workspace(){
               pendingRename={pendingRename}
               pendingIsCreate={pendingRename!=null&&creatingRef.current===pendingRename}
               clearPendingRename={()=>setPendingRename(null)}/>
-            {node&&(node.kind==='md'
-              ? <MarkdownEditor key={node.id} node={node} update={updateNode}/>
-              : node.kind==='plugin'||node.kind==='file'
-              ? <React.Suspense fallback={<div className="scroll page-scroll"/>}>
-                  <PluginHost key={node.id} node={node}
-                    plugin={node.kind==='plugin'
-                      ? plugins.find(p=>p.id===node.plugin)
-                      : resolveHandler(node)}
-                    update={updateNode} api={pluginApi}/>
-                </React.Suspense>
-              : <Editor key={node.id} node={node} update={updateNode}
-                  createChild={createChild} openPage={openPage}
-                  lookupNode={lookupNode} openRow={editorOpenRow}
-                  onUploadFile={uploadFile} uploads={scopedUploads}
-                  childPages={Object.values(nodes).filter(n=>n.parentId===node.id&&!n.trashed&&!n.archived&&n.kind!=='folder')
-                    .sort((a,b)=>(a.sort||0)-(b.sort||0))}/>)}
+            {node&&renderPageEditor(node)}
           </>}
     </div>
+    </>}
 
     {showTutorial&&
       <TutorialOverlay
