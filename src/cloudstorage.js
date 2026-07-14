@@ -16,7 +16,7 @@
    OAuth: Google Identity Services token client (implicit, browser-only). The
    GIS script is pre-loaded in index.html. Tokens are cached in sessionStorage.
    ========================================================================= */
-import { buildFolderPlan, parseFolderTree, infoToMarkdown, markdownToInfo } from './markdown.js';
+import { buildFolderPlan, parseFolderTree, infoToMarkdown, markdownToInfo, FILE_PAGE_EXT_RE } from './markdown.js';
 
 export const GDRIVE = {
   id: 'gdrive',
@@ -324,7 +324,7 @@ export async function writeDriveUpload(rootId, name, blob) {
   return name;
 }
 
-async function _collectMd(token, dirId, relPath, out, cache, dirs) {
+async function _collectMd(token, dirId, relPath, out, cache, dirs, extraExts) {
   const children = await _listChildren(token, dirId);
   // fetch sub-folders and file bodies in parallel; _driveFetch caps the burst
   await Promise.all(children.map(async c => {
@@ -332,8 +332,10 @@ async function _collectMd(token, dirId, relPath, out, cache, dirs) {
     if (c.mimeType === FOLDER_MIME) {
       cache.folderId.set(p, c.id);
       if (dirs) dirs.push(p);
-      await _collectMd(token, c.id, p, out, cache, dirs);
-    } else if (c.name.toLowerCase().endsWith('.md')) {
+      await _collectMd(token, c.id, p, out, cache, dirs, extraExts);
+    } else if (c.name.toLowerCase().endsWith('.md') || FILE_PAGE_EXT_RE.test(c.name)
+        || (extraExts && extraExts.has((c.name.match(/\.([^./]+)$/) || [, ''])[1]?.toLowerCase()))) {
+      // .md pages plus text files (.py/.html/…) that open as 'file' pages
       const text = await _downloadText(token, c.id);
       out.push({ path: p, text });
       cache.text.set(p, text); cache.fileId.set(p, c.id);
@@ -367,15 +369,25 @@ export async function readGdriveWorkspaceTree(rootId) {
     _findChild(token, 'Upload', rootId, true),
   ]);
 
-  // …then read every section (and every file inside it) in parallel
+  // …then read every section (and every file inside it) in parallel.
+  // info.md is fetched FIRST: its fileHandlers map registers custom file
+  // extensions the Space/ walk must also collect (e.g. .ipynb).
   const files = [];
   const spaceDirs = [];   // every directory under Space/ (folders may be empty)
   const uploads = [];
   const map = {};
   const jobs = [];
+  let extraExts = null;
+  if (infoFiles.length) {
+    cache.fileId.set('info.md', infoFiles[0].id);
+    const text = await _downloadText(token, infoFiles[0].id);
+    files.push({ path: 'info.md', text });
+    cache.text.set('info.md', text);
+    extraExts = new Set(Object.keys(markdownToInfo(text).fileHandlers || {}).map(e => e.toLowerCase()));
+  }
   if (spaceFolders.length) {
     cache.folderId.set('Space', spaceFolders[0].id);
-    jobs.push(_collectMd(token, spaceFolders[0].id, 'Space', files, cache, spaceDirs));
+    jobs.push(_collectMd(token, spaceFolders[0].id, 'Space', files, cache, spaceDirs, extraExts));
   }
   if (trashFolders.length) {
     cache.folderId.set('trash', trashFolders[0].id);
@@ -384,13 +396,6 @@ export async function readGdriveWorkspaceTree(rootId) {
   if (archiveFolders.length) {
     cache.folderId.set('archive', archiveFolders[0].id);
     jobs.push(_collectMd(token, archiveFolders[0].id, 'archive', files, cache));
-  }
-  if (infoFiles.length) {
-    cache.fileId.set('info.md', infoFiles[0].id);
-    jobs.push(_downloadText(token, infoFiles[0].id).then(text => {
-      files.push({ path: 'info.md', text });
-      cache.text.set('info.md', text);
-    }));
   }
   if (uploadFolders.length) {
     cache.folderId.set('Upload', uploadFolders[0].id);
@@ -418,6 +423,41 @@ export async function readGdriveWorkspaceTree(rootId) {
   cache.dirPaths = new Set(spaceDirs.filter(d => !masterDirs.has(d)));
 
   return { nodes, favorites, currentId, uploads, info };
+}
+
+/* Read plugins/<name>/* from a Drive workspace. Mirrors readLocalPlugins in
+   localfs.js: each child folder of plugins/ is one plugin, its text files
+   (one level) returned as { name → text }. Returns [] without a plugins/
+   folder. Interpretation happens in plugins.jsx. */
+const PLUGIN_FILE_RE = /\.(json|jsx?|css|md)$/i;
+export async function readDrivePlugins(rootId) {
+  const token = _getToken();
+  if (!token) return [];
+  const pluginFolders = await _findChild(token, 'plugins', rootId, true);
+  if (!pluginFolders.length) return [];
+  const dirs = (await _listChildren(token, pluginFolders[0].id)).filter(c => c.mimeType === FOLDER_MIME);
+  return (await Promise.all(dirs.map(async d => {
+    const files = {};
+    await Promise.all((await _listChildren(token, d.id)).map(async c => {
+      if (c.mimeType === FOLDER_MIME || !PLUGIN_FILE_RE.test(c.name)) return;
+      try { files[c.name] = await _downloadText(token, c.id); } catch (_) {}
+    }));
+    return Object.keys(files).length ? { id: d.name, files } : null;
+  }))).filter(Boolean);
+}
+
+/* Write a plugin's files into plugins/<pluginId>/ (installing from GitHub). */
+export async function writeDrivePlugin(rootId, pluginId, files) {
+  const token = _getToken();
+  if (!token) throw new Error('Not authenticated with Google Drive.');
+  const pf = await _findChild(token, 'plugins', rootId, true);
+  const pid = pf.length ? pf[0].id : await _createFolder(token, 'plugins', rootId);
+  const df = await _findChild(token, pluginId, pid, true);
+  const did = df.length ? df[0].id : await _createFolder(token, pluginId, pid);
+  for (const [name, text] of Object.entries(files)) {
+    const ex = await _findChild(token, name, did, false);
+    await _uploadText(token, did, name, text, ex.length ? ex[0].id : undefined);
+  }
 }
 
 /* Read a Drive workspace's stored settings (theme/accent/font/description)

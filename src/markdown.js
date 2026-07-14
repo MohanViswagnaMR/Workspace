@@ -78,6 +78,16 @@ export function inlineToHtml(t) {
 /* ---------------------------------------------------------- filenames ---- */
 const RESERVED_BASE = 'master page';
 
+/* md plugin pages carry their binding IN THE FILENAME: "Title-(plugin-id).md".
+   That keeps the page↔plugin mapping visible in the file system, and a file
+   hand-named this way binds to its plugin even with no frontmatter. */
+export const PLUGIN_NAME_RE = /^(.*)-\(([\w.-]+)\)$/;
+
+/* Non-.md files under Space/ become 'file' pages handled by handler plugins
+   (or the built-in text editor). Text formats only — binary is not a page. */
+export const FILE_PAGE_EXT_RE =
+  /\.(txt|html?|css|js|jsx|ts|tsx|json|py|rb|go|rs|java|c|h|cpp|sh|bash|yaml|yml|toml|xml|svg|csv|sql|ini|conf|log)$/i;
+
 export function slugifyTitle(title) {
   let s = (title || '').trim()
     .replace(/[\/\\:*?"<>|]/g, ' ')   // path-illegal characters
@@ -375,9 +385,15 @@ export function nodeToMarkdown(node, opts = {}) {
     title: node.title || 'Untitled',
     type: node.kind === 'database' ? 'database'
       : node.kind === 'folder' ? 'folder'
-      : node.kind === 'md' ? 'markdown' : 'page',
+      : node.kind === 'md' ? 'markdown'
+      : node.kind === 'plugin' ? 'plugin'
+      : node.kind === 'file' ? 'file' : 'page',
     order: node.sort || 0,
   };
+  if (node.kind === 'plugin') fm.plugin = node.plugin || '';
+  // 'file' pages only pass through here for trash/ and archive/ (live ones are
+  // written raw by buildFolderPlan) — keep ext/plugin so restore is lossless.
+  if (node.kind === 'file') { fm.ext = node.ext || ''; if (node.plugin) fm.plugin = node.plugin; }
   if (node.icon) fm.icon = node.icon;
   if (node.cover) fm.cover = node.cover;
   if (opts.isFavorite) fm.favorite = true;
@@ -397,6 +413,13 @@ export function nodeToMarkdown(node, opts = {}) {
     const raw = node.md || '';
     return front + raw + (raw.endsWith('\n') || raw === '' ? '' : '\n');
   }
+  // Plugin pages: the body is the plugin's own data string (usually JSON),
+  // saved verbatim like simple md pages — the app never interprets it.
+  // 'file' pages in trash/archive keep their raw content the same way.
+  if (node.kind === 'plugin' || node.kind === 'file') {
+    const raw = node.data || '';
+    return front + raw + (raw.endsWith('\n') || raw === '' ? '' : '\n');
+  }
   const head = '# ' + (node.icon ? node.icon + ' ' : '') + (node.title || 'Untitled') + '\n\n';
   const body = node.kind === 'database'
     ? dbToTable(node.db || emptyDb())
@@ -407,16 +430,21 @@ export function nodeToMarkdown(node, opts = {}) {
 export function markdownToNode(text, opts = {}) {
   const { meta, body, hasFm } = splitFrontmatter(text);
   const id = meta.id || nid();
+  // A filename shaped "Title-(plugin-id)" binds the file to that plugin even
+  // when there is no frontmatter (hand-made files).
+  const nameBind = !hasFm && opts.fallbackTitle ? opts.fallbackTitle.match(PLUGIN_NAME_RE) : null;
   // `type: markdown` → a SIMPLE page (raw markdown, no blocks). A file with
   // no frontmatter at all (dropped into the folder by hand) is treated the
   // same way — it IS plain markdown, so it opens verbatim instead of being
   // converted into blocks.
   const kind = meta.type === 'database' ? 'database'
     : meta.type === 'folder' ? 'folder'
+    : meta.type === 'file' ? 'file'
+    : (meta.type === 'plugin' || nameBind) ? 'plugin'
     : (meta.type === 'markdown' || !hasFm) ? 'md' : 'page';
   const node = {
     id, kind,
-    title: meta.title || opts.fallbackTitle || 'Untitled',
+    title: meta.title || (nameBind ? nameBind[1].trim() : opts.fallbackTitle) || 'Untitled',
     icon: meta.icon || '',
     cover: meta.cover || '',
     sort: typeof meta.order === 'number' ? meta.order : 0,
@@ -435,6 +463,15 @@ export function markdownToNode(text, opts = {}) {
     // separator line the writer emits after the frontmatter is consumed, so
     // repeated save/load cycles never drift the content.
     node.md = body.replace(/^\n/, '');
+  } else if (kind === 'plugin') {
+    // same verbatim + one-newline rule as md pages
+    node.plugin = meta.plugin || (nameBind ? nameBind[2] : '');
+    node.data = body.replace(/^\n/, '');
+  } else if (kind === 'file') {
+    // trash/archive form of a file page (live ones never carry frontmatter)
+    node.ext = (meta.ext || '').toLowerCase();
+    node.plugin = meta.plugin || '';
+    node.data = body.replace(/^\n/, '');
   } else {
     node.blocks = bodyToBlocks(stripLeadingTitle(body));
   }
@@ -456,6 +493,8 @@ export function infoToMarkdown(info = {}) {
   if (info.templateRepo) fm.templateRepo = info.templateRepo;   // "owner/repo" on GitHub
   if (info.fontSize && info.fontSize !== 'default') fm.fontSize = info.fontSize;
   if ((info.customFonts || []).length) fm.customFonts = info.customFonts;   // Google Fonts names
+  // per-workspace file-type → handler-plugin overrides (Settings → File handlers)
+  if (info.fileHandlers && Object.keys(info.fileHandlers).length) fm.fileHandlers = info.fileHandlers;
   const front = '---\n' + yaml.dump(fm, { lineWidth: -1, noRefs: true }) + '---\n\n';
   return front +
     '# Workspace info\n\n' +
@@ -476,6 +515,8 @@ export function markdownToInfo(text) {
     fontSize: meta.fontSize || 'default',
     customFonts: Array.isArray(meta.customFonts)
       ? meta.customFonts.filter(f => typeof f === 'string') : [],
+    fileHandlers: (meta.fileHandlers && typeof meta.fileHandlers === 'object'
+      && !Array.isArray(meta.fileHandlers)) ? meta.fileHandlers : {},
   };
 }
 
@@ -514,7 +555,24 @@ export function buildFolderPlan(store) {
   const walk = (parentKey, dirPath) => {
     for (const node of childrenOf[parentKey] || []) {
       const hasKids = (childrenOf[node.id] || []).length > 0;
-      const base = slugifyTitle(node.title);
+      // Plugin pages encode their handler in the filename: "Title-(plugin-id)"
+      const base = node.kind === 'plugin' && node.plugin
+        ? slugifyTitle(node.title) + '-(' + node.plugin + ')'
+        : slugifyTitle(node.title);
+      // 'file' pages (a .py/.html/… file in Space/) are written back VERBATIM
+      // under their own filename — no frontmatter (it would corrupt the file).
+      if (node.kind === 'file') {
+        const m = (node.title || 'file.txt').match(/^(.*?)(\.[^.]+)?$/);
+        // an explicit handler binding rides in the name: "base-(plugin).ext"
+        const fbase = slugifyTitle(m[1] || 'file') + (node.plugin ? '-(' + node.plugin + ')' : '');
+        const fext = m[2] || '';
+        const set = usedByDir[dirPath] || (usedByDir[dirPath] = new Set());
+        let fname = fbase + fext, fi = 1;
+        while (set.has(fname.toLowerCase())) { fname = fbase + '_' + fi + fext; fi++; }
+        set.add(fname.toLowerCase());
+        files.push({ path: dirPath + '/' + fname, text: node.data || '' });
+        continue;
+      }
       // A folder is a directory WITHOUT a master page.md — that absence is
       // exactly what distinguishes it from a page-with-subpages on disk.
       if (node.kind === 'folder') {
@@ -574,12 +632,20 @@ export function nodeDiskPath(store, nodeId) {
   const chain = [];
   for (let n = nodes[nodeId]; n; n = n.parentId ? nodes[n.parentId] : null) chain.unshift(n);
 
+  // sibling's base name, consistent with buildFolderPlan's naming rules
+  const baseOf = s => s.kind === 'plugin' && s.plugin
+    ? slugifyTitle(s.title) + '-(' + s.plugin + ')'
+    : s.kind === 'file'
+    ? (m => slugifyTitle(m[1] || 'file') + (s.plugin ? '-(' + s.plugin + ')' : '') + (m[2] || ''))
+        ((s.title || 'file.txt').match(/^(.*?)(\.[^.]+)?$/))
+    : slugifyTitle(s.title);
+
   // resolve the de-duplicated base name of `node` among its siblings
   const nameOf = (node, parentId, dirHasMaster) => {
     const used = new Set(dirHasMaster ? [RESERVED_BASE] : []);
     let chosen = 'Untitled';
     for (const s of kidsOf(parentId)) {
-      let base = slugifyTitle(s.title), name = base, i = 1;
+      let base = baseOf(s), name = base, i = 1;
       while (used.has(name.toLowerCase())) { name = base + '_' + i; i++; }
       used.add(name.toLowerCase());
       if (s.id === node.id) chosen = name;
@@ -595,7 +661,9 @@ export function nodeDiskPath(store, nodeId) {
     const base = nameOf(node, parentId, k > 0 && chain[k - 1].kind !== 'folder');
     const hasKids = kidsOf(node.id).length > 0;
     segs.push(k === chain.length - 1
-      ? (node.kind === 'folder' ? base : hasKids ? base + '/master page.md' : base + '.md')
+      ? (node.kind === 'folder' ? base
+        : node.kind === 'file' ? base
+        : hasKids ? base + '/master page.md' : base + '.md')
       : base);
   }
   return segs.join('/');
@@ -614,10 +682,41 @@ export function parseFolderTree(files, dirs) {
   const flatNodes = [];   // trash/ + archive/ — parentId comes from frontmatter, not folders
   let info = null;
 
+  // info.md first: its fileHandlers map can register CUSTOM file extensions
+  // (e.g. ipynb) that should open as 'file' pages beyond the built-in list.
+  const infoFile = (files || []).find(f => f && f.path && f.path.replace(/^\/+/, '') === 'info.md');
+  if (infoFile) info = markdownToInfo(infoFile.text);
+  const customExts = new Set(Object.keys(info?.fileHandlers || {}).map(e => e.toLowerCase()));
+
   for (const f of files || []) {
-    if (!f || !f.path || !f.path.endsWith('.md')) continue;
+    if (!f || !f.path) continue;
     const rel = f.path.replace(/^\/+/, '');
-    if (rel === 'info.md') { info = markdownToInfo(f.text); continue; }
+    // Non-.md text files under Space/ are 'file' pages — content kept VERBATIM,
+    // rendered by a handler plugin (or the built-in text editor). No metadata
+    // lives in these files, so hierarchy comes from folders, title = filename.
+    // "base-(plugin-id).ext" binds THIS file to that handler plugin, exactly
+    // like plugin .md pages; without it, the workspace's per-extension default
+    // (Settings → File handlers) decides.
+    if (!rel.endsWith('.md')) {
+      const relExt = (rel.match(/\.([^./]+)$/) || [, ''])[1].toLowerCase();
+      if (rel.startsWith('Space/') && (FILE_PAGE_EXT_RE.test(rel) || customExts.has(relExt))) {
+        const sub = rel.slice('Space/'.length);
+        const parts = sub.split('/');
+        const fileName = parts.pop();
+        const fm2 = fileName.match(/^(.*?)(\.[^.]+)$/);           // base + .ext
+        const bind = fm2 ? fm2[1].match(PLUGIN_NAME_RE) : null;   // base = "title-(plugin)"?
+        parsed.push({
+          node: { id: nid(), kind: 'file',
+            title: bind ? bind[1].trim() + fm2[2] : fileName,
+            plugin: bind ? bind[2] : '',
+            ext: (fileName.match(/\.([^.]+)$/) || [, ''])[1].toLowerCase(),
+            icon: '', cover: '', sort: 5e5, parentId: null, data: f.text },
+          dir: parts.join('/'), isMaster: false,
+        });
+      }
+      continue;
+    }
+    if (rel === 'info.md') continue;   // already parsed above
     if (rel.startsWith('Space/')) {
       const sub = rel.slice('Space/'.length);
       const parts = sub.split('/');

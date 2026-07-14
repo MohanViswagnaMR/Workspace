@@ -16,7 +16,7 @@
    lack showDirectoryPicker — isLocalFSSupported() returns false and callers
    fall back to Google Drive.
    ========================================================================= */
-import { buildFolderPlan, parseFolderTree, slugifyTitle } from './markdown.js';
+import { buildFolderPlan, parseFolderTree, slugifyTitle, FILE_PAGE_EXT_RE, markdownToInfo } from './markdown.js';
 
 const IDB_DB    = 'workspace-localfs';
 const IDB_VER   = 1;
@@ -25,6 +25,7 @@ const SPACE_DIR   = 'Space';
 const UPLOAD_DIR  = 'Upload';
 const TRASH_DIR   = 'trash';
 const ARCHIVE_DIR = 'archive';
+const PLUGIN_DIR  = 'plugins';
 
 /* ---------------------------------------------------------------- feature detect */
 export const isLocalFSSupported = () =>
@@ -254,12 +255,15 @@ export function revokeLocalURLs(id) {
 }
 
 /* ================================================================ read tree */
-async function _collectMd(dirHandle, relPath, out, dirs) {
+async function _collectMd(dirHandle, relPath, out, dirs, extraExts) {
   for await (const [name, handle] of dirHandle.entries()) {
     if (handle.kind === 'directory') {
       if (dirs) dirs.push(relPath + '/' + name);
-      await _collectMd(handle, relPath + '/' + name, out, dirs);
-    } else if (name.toLowerCase().endsWith('.md')) {
+      await _collectMd(handle, relPath + '/' + name, out, dirs, extraExts);
+    } else if (name.toLowerCase().endsWith('.md') || FILE_PAGE_EXT_RE.test(name)
+        || (extraExts && extraExts.has((name.match(/\.([^./]+)$/) || [, ''])[1]?.toLowerCase()))) {
+      // .md pages plus text files (.py/.html/…) that open as 'file' pages —
+      // extraExts carries the workspace's CUSTOM types (Settings → File handlers)
       const file = await handle.getFile();
       out.push({ path: relPath + '/' + name, text: await file.text() });
     }
@@ -299,9 +303,18 @@ async function _readTreeFromHandle(id, root) {
   revokeLocalURLs(id);
   const files = [];
   const spaceDirs = [];   // every directory under Space/ (folders may be empty)
+  // info.md FIRST — its fileHandlers map registers custom file extensions that
+  // the Space/ walk below must also collect (e.g. .ipynb).
+  let extraExts = null;
+  try {
+    const fh = await root.getFileHandle('info.md');
+    const text = await (await fh.getFile()).text();
+    files.push({ path: 'info.md', text });
+    extraExts = new Set(Object.keys(markdownToInfo(text).fileHandlers || {}).map(e => e.toLowerCase()));
+  } catch (_) { /* no info.md yet */ }
   try {
     const space = await root.getDirectoryHandle(SPACE_DIR);
-    await _collectMd(space, SPACE_DIR, files, spaceDirs);
+    await _collectMd(space, SPACE_DIR, files, spaceDirs, extraExts);
   } catch (_) { /* no Space/ yet */ }
   try {
     const trash = await root.getDirectoryHandle(TRASH_DIR);
@@ -311,10 +324,6 @@ async function _readTreeFromHandle(id, root) {
     const archive = await root.getDirectoryHandle(ARCHIVE_DIR);
     await _collectMd(archive, ARCHIVE_DIR, files);
   } catch (_) { /* no archive/ yet */ }
-  try {
-    const fh = await root.getFileHandle('info.md');
-    files.push({ path: 'info.md', text: await (await fh.getFile()).text() });
-  } catch (_) { /* no info.md yet */ }
 
   const { nodes, favorites, currentId, info } = parseFolderTree(files, spaceDirs);
   const { uploads, map } = await _readUploads(root, id);
@@ -334,6 +343,48 @@ async function _readTreeFromHandle(id, root) {
   _dirCache[id] = new Set(spaceDirs.filter(d => !masterDirs.has(d)));
 
   return { nodes, favorites, currentId, uploads, info };
+}
+
+/* ================================================================ plugins */
+/* Read plugins/<name>/* from a local workspace folder. Each direct child
+   directory of plugins/ is one plugin: every text file inside it (one level,
+   .json/.js/.jsx/.css/.md) is returned as { name → text }. Interpretation
+   (manifest parsing, compiling, consent) happens in plugins.jsx — this
+   function only reads bytes. Returns [] when there is no plugins/ folder. */
+const PLUGIN_FILE_RE = /\.(json|jsx?|css|md)$/i;
+export async function readLocalPlugins(wsId) {
+  const rec = await idbGet(wsId);
+  if (!rec) return [];
+  if (!(await verifyPermission(rec.handle, false))) return [];
+  let dir;
+  try { dir = await rec.handle.getDirectoryHandle(PLUGIN_DIR); } catch { return []; }
+  const out = [];
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind !== 'directory') continue;
+    const files = {};
+    try {
+      for await (const [fname, fh] of handle.entries()) {
+        if (fh.kind !== 'file' || !PLUGIN_FILE_RE.test(fname)) continue;
+        files[fname] = await (await fh.getFile()).text();
+      }
+    } catch (_) { continue; }
+    if (Object.keys(files).length) out.push({ id: name, files });
+  }
+  return out;
+}
+
+/* Write a plugin's files into plugins/<pluginId>/ (installing from GitHub). */
+export async function writeLocalPlugin(wsId, pluginId, files) {
+  const rec = await idbGet(wsId);
+  if (!rec) throw new Error('Workspace not found');
+  if (!(await verifyPermission(rec.handle, true))) throw new Error('Permission to write the workspace folder was denied.');
+  const dir = await _dir(rec.handle, [PLUGIN_DIR, pluginId], true);
+  for (const [name, text] of Object.entries(files)) {
+    const fh = await dir.getFileHandle(name, { create: true });
+    const w = await fh.createWritable();
+    await w.write(text);
+    await w.close();
+  }
 }
 
 /* Read a local workspace's full tree → { nodes, favorites, currentId, uploads }.

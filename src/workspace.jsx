@@ -20,6 +20,7 @@ import {
   removeLocalWorkspaceRecord,
   writeLocalUploadFile,
   deleteLocalUploadFile,
+  writeLocalPlugin,
 } from './localfs.js';
 
 /* Shown when the browser lacks the File System Access API (Firefox/Zen/Safari). */
@@ -48,12 +49,13 @@ import {
   writeGdriveWorkspaceTree, readGdriveWorkspaceTree,
   writeDriveUpload, deleteDriveWorkspace,
   readDriveWorkspaceMeta, renameDriveWorkspace, updateDriveWorkspaceDescription,
+  writeDrivePlugin,
 } from './cloudstorage.js';
 import {
   readActivePointer, writeActivePointer, clearActivePointer,
   readTheme, writeTheme, getCookie, setCookie,
 } from './cookies.js';
-import { nodeDiskPath, markdownToNode } from './markdown.js';
+import { nodeDiskPath, markdownToNode, FILE_PAGE_EXT_RE } from './markdown.js';
 
 /* The block editor (smart pages), databases and the shared UI primitives
    live in ./smart.jsx; the plain-markdown page editor lives in ./markdown.jsx. */
@@ -266,7 +268,8 @@ function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,
     {label:'Archive',action:()=>archiveNode&&archiveNode(node.id)},
     {label:'Move to Trash',action:()=>trashNode&&trashNode(node.id),danger:true},
   ]:[
-    {header: node.kind==='database'?'Database':node.kind==='md'?'Markdown page':'Page'},
+    {header: node.kind==='database'?'Database':node.kind==='md'?'Markdown page'
+      :node.kind==='plugin'?'Plugin page':node.kind==='file'?'File':'Page'},
     {label:'Open',action:()=>openPage(node.id)},
     {label:'Rename',action:()=>{
       const t=prompt('Rename',node.title||'');
@@ -328,7 +331,8 @@ function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,
 function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,addChild,
   trashNode,archiveNode,onDrop,addTop,addFolder,setModal,workspaces,activeWorkspaceId,
   onSwitchWorkspace,onCreateWorkspace,onDeleteWorkspace,onReconnectLocal,
-  toggleFav,duplicate,exportPage,renameNode,onGoHome,toggleSidebar}){
+  toggleFav,duplicate,exportPage,renameNode,onGoHome,toggleSidebar,plugins,addFile,addNamedPage}){
+  const [plugMenu,setPlugMenu]=React.useState(null);
   // one O(n) pass instead of an O(n) filter per tree item — the sidebar
   // re-renders on every store change, so this is hot
   const childrenMap=React.useMemo(()=>{
@@ -374,7 +378,8 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
         onClose={()=>setWsPop(null)}/>}
     </div>
     <div className="nav">
-      <button className="new-page-btn" onClick={()=>addTop()} title={`Create a new page (${fmtShortcut('Alt + N')})`}>
+      <button className="new-page-btn" onClick={()=>addNamedPage(null)}
+        title={`Create a new page — name it first: hello.py, notes.md, or a plain name for a smart page (${fmtShortcut('Alt + N')})`}>
         <span className="np-ic"><Ic n="plus"/></span>
         <span className="np-label">New page</span>
         <span className="np-kbd">{fmtShortcut('Alt + N')}</span>
@@ -397,10 +402,28 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
       </>}
 
       <div className="sec-title"><span>Pages</span>
+        {(plugins||[]).length>0&&<button title="Add a plugin page"
+          onClick={e=>setPlugMenu(e.currentTarget.getBoundingClientRect())}
+          style={{fontSize:12}}>🧩</button>}
+        <button title="Add a file (asks for its name first — .py, .html, .csv…)"
+          onClick={()=>addFile(null)}><Ic n="paperclip"/></button>
         <button title="Add a folder" onClick={()=>addFolder(null)}><Ic n="folder-plus"/></button>
         <button title="Add a Markdown page (plain .md, no blocks)" onClick={()=>addTop('md')}><MdMark size={14}/></button>
         <button title="Add a page" onClick={()=>addTop()}><Ic n="plus"/></button>
       </div>
+      {plugMenu&&<Popup rect={plugMenu} onClose={()=>setPlugMenu(null)} width={250}>
+        <div className="menu">
+          <div className="menu-h">Plugin pages</div>
+          {(plugins||[]).map(p=>
+            <div className="mi" key={p.id}
+              onMouseDown={e=>{e.preventDefault();addTop('plugin:'+p.id);setPlugMenu(null);}}>
+              <div className="mi-ic">{p.manifest.icon}</div>
+              <div className="mi-tx">{p.manifest.name}
+                <small style={{color:'var(--text-3)'}}>{p.manifest.description||('v'+p.manifest.version)}</small>
+              </div>
+            </div>)}
+        </div>
+      </Popup>}
       <div className="nav">
         {roots.map(n=>
           <TreeItem key={n.id} node={n} childrenMap={childrenMap} depth={0} currentId={currentId}
@@ -741,18 +764,50 @@ function StorageBadge({ws, onCreateWorkspace, onGoHome, saveState}) {
 
 
 
+/* The current page's FULL on-disk name for the topbar: "Title.md",
+   "Title-(plugin-id).md", "name.py", "name-(handler).py". */
+function crumbDiskName(n){
+  if(!n) return 'Untitled';
+  if(n.kind==='folder') return n.title||'Untitled';
+  if(n.kind==='file'){
+    const m=(n.title||'file.txt').match(/^(.*?)(\.[^.]+)?$/);
+    return (m[1]||'file')+(n.plugin?'-('+n.plugin+')':'')+(m[2]||'');
+  }
+  if(n.kind==='plugin') return (n.title||'Untitled')+'-('+(n.plugin||'plugin')+').md';
+  return (n.title||'Untitled')+'.md';
+}
+/* Fixed part shown after the rename input (files edit their whole name). */
+const crumbSuffix=n=>!n?'':n.kind==='file'?''
+  :n.kind==='plugin'?'-('+(n.plugin||'plugin')+').md'
+  :n.kind==='folder'?'':'.md';
+
 /* ---------------- Topbar ---------------- */
 function Topbar({node,nodes,openPage,toggleSidebar,sidebarOpen,toggleFav,isFav,setModal,
-  downloadPage,activeWorkspace,onGoHome,saveState,update}){
+  downloadPage,activeWorkspace,onGoHome,saveState,update,commitRename,
+  pendingRename,pendingIsCreate,clearPendingRename}){
   const chain=[]; let c=node;
   while(c){ chain.unshift(c); c=c.parentId?nodes[c.parentId]:null; }
   const [dlMenu,setDlMenu]=useState(null);
-  /* Inline rename: clicking the CURRENT page's title in the crumbs turns it
-     into a text input with the name pre-selected. Enter/blur saves, Esc cancels. */
+  /* Inline rename: clicking the CURRENT page's name in the crumbs turns it
+     into a text input with the name pre-selected. Enter/blur saves, Esc cancels.
+     Newly created pages land here automatically (pendingRename); creation
+     edits the FULL file name (extension decides the page kind). */
   const [renaming,setRenaming]=useState(false);
+  const [fullEdit,setFullEdit]=useState(false);   // editing the whole name, no fixed suffix
   const [draft,setDraft]=useState('');
-  useEffect(()=>setRenaming(false),[node?.id]);
-  const startRename=()=>{ if(!update||!node) return; setDraft(node.title||''); setRenaming(true); };
+  const lastNodeId=useRef(null);
+  const startRename=full=>{ if(!node) return;
+    setDraft(node.title||''); setFullEdit(!!full); setRenaming(true); };
+  useEffect(()=>{
+    if(node&&pendingRename===node.id){
+      startRename(node.kind==='file'||pendingIsCreate);
+      clearPendingRename&&clearPendingRename();
+    }
+    // reset only when the PAGE changes — clearing pendingRename must not
+    // cancel the rename it just started
+    else if(lastNodeId.current!==(node?.id??null)) setRenaming(false);
+    lastNodeId.current=node?.id??null;
+  },[node?.id,pendingRename]);
   // On-disk location of the current page within the local workspace folder.
   const diskPath=activeWorkspace?.type==='local'&&node
     ? `${activeWorkspace.name}/${nodeDiskPath({nodes},node.id)}` : null;
@@ -765,26 +820,33 @@ function Topbar({node,nodes,openPage,toggleSidebar,sidebarOpen,toggleFav,isFav,s
         return <React.Fragment key={n.id}>
           {i>0&&<span className="crumb-sep">/</span>}
           <div className={cx('crumb',last&&renaming&&'renaming')}
-            title={last&&update?'Rename':undefined}
-            onClick={()=>{ if(last){ if(!renaming) startRename(); } else openPage(n.id); }}>
+            title={last?'Rename':undefined}
+            onClick={()=>{ if(last){ if(!renaming) startRename(n.kind==='file'); } else openPage(n.id); }}>
             <span>{n.icon||<NodeMark node={n}/>}</span>
             {last&&renaming
-              ? <input className="crumb-rename" value={draft}
-                  ref={el=>{ if(el&&!el.dataset.init){ el.dataset.init='1'; el.focus(); el.select(); } }}
-                  style={{width:Math.min(Math.max(draft.length+2,8),42)+'ch'}}
-                  onChange={e=>setDraft(e.target.value)}
-                  onClick={e=>e.stopPropagation()}
-                  onKeyDown={e=>{
-                    if(e.key==='Enter'){ e.preventDefault(); e.currentTarget.blur(); }
-                    else if(e.key==='Escape'){ e.currentTarget.dataset.esc='1'; e.currentTarget.blur(); }
-                  }}
-                  onBlur={e=>{
-                    setRenaming(false);
-                    if(e.currentTarget.dataset.esc) return;
-                    const t=e.currentTarget.value.trim();
-                    if(t!==(node.title||'')) update(node.id,{title:t});
-                  }}/>
-              : <span>{n.title||'Untitled'}</span>}
+              ? <>
+                  <input className="crumb-rename" value={draft}
+                    placeholder={fullEdit&&node.kind!=='file'?'name · hello.py · notes.md':'Untitled'}
+                    ref={el=>{ if(el&&!el.dataset.init){ el.dataset.init='1';
+                      // next tick, so it wins over the page editor's autoFocus
+                      setTimeout(()=>{ el.focus(); el.select(); },0); } }}
+                    style={{width:Math.min(Math.max(draft.length+2,fullEdit?24:8),42)+'ch'}}
+                    onChange={e=>setDraft(e.target.value)}
+                    onClick={e=>e.stopPropagation()}
+                    onKeyDown={e=>{
+                      if(e.key==='Enter'){ e.preventDefault(); e.currentTarget.blur(); }
+                      else if(e.key==='Escape'){ e.currentTarget.dataset.esc='1'; e.currentTarget.blur(); }
+                    }}
+                    onBlur={e=>{
+                      setRenaming(false);
+                      if(e.currentTarget.dataset.esc) return;
+                      const t=e.currentTarget.value.trim();
+                      if(t!==(node.title||''))
+                        (commitRename||((nn,v)=>update(nn.id,{title:v})))(node,t);
+                    }}/>
+                  {!fullEdit&&crumbSuffix(node)&&<span className="crumb-suffix">{crumbSuffix(node)}</span>}
+                </>
+              : <span>{last?crumbDiskName(n):(n.title||'Untitled')}</span>}
           </div>
         </React.Fragment>;
       })}
@@ -1889,13 +1951,73 @@ const SETTINGS_TABS=[
   {id:'theme',     label:'Appearance', icon:'sun'},
   {id:'templates', label:'Templates', icon:'template'},
   {id:'plugins',   label:'Plugins',   icon:'puzzle'},
+  {id:'handlers',  label:'File handlers', icon:'doc'},
   {id:'about',     label:'About',     icon:'info'},
 ];
+
+/* File types always offered in Settings → File handlers, even before any
+   plugin or file of that type exists — the built-in text editor is the
+   default handler for all of them. */
+const DEFAULT_HANDLER_EXTS=['txt','html','css','js','ts','json','py','yaml','xml','csv','sh','sql'];
+
+/* Ready-made prompt users paste into an AI assistant to generate a plugin.
+   Keep in sync with the real contract in plugins.jsx. */
+const PLUGIN_AI_PROMPT=`Create a plugin for "Workspace" (a Notion-style app whose pages are plain files).
+A plugin is one folder of files:
+
+my-plugin/
+├── manifest.json   (required)
+├── page.jsx        (required entry — default-exports a React component)
+├── lib.js          (optional extra modules, imported as './lib.js')
+└── styles.css      (optional; plain CSS, auto-scoped to this plugin)
+
+manifest.json:
+{
+  "id": "my-plugin",
+  "name": "My Plugin",
+  "version": "1.0.0",
+  "type": "page",       ← the plugin type; "page" is the only supported type today
+  "entry": "page.jsx",
+  "icon": "🧩",
+  "description": "One line describing it",
+  "apiVersion": 1,
+  "handles": [".csv"],   ← ONLY for file-handler plugins: the file types it opens. Omit for a custom page plugin.
+  "permissions": []      ← ONLY what you actually use: "pages:read" (api.listPages), "pages:navigate" (api.openPage). The user sees and can revoke these.
+}
+The complete, up-to-date permission list lives in docs/PERMISSIONS.md in the
+Workspace repository (github.com/MohanViswagnaMR/Workspace) and in the app's
+Docs page under "Plugins & permissions" — check it before declaring anything.
+
+The component contract — page.jsx must contain:
+  export default function Page({ data, setData, node, api }) { ... }
+- CUSTOM PAGE plugin (no "handles"): data is a JSON object stored in the page's file.
+  Call setData(nextObject) with the FULL next state to save. Default everything —
+  data starts as {} on a new page.
+- FILE-HANDLER plugin (with "handles"): data is the file's raw text (a string).
+  Call setData(newText) with the full new text. Whatever you save is written to the
+  user's real file byte-for-byte — never corrupt the format.
+- node = { id, title, ext }.  api = { listPages(), openPage(id), theme: 'light'|'dark' }.
+  api.listPages/api.openPage THROW unless the matching permission is declared in
+  manifest.json AND granted by the user — declare only what you call, and don't
+  crash the page if an api call throws (wrap in try/catch).
+
+Hard rules:
+- Imports: ONLY 'react' and relative files inside the plugin folder ('./lib.js').
+  No other npm packages, no CDN/network imports. JSX and React hooks are fine.
+- styles.css: use the app's CSS variables for colors so both themes work:
+  var(--text) var(--text-2) var(--text-3) var(--bg-card) var(--bg-input)
+  var(--border) var(--accent) var(--mono).
+- Never crash on empty/undefined data.
+
+TASK: <describe the plugin you want — e.g. "open .csv files as a sortable, editable table">
+
+Output every file in full, each in its own code block, starting with manifest.json.`;
 function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description,setDescription,
   pageBgUrl,onUploadBg,onClearBg,nodeCount,activeWorkspace,onGoHome,onClose,onRestartTutorial,
   onOpenTemplates,customTemplates,onUseTemplate,onRemoveTemplate,
   templateRepo,setTemplateRepo,onImportTemplates,onAddRepoTemplate,
-  fontSize,setFontSize,customFonts,onAddFont,onRemoveFont}){
+  fontSize,setFontSize,customFonts,onAddFont,onRemoveFont,
+  plugins,fileHandlers,setFileHandler,fileExts,onAddPlugin,onAddPluginFiles}){
   const bgInput=React.useRef();
   const tplInput=React.useRef();
   const [tab,setTab]=React.useState('general');
@@ -1908,6 +2030,76 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
   const [gfInput,setGfInput]=React.useState('');
   const [gfBusy,setGfBusy]=React.useState(false);
   const [gfErr,setGfErr]=React.useState('');
+  /* plugin install state (GitHub URL / folder upload) */
+  const [pgUrl,setPgUrl]=React.useState('');
+  const [pgBusy,setPgBusy]=React.useState(false);
+  const [pgErr,setPgErr]=React.useState('');
+  const [pgOk,setPgOk]=React.useState('');
+  const [aiCopied,setAiCopied]=React.useState(false);
+  const plugDirInput=React.useRef();
+  const installPlugin=async()=>{
+    if(!pgUrl.trim()||pgBusy) return;
+    setPgBusy(true); setPgErr(''); setPgOk('');
+    try{
+      const entry=await onAddPlugin(pgUrl.trim());
+      setPgOk(`Installed “${entry.manifest.name}” — find it under the 🧩 button in the sidebar.`);
+      setPgUrl('');
+    }catch(e){ setPgErr(e.message||String(e)); }
+    finally{ setPgBusy(false); }
+  };
+  const uploadPluginFolder=async fileList=>{
+    const arr=[...(fileList||[])];
+    if(!arr.length||pgBusy) return;
+    setPgBusy(true); setPgErr(''); setPgOk('');
+    try{
+      const files={};
+      for(const f of arr){
+        const parts=(f.webkitRelativePath||f.name).split('/');
+        if(parts.length!==2) continue;   // only files DIRECTLY inside the picked folder
+        if(!/\.(json|jsx?|css|md)$/i.test(f.name)||f.size>512*1024) continue;
+        files[f.name]=await f.text();
+      }
+      if(!files['manifest.json'])
+        throw new Error('No manifest.json directly inside that folder — pick the plugin folder itself.');
+      let man={};
+      try{ man=JSON.parse(files['manifest.json']); }
+      catch(_){ throw new Error('manifest.json is not valid JSON.'); }
+      const folderName=(arr[0].webkitRelativePath||'').split('/')[0];
+      const pid=String(man.id||folderName||'plugin')
+        .replace(/[^\w.-]+/g,'-').replace(/^[-.]+|[-.]+$/g,'')||'plugin';
+      const entry=await onAddPluginFiles({id:pid,files});
+      setPgOk(`Installed “${entry.manifest.name}” — find it under the 🧩 button in the sidebar.`);
+    }catch(e){ setPgErr(e.message||String(e)); }
+    finally{ setPgBusy(false); if(plugDirInput.current) plugDirInput.current.value=''; }
+  };
+  const copyAiPrompt=()=>{
+    navigator.clipboard?.writeText(PLUGIN_AI_PROMPT)
+      .then(()=>{ setAiCopied(true); setTimeout(()=>setAiCopied(false),2000); });
+  };
+  /* custom file-type input (File handlers tab) */
+  const [newExt,setNewExt]=React.useState('');
+  const newExtClean=newExt.trim().replace(/^\./,'').toLowerCase();
+  const newExtValid=/^[a-z0-9]{1,12}$/.test(newExtClean);
+  const addCustomExt=()=>{
+    if(!newExtValid) return;
+    setFileHandler(newExtClean,'text');   // appears in the table; pick a plugin there
+    setNewExt('');
+  };
+  /* per-plugin permission grants — key format shared with plugins.jsx */
+  const [permTick,setPermTick]=React.useState(0);
+  const grantsOf=p=>{
+    try{
+      const s=JSON.parse(localStorage.getItem('wsPluginPerms:'+p.id)||'null');
+      if(s&&typeof s==='object'&&!Array.isArray(s)) return s;
+    }catch(_){}
+    return Object.fromEntries((p.manifest.permissions||[]).map(k=>[k,true]));
+  };
+  const togglePerm=(p,k)=>{
+    const g=grantsOf(p);
+    g[k]=g[k]===false;
+    try{ localStorage.setItem('wsPluginPerms:'+p.id,JSON.stringify(g)); }catch(_){}
+    setPermTick(t=>t+1);
+  };
   const addFont=async()=>{
     if(!gfInput.trim()||gfBusy) return;
     setGfBusy(true); setGfErr('');
@@ -2104,12 +2296,137 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
             </div>
           </div>}
     </>
-    :tab==='plugins'?
-      <div className="set-empty">
-        <span className="set-empty-ic"><Ic n="puzzle" style={{width:28,height:28}}/></span>
-        <b>No plugins yet</b>
-        <small>Plugin support is planned for a future release. Extensions will be able to add new block types, database views and importers.</small>
-      </div>
+    :tab==='plugins'?(()=>{
+      const plugs=plugins||[];
+      return <>
+        <div className="set-row set-row-col" style={{borderBottom:'1px solid var(--border)'}}>
+          <div className="sr-l"><b>Add a plugin</b><small>Install from any public GitHub
+            repository — link the repo itself or the plugin's folder
+            (e.g. <code>…/tree/main/plugins/my-plugin</code>) — or upload a plugin folder
+            from this computer. It's copied into this workspace's <code>plugins/</code> folder;
+            you'll still be asked to enable it before it runs.</small></div>
+          <div className="set-repo-bar">
+            <input className="fld" placeholder="github.com/user/my-plugin"
+              value={pgUrl} onChange={e=>setPgUrl(e.target.value)}
+              onKeyDown={e=>{if(e.key==='Enter')installPlugin();}}/>
+            <button className="btn primary" disabled={pgBusy} onClick={installPlugin}>
+              {pgBusy?'Installing…':'Add'}
+            </button>
+            <button className="btn ghost" disabled={pgBusy}
+              onClick={()=>plugDirInput.current?.click()}>Upload folder</button>
+            <input ref={plugDirInput} type="file" webkitdirectory="" style={{display:'none'}}
+              onChange={e=>uploadPluginFolder(e.target.files)}/>
+          </div>
+          {pgErr&&<div className="set-repo-err">{pgErr}</div>}
+          {pgOk&&<div className="set-repo-ok">{pgOk}</div>}
+        </div>
+        <div className="set-row set-row-col" style={{borderBottom:'1px solid var(--border)'}}>
+          <div className="set-repo-head">
+            <div className="sr-l"><b>Create one with AI</b><small>Copy this prompt into an AI
+              assistant, describe the page or file format you want at the bottom, and save
+              the files it produces as a folder — then upload it above.</small></div>
+            <button className="btn ghost sm" style={{flexShrink:0}} onClick={copyAiPrompt}>
+              {aiCopied?'Copied!':'Copy prompt'}</button>
+          </div>
+          <pre className="set-ai-prompt">{PLUGIN_AI_PROMPT}</pre>
+        </div>
+        {plugs.length===0
+          ? <div className="set-empty">
+              <span className="set-empty-ic"><Ic n="puzzle" style={{width:28,height:28}}/></span>
+              <b>No plugins in this workspace</b>
+              <small>Install one from GitHub above, or create your own at
+                <code> plugins/&lt;id&gt;/</code> inside the workspace folder —
+                a <code>manifest.json</code> plus a <code>page.jsx</code> that default-exports a
+                React component. Reload to pick it up.</small>
+            </div>
+          : plugs.map(p=>{
+              const grants=grantsOf(p);
+              const compat=p.compat||{ok:true,checks:[]};
+              return <div className="set-row set-row-col" key={p.id+'·'+permTick}>
+                <div className="set-repo-head">
+                  <div className="sr-l"><b>{p.manifest.icon} {p.manifest.name}</b>
+                    <small>{p.manifest.description||'Custom page plugin.'} · v{p.manifest.version}
+                      {' · '}{p.manifest.type} plugin
+                      {(p.manifest.handles||[]).length>0&&
+                        <> · handles {p.manifest.handles.map(h=>'.'+h).join(', ')}</>}</small></div>
+                  <div style={{display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
+                    <span className={cx('plug-badge',compat.ok?'ok':'bad')}
+                      title={compat.checks.map(c=>`${c.pass?'✓':'✕'} ${c.label}${c.detail?' — '+c.detail:''}`).join('\n')}>
+                      {compat.ok?'✓ Compatible':'✕ Incompatible'}</span>
+                    <span style={{color:'var(--text-3)',fontFamily:'var(--mono)',fontSize:11}}>plugins/{p.id}/</span>
+                  </div>
+                </div>
+                {!compat.ok&&<div className="set-repo-err">
+                  {compat.checks.filter(c=>!c.pass).map(c=>c.label+(c.detail?' — '+c.detail:'')).join(' · ')}
+                </div>}
+                <div className="plug-perms">
+                  {(p.permInfo||[]).length===0
+                    ? <small className="plug-perm-none">No permissions requested — this plugin
+                        can only read &amp; write its own pages.</small>
+                    : p.permInfo.map(pi=><label key={pi.key} className="plug-perm-row" title={pi.desc}>
+                        <input type="checkbox" disabled={!pi.known}
+                          checked={pi.known&&grants[pi.key]!==false}
+                          onChange={()=>togglePerm(p,pi.key)}/>
+                        <span>{pi.label}{!pi.known&&' (unknown — cannot grant)'}</span>
+                      </label>)}
+                </div>
+              </div>;
+            })}
+      </>;
+    })()
+    :tab==='handlers'?(()=>{
+      const plugs=plugins||[];
+      // defaults always listed, plus anything claimed by a plugin, present in
+      // the workspace, or already overridden
+      const exts=[...new Set([
+        ...DEFAULT_HANDLER_EXTS,
+        ...plugs.flatMap(p=>p.manifest.handles||[]),
+        ...(fileExts||[]),
+        ...Object.keys(fileHandlers||{}),
+      ])].sort();
+      const autoFor=ext=>plugs.find(p=>(p.manifest.handles||[]).includes(ext));
+      return <>
+        <p className="set-note">Which page opens each file type in this workspace.
+          A file named <code>name-(plugin-id).ext</code> always uses that plugin;
+          everything else follows this table. <b>Auto</b> means: the first plugin
+          that declares the type in its manifest's <code>"handles"</code>, or the
+          built-in text editor when none does.</p>
+        <div className="set-row set-row-col" style={{borderBottom:'1px solid var(--border)'}}>
+          <div className="sr-l"><b>Add a file type</b><small>Missing a format —
+            say <code>.ipynb</code>? Add any text-file extension, then pick which page opens
+            it below (it starts on the built-in text editor). Files of that type inside the
+            workspace appear as pages the next time it loads.</small></div>
+          <div className="set-repo-bar">
+            <input className="fld" placeholder=".ipynb" value={newExt}
+              onChange={e=>setNewExt(e.target.value)}
+              onKeyDown={e=>{if(e.key==='Enter')addCustomExt();}}/>
+            <button className="btn primary" disabled={!newExtValid} onClick={addCustomExt}>
+              Add type</button>
+          </div>
+          {newExt.trim()!==''&&!newExtValid&&
+            <div className="set-repo-err">Letters and digits only, up to 12 characters — e.g. <code>ipynb</code>.</div>}
+        </div>
+        {exts.map(ext=>{
+          const auto=autoFor(ext);
+          const val=(fileHandlers||{})[ext]||'auto';
+          const isCustom=!DEFAULT_HANDLER_EXTS.includes(ext)&&!auto&&!(fileExts||[]).includes(ext);
+          return <div className="set-row" key={ext}>
+            <div className="sr-l"><b style={{fontFamily:'var(--mono)'}}>.{ext}</b>
+              <small>{val==='auto'
+                ? (auto?`Auto — ${auto.manifest.name}`:'Auto — built-in text editor (default)')
+                : val==='text'?'Built-in text editor'
+                : (plugs.find(p=>p.id===val)?.manifest.name||`missing plugin "${val}"`)}
+                {isCustom&&' · custom type (choosing Auto removes it)'}</small></div>
+            <select className="set-select" value={val}
+              onChange={e=>setFileHandler(ext,e.target.value)}>
+              <option value="auto">Auto{auto?` (${auto.manifest.name})`:' (text editor)'}</option>
+              <option value="text">Built-in text editor</option>
+              {plugs.map(p=><option key={p.id} value={p.id}>{p.manifest.name}</option>)}
+            </select>
+          </div>;
+        })}
+      </>;
+    })()
     :<>{/* about */}
       <div className="set-row">
         <div className="sr-l"><b>Version</b><small>The release of Workspace you’re running.</small></div>
@@ -2187,7 +2504,7 @@ function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace}){
           <div className="dpc-cover" style={{background:n.cover||'var(--bg-2)'}}/>
           <div className="dpc-icon">{n.icon||<NodeMark node={n} size={22}/>}</div>
           <div className="dpc-title">{n.title||'Untitled'}</div>
-          <div className="dpc-kind">{n.kind==='database'?'Database':n.kind==='md'?'Markdown':'Page'}</div>
+          <div className="dpc-kind">{n.kind==='database'?'Database':n.kind==='md'?'Markdown':n.kind==='plugin'?'Plugin':n.kind==='file'?'File':'Page'}</div>
         </div>)}
       </div>
     </>}
@@ -2198,7 +2515,7 @@ function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace}){
           <div className="dpc-cover" style={{background:n.cover||'var(--bg-2)'}}/>
           <div className="dpc-icon">{n.icon||<NodeMark node={n} size={22}/>}</div>
           <div className="dpc-title">{n.title||'Untitled'}</div>
-          <div className="dpc-kind">{n.kind==='database'?'Database':n.kind==='md'?'Markdown':'Page'}</div>
+          <div className="dpc-kind">{n.kind==='database'?'Database':n.kind==='md'?'Markdown':n.kind==='plugin'?'Plugin':n.kind==='file'?'File':'Page'}</div>
         </div>)}
       </div>
     </>}
@@ -2543,6 +2860,7 @@ function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onMan
    ========================================================================= */
 /* Docs / About / Self-hosting are website pages most sessions never open —
    they load as a separate chunk on first visit (see sitepages.jsx). */
+const PluginHost=React.lazy(()=>import('./plugins.jsx').then(m=>({default:m.PluginHost})));
 const DocsPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.DocsPage})));
 const AboutPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.AboutPage})));
 const SelfHostPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.SelfHostPage})));
@@ -2565,6 +2883,30 @@ function Workspace(){
   const driveTimer=React.useRef(null);
   const savedRef=React.useRef({id:null});
   const tutorialShown=React.useRef(false);
+
+  /* ---- workspace plugins (plugins/<id>/ folders; demo gets the sample) ----
+     Lives up here with the other hooks — everything below the early returns
+     runs a variable number of times per mount. */
+  const [plugins,setPlugins]=React.useState([]);
+  const [pendingRename,setPendingRename]=React.useState(null); // node id → topbar auto-rename
+  // id of a just-created page whose typed NAME decides its kind
+  // (hello.py → file, notes.md → simple md, plain name → smart page)
+  const creatingRef=React.useRef(null);
+  React.useEffect(()=>{
+    if(creatingRef.current&&creatingRef.current!==store?.currentId) creatingRef.current=null;
+  },[store?.currentId]);
+  const pluginWsId=store?.active?.id||null;
+  React.useEffect(()=>{
+    let alive=true;
+    setPlugins([]);
+    const aw=store?.active;
+    if(!aw) return;
+    import('./plugins.jsx')
+      .then(m=>m.discoverPlugins(aw))
+      .then(list=>{ if(alive) setPlugins(list); })
+      .catch(()=>{});
+    return ()=>{alive=false;};
+  },[pluginWsId]);
 
   /* ---- homepage dark/light toggle (persists to cookie + <body>) ---- */
   const toggleHomeTheme=()=>{
@@ -2625,6 +2967,7 @@ function Workspace(){
       fontSize:info.fontSize||'default', customFonts:info.customFonts||[],
       pageBg:info.pageBg||null, pageBgUrl:info.pageBgUrl||null,
       templateRepo:info.templateRepo||'',
+      fileHandlers:info.fileHandlers||{},   // ext → plugin id | 'text' (built-in)
       active, localList:localList||[],
       tutorialCompleted:getCookie('ws_tutorial')==='1',
     });
@@ -2692,7 +3035,7 @@ function Workspace(){
     // Freshly opened / switched workspace → nothing to save yet; don't rewrite it.
     if(savedRef.current.id!==active.id){ savedRef.current.id=active.id; setSaveState('saved'); return; }
 
-    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo};
+    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo,fileHandlers:store.fileHandlers};
     const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
     setSaveState('saving');
     clearTimeout(driveTimer.current);
@@ -2726,13 +3069,16 @@ function Workspace(){
         setStore(s=>s?{...s,theme:s.theme==='dark'?'light':'dark'}:s);}
       else if(meta&&(e.key==='/'||e.key==='?')){e.preventDefault();setModal({type:'shortcuts'});}
       else if(e.altKey&&!e.ctrlKey&&!e.metaKey&&e.code==='KeyN'){e.preventDefault();
+        const id=nid();
         setStore(s=>{
           if(!s) return s;
-          const id=nid();
           const sort=Object.values(s.nodes).filter(n=>n.parentId===null&&!n.trashed).length;
           const nn={id,kind:'page',title:'',icon:'',cover:'',parentId:null,sort,blocks:[{id:nid(),type:'text',html:''}]};
           return {...s,nodes:{...s.nodes,[id]:nn},currentId:id};
         });
+        // name-first: the topbar asks for the file name, which decides the kind
+        creatingRef.current=id;
+        setPendingRename(id);
         setModal(null);}
       else if(e.key==='Escape'){setModal(null);setPeek(null);}
     };
@@ -2911,7 +3257,7 @@ function Workspace(){
   const flushCurrent=async()=>{
     if(!store) return;
     const a=store.active;
-    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo};
+    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo,fileHandlers:store.fileHandlers};
     const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
     try{
       if(a?.type==='local') await writeWorkspaceTreeNow(a.id,payload);
@@ -3037,12 +3383,47 @@ function Workspace(){
   const patch=p=>setStore(s=>({...s,...p}));
   const setNodes=fn=>setStore(s=>({...s,nodes:fn(s.nodes)}));
   const updateNode=(id,np)=>setNodes(n=>({...n,[id]:{...n[id],...np}}));
+
   const openPage=id=>{
     // folders have no content — clicking one just expands/collapses it
     if(nodes[id]?.kind==='folder'){setExpanded(e=>({...e,[id]:!e[id]}));return;}
     setStore(s=>({...s,currentId:id}));setPeek(null);setModal(null);
   };
   const toggleExp=(id,force)=>setExpanded(e=>({...e,[id]:force!==undefined?force:!e[id]}));
+  // plain object (not a hook — this code sits below conditional returns)
+  const pluginApi={
+    listPages:()=>Object.values(nodes)
+      .filter(n=>n&&!n.trashed&&!n.archived&&n.kind!=='folder')
+      .map(n=>({id:n.id,title:n.title,kind:n.kind})),
+    openPage,
+    theme:store.theme,
+  };
+  /* Install a plugin from raw {id, files}: write it into the workspace's
+     plugins/ (local/Drive; demo stays in-memory), then add it to the live
+     plugin list. The consent gate still applies when a page first opens. */
+  const installPluginRaw=async raw=>{
+    const mod=await import('./plugins.jsx');
+    const aw=store.active;
+    if(aw?.type==='local') await writeLocalPlugin(aw.id,raw.id,raw.files);
+    else if(aw?.type==='gdrive') await writeDrivePlugin(aw.folderId||aw.id,raw.id,raw.files);
+    const entry=await mod.buildPluginEntry(raw);
+    setPlugins(prev=>[...prev.filter(p=>p.id!==entry.id),entry]);
+    return entry;
+  };
+  const addPluginFromGithub=async url=>{
+    const mod=await import('./plugins.jsx');
+    return installPluginRaw(await mod.fetchGithubPlugin(url));
+  };
+  /* Which plugin opens a 'file' page: explicit "-(plugin)" filename binding →
+     Settings override for the extension → first plugin whose manifest
+     `handles` the extension → null (built-in text editor). */
+  const resolveHandler=n=>{
+    if(n.plugin) return plugins.find(p=>p.id===n.plugin)||null;
+    const ov=(store.fileHandlers||{})[n.ext];
+    if(ov==='text') return null;
+    if(ov) return plugins.find(p=>p.id===ov)||null;
+    return plugins.find(p=>(p.manifest.handles||[]).includes(n.ext))||null;
+  };
 
   const addNode=(parentId,extra={})=>{
     const id=nid();
@@ -3052,8 +3433,18 @@ function Workspace(){
     setNodes(n=>({...n,[id]:nn}));
     return id;
   };
-  // kind: 'page' (smart, block-based — default) or 'md' (simple raw markdown)
-  const kindExtra=kind=>kind==='md'?{kind:'md',md:'',blocks:undefined}:{};
+  // kind: 'page' (smart, block-based — default), 'md' (simple raw markdown),
+  // or 'plugin:<id>' (custom page rendered by a workspace plugin)
+  const kindExtra=kind=>{
+    if(kind==='md') return {kind:'md',md:'',blocks:undefined};
+    if(typeof kind==='string'&&kind.startsWith('plugin:')){
+      const pid=kind.slice(7);
+      const man=plugins.find(p=>p.id===pid)?.manifest;
+      return {kind:'plugin',plugin:pid,data:'',blocks:undefined,
+        icon:man?.icon||'🧩',title:man?.name||''};
+    }
+    return {};
+  };
   const addTop=kind=>{const id=addNode(null,kindExtra(kind));openPage(id);};
   const addChild=(parentId,kind)=>{const id=addNode(parentId,kindExtra(kind));setExpanded(e=>({...e,[parentId]:true}));openPage(id);};
   const createChild=(parentId,kind)=>addNode(parentId,kindExtra(kind)); // for subpage blocks (no nav)
@@ -3062,6 +3453,64 @@ function Workspace(){
     if(name===null) return;
     addNode(parentId||null,{kind:'folder',title:name.trim()||'New folder',blocks:[]});
     if(parentId) setExpanded(e=>({...e,[parentId]:true}));
+  };
+  const registerExt=(name,ext)=>{
+    if(!FILE_PAGE_EXT_RE.test(name)&&!(store.fileHandlers||{})[ext])
+      patch({fileHandlers:{...(store.fileHandlers||{}),[ext]:'text'}});
+  };
+  /* Kind-aware rename used by the topbar crumb. File pages edit their WHOLE
+     name (the extension picks the handler); unknown extensions are
+     auto-registered as custom types so the file survives the next disk load.
+     For a JUST-CREATED page (creatingRef) the typed name also decides the
+     KIND: "hello.py" → file page, "notes.md" → simple md page,
+     "Board-(kanban).md" → plugin page, a plain name → smart page. */
+  const commitRename=(n,raw)=>{
+    const creating=creatingRef.current===n.id;
+    creatingRef.current=null;
+    let name=(raw||'').trim().replace(/[\/\\:*?"<>|]/g,' ').trim();
+    if(!name) return;
+    if(creating&&n.kind==='page'){
+      const m=name.match(/^(.*?)\.([^.]+)$/);
+      if(m&&m[2].toLowerCase()==='md'){
+        const bind=m[1].match(/^(.*)-\(([\w.-]+)\)$/);   // plugin binding in the name
+        if(bind) updateNode(n.id,{kind:'plugin',plugin:bind[2],data:'',blocks:undefined,
+          title:bind[1].trim()||'Untitled',icon:plugins.find(p=>p.id===bind[2])?.manifest.icon||''});
+        else updateNode(n.id,{kind:'md',md:'',blocks:undefined,title:m[1]||'Untitled'});
+        return;
+      }
+      if(m){
+        const ext=m[2].toLowerCase();
+        registerExt(name,ext);
+        updateNode(n.id,{kind:'file',title:name,ext,plugin:'',data:'',blocks:undefined});
+        return;
+      }
+      updateNode(n.id,{title:name});
+      return;
+    }
+    if(n.kind!=='file'){ updateNode(n.id,{title:name}); return; }
+    if(!/\.[^.]+$/.test(name)) name+='.'+(n.ext||'txt');
+    const ext=(name.match(/\.([^.]+)$/)||[,''])[1].toLowerCase();
+    registerExt(name,ext);
+    updateNode(n.id,{title:name,ext});
+  };
+  /* "New page" — the page is created empty, and the topbar immediately asks
+     for its NAME (full file name, extension included), which decides the kind. */
+  const addNamedPage=parentId=>{
+    const id=addNode(parentId||null,{});
+    if(parentId) setExpanded(e=>({...e,[parentId]:true}));
+    creatingRef.current=id;
+    setPendingRename(id);
+    openPage(id);
+  };
+  /* New FILE page — created as untitled.txt and dropped straight into the
+     topbar rename (name pre-selected), because the name carries the extension
+     that decides which page opens it. */
+  const addFile=parentId=>{
+    const id=addNode(parentId||null,{kind:'file',title:'untitled.txt',ext:'txt',
+      plugin:'',data:'',blocks:undefined,icon:''});
+    if(parentId) setExpanded(e=>({...e,[parentId]:true}));
+    setPendingRename(id);
+    openPage(id);
   };
 
   const collectDesc=(id,acc)=>{acc.push(id);
@@ -3312,7 +3761,8 @@ function Workspace(){
       onReconnectLocal={switchWorkspace}
       toggleFav={toggleFav} duplicate={duplicate} exportPage={exportPage}
       renameNode={renameNode} onGoHome={goHome}
-      toggleSidebar={()=>setSidebarOpen(o=>!o)}/>
+      toggleSidebar={()=>setSidebarOpen(o=>!o)} plugins={plugins} addFile={addFile}
+      addNamedPage={addNamedPage}/>
 
     <div className={cx('main',store.pageBgUrl&&'has-page-bg')}
       style={store.pageBgUrl?{'--page-bg':`url("${store.pageBgUrl}")`}:undefined}>
@@ -3354,7 +3804,7 @@ function Workspace(){
               <div className="topbar-actions"/>
             </div>
             <Dashboard nodes={nodes} favorites={favorites} openPage={openPage}
-              addTop={addTop} setModal={setModal} activeWorkspace={activeWorkspace}/>
+              addTop={()=>addNamedPage(null)} setModal={setModal} activeWorkspace={activeWorkspace}/>
           </>
         : isTrashPage
         ? <>{pageTopbar('🗑️','Trash')}
@@ -3370,9 +3820,20 @@ function Workspace(){
               toggleSidebar={()=>setSidebarOpen(o=>!o)} sidebarOpen={sidebarOpen}
               toggleFav={toggleFav} isFav={node&&favorites.includes(node.id)} setModal={setModal}
               downloadPage={downloadPage} activeWorkspace={activeWorkspace} onGoHome={goHome}
-              saveState={saveState} update={updateNode}/>
+              saveState={saveState} update={updateNode} commitRename={commitRename}
+              pendingRename={pendingRename}
+              pendingIsCreate={pendingRename!=null&&creatingRef.current===pendingRename}
+              clearPendingRename={()=>setPendingRename(null)}/>
             {node&&(node.kind==='md'
               ? <MarkdownEditor key={node.id} node={node} update={updateNode}/>
+              : node.kind==='plugin'||node.kind==='file'
+              ? <React.Suspense fallback={<div className="scroll page-scroll"/>}>
+                  <PluginHost key={node.id} node={node}
+                    plugin={node.kind==='plugin'
+                      ? plugins.find(p=>p.id===node.plugin)
+                      : resolveHandler(node)}
+                    update={updateNode} api={pluginApi}/>
+                </React.Suspense>
               : <Editor key={node.id} node={node} update={updateNode}
                   createChild={createChild} openPage={openPage}
                   lookupNode={lookupNode} openRow={editorOpenRow}
@@ -3423,7 +3884,19 @@ function Workspace(){
         templateRepo={store.templateRepo||''} setTemplateRepo={v=>patch({templateRepo:v})}
         onImportTemplates={importTemplateFiles}
         onAddRepoTemplate={t=>addTemplatesFromTexts([t])}
-        onRestartTutorial={()=>{setModal(null);setShowTutorial(true);}}/>}
+        onRestartTutorial={()=>{setModal(null);setShowTutorial(true);}}
+        plugins={plugins}
+        fileHandlers={store.fileHandlers||{}}
+        setFileHandler={(ext,val)=>{
+          const fh={...(store.fileHandlers||{})};
+          if(val==='auto') delete fh[ext]; else fh[ext]=val;
+          patch({fileHandlers:fh});
+        }}
+        fileExts={[...new Set(Object.values(nodes)
+          .filter(n=>n&&n.kind==='file'&&!n.trashed&&!n.archived&&n.ext)
+          .map(n=>n.ext))]}
+        onAddPlugin={addPluginFromGithub}
+        onAddPluginFiles={installPluginRaw}/>}
     {modal&&modal.type==='page-menu'&&node&&
       <PageMenu node={node} nodes={nodes} onClose={()=>setModal(null)} trashNode={trashNode}
         duplicate={duplicate} setModal={setModal} downloadPage={downloadPage}

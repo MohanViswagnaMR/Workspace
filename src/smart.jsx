@@ -316,6 +316,15 @@ function buildSeed(){
     {id:nid(),type:'text',html:''},
   ]});
 
+  // ---- a sample FILE page (kind:'file') — handled by a file-handler plugin
+  // (the demo ships "Code Viewer") or the built-in text editor as fallback.
+  add({id:'n_script',kind:'file',title:'hello.py',ext:'py',plugin:'',
+    parentId:null,sort:9,icon:'',cover:'',
+    data:'# A sample Python file living right in the workspace.\n'+
+      '# Files like .py/.html/.css/.js open through File Handler plugins\n'+
+      '# (Settings → Plugins → File handlers).\n\n'+
+      'def greet(name):\n    return f"Hello, {name}!"\n\nprint(greet("Workspace"))\n'});
+
   return {nodes,favorites:['n_start','n_tasks'],currentId:'n_start'};
 }
 

@@ -24,6 +24,7 @@ const DOCS_TOC=[
   ['features','Features'],
   ['managing','Managing workspaces'],
   ['shortcuts','Keyboard shortcuts'],
+  ['permissions','Plugins & permissions'],
   ['persistence','Persistence & privacy'],
   ['structure','Project structure'],
   ['stack','Tech stack'],
@@ -266,6 +267,34 @@ Welcome to your **connected workspace**.
             {SHORTCUTS.map(([a,k])=><tr key={a}><td>{a}</td><td><kbd className="docs-kbd">{fmtShortcut(k)}</kbd></td></tr>)}
           </tbody></table>
 
+          <H id="permissions">Plugins &amp; permissions</H>
+          <p className="docs-p">Workspaces can hold <b>custom page plugins</b> — a folder at
+            <code> plugins/&lt;id&gt;/</code> with a <code>manifest.json</code> and a
+            <code> page.jsx</code> that default-exports a React component. Plugins render new
+            page types (habit trackers, kanbans…) and <b>file handlers</b> open other file
+            formats (<code>.py</code>, <code>.html</code>, <code>.csv</code>…) as pages.
+            Install them from Settings → Plugins (GitHub URL or folder upload), and every
+            plugin must be explicitly enabled before it runs.</p>
+          <p className="docs-p">A plugin must <b>declare each app service it uses</b> in its
+            manifest's <code>"permissions"</code> array. The consent screen shows the request,
+            each grant can be revoked any time in Settings → Plugins, and undeclared or revoked
+            calls throw instead of working silently. These are the permissions a plugin can ask
+            for:</p>
+          {/* keep in sync with PERMISSIONS in src/plugins.jsx and docs/PERMISSIONS.md */}
+          <table className="docs-table"><thead><tr><th>Permission</th><th>Grants</th><th>Api</th></tr></thead><tbody>
+            <tr><td><code>pages:read</code></td><td>See the id, title and kind of every live page in the workspace</td><td><code>api.listPages()</code></td></tr>
+            <tr><td><code>pages:navigate</code></td><td>Navigate to another page</td><td><code>api.openPage(id)</code></td></tr>
+          </tbody></table>
+          <p className="docs-p">No permission is needed for a plugin's own page —
+            <code> data</code>/<code>setData</code> (its content), <code>node</code>
+            (<code>id / title / ext</code>) and <code>api.theme</code> are always available.
+            Every plugin is also <b>compatibility-tested</b> on install and on every load:
+            manifest validity, supported <code>apiVersion</code>, recognized permissions, and a
+            real compile of its code — failures show a report instead of running.</p>
+          <p className="docs-p">Full developer reference: <code>docs/PERMISSIONS.md</code> in
+            the repository; the source-of-truth registry is <code>PERMISSIONS</code> in
+            <code> src/plugins.jsx</code>.</p>
+
           <H id="persistence">Persistence &amp; privacy</H>
           <ul className="docs-list">
             <li><b>Cookies</b> hold only small pointers — the active workspace (type, name, Drive folder id) and your theme/accent. Never workspace data.</li>
@@ -280,7 +309,10 @@ Welcome to your **connected workspace**.
             <tr><td><code>vite.config.js</code></td><td>Vite config (vendor chunk splitting)</td></tr>
             <tr><td><code>src/main.jsx</code></td><td>Entry point</td></tr>
             <tr><td><code>src/App.jsx</code></td><td>Restores theme, renders the workspace</td></tr>
-            <tr><td><code>src/workspace.jsx</code></td><td>The full app: homepage, editor, databases, sidebar, modals</td></tr>
+            <tr><td><code>src/workspace.jsx</code></td><td>App shell: homepage, sidebar, topbar, modals, routing</td></tr>
+            <tr><td><code>src/smart.jsx</code></td><td>The smart (block) page editor, databases and shared primitives</td></tr>
+            <tr><td><code>src/markdown.jsx</code></td><td>The simple .md page editor with live preview</td></tr>
+            <tr><td><code>src/plugins.jsx</code></td><td>Custom page plugins: loader, permissions, compatibility tests (lazy-loaded)</td></tr>
             <tr><td><code>src/sitepages.jsx</code></td><td>Docs, About and Self-hosting pages (lazy-loaded)</td></tr>
             <tr><td><code>src/markdown.js</code></td><td>Workspace ⇄ folder-of-Markdown serialization (pure)</td></tr>
             <tr><td><code>src/localfs.js</code></td><td>Local folder storage (File System Access API + IndexedDB)</td></tr>
