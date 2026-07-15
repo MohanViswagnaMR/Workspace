@@ -7,9 +7,9 @@
    the workspace.jsx shell passes `renderEditor(node)` so routing (smart /
    md / file / plugin, incl. the lazy PluginHost) stays in one place.
 
-   The terminal is NOT a shell (there is no backend): it's a workspace
-   command line — ls / open / new / cat / rm / plugins / help — operating on
-   the same store through the callbacks it's given.
+   The terminal is a REAL shell: an xterm.js client for the local Docker
+   bridge (docker/terminal-bridge, localhost:4517). It runs as a bottom
+   panel or maximized over the whole editor area (the ▲/▼ button).
    ========================================================================= */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { cx, Ic } from './smart.jsx';
@@ -133,7 +133,7 @@ function Tree({ nodes, childrenMap, parentId, depth, currentId, openPage, expand
    localhost resolves to ::1 (IPv6) while the bridge binds IPv4 only. */
 const BRIDGE_URLS = ['ws://localhost:4517', 'ws://127.0.0.1:4517'];
 
-function Terminal({ onClose }) {
+function Terminal({ onClose, max, onMax }) {
   const [state, setState] = useState('connecting');   // connecting | on | off
   const holderRef = useRef(null);
   const sockRef = useRef(null);
@@ -211,7 +211,11 @@ function Terminal({ onClose }) {
   return <div className="cl-term">
     <div className="cl-term-head">
       <span>TERMINAL{state === 'on' ? ' — local shell (Docker bridge)' : ''}</span>
-      <button className="cl-term-x" title="Close terminal (Ctrl+`)" onClick={onClose}>×</button>
+      <span className="cl-term-hbtns">
+        <button className="cl-term-x" title={max ? 'Restore the panel size' : 'Maximize — terminal fills the page'}
+          onClick={onMax}>{max ? '▼' : '▲'}</button>
+        <button className="cl-term-x" title="Close terminal (Ctrl+`)" onClick={onClose}>×</button>
+      </span>
     </div>
     {/* the xterm holder must exist before the socket opens */}
     <div className="cl-term-xterm" ref={holderRef}
@@ -243,6 +247,8 @@ export default function CodeLayout({ nodes, currentId, openPage, renderEditor,
   const [expanded, setExpanded] = useState({});
   const [tabs, setTabs] = useState([]);          // node ids, in open order
   const [term, setTerm] = useState(true);
+  const [termMax, setTermMax] = useState(false); // terminal fills the main area
+  useEffect(() => { if (!term) setTermMax(false); }, [term]);
   const toggleExp = id => setExpanded(e => ({ ...e, [id]: !e[id] }));
 
   const childrenMap = useMemo(() => {
@@ -344,7 +350,7 @@ export default function CodeLayout({ nodes, currentId, openPage, renderEditor,
       </div>
     </div>
 
-    <div className="cl-main">
+    <div className={cx('cl-main', term && termMax && 'term-max')}>
       <div className="cl-tabs">
         {tabs.map(id => {
           const n = nodes[id]; if (!n) return null;
@@ -366,7 +372,8 @@ export default function CodeLayout({ nodes, currentId, openPage, renderEditor,
                 terminal: <code>new hello.py</code>, <code>new notes.md</code>.</p>
             </div>}
       </div>
-      {term && <Terminal onClose={()=>setTerm(false)}/>}
+      {term && <Terminal onClose={()=>setTerm(false)}
+        max={termMax} onMax={()=>setTermMax(m=>!m)}/>}
     </div>
 
     <div className="cl-status">

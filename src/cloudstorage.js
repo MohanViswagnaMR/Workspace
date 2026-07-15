@@ -383,7 +383,9 @@ export async function readGdriveWorkspaceTree(rootId) {
     const text = await _downloadText(token, infoFiles[0].id);
     files.push({ path: 'info.md', text });
     cache.text.set('info.md', text);
-    extraExts = new Set(Object.keys(markdownToInfo(text).fileHandlers || {}).map(e => e.toLowerCase()));
+    const inf = markdownToInfo(text);
+    extraExts = new Set([...Object.keys(inf.fileHandlers || {}),
+      ...Object.keys(inf.fileHandlersCode || {})].map(e => e.toLowerCase()));
   }
   if (spaceFolders.length) {
     cache.folderId.set('Space', spaceFolders[0].id);

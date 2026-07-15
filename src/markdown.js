@@ -493,8 +493,10 @@ export function infoToMarkdown(info = {}) {
   if (info.templateRepo) fm.templateRepo = info.templateRepo;   // "owner/repo" on GitHub
   if (info.fontSize && info.fontSize !== 'default') fm.fontSize = info.fontSize;
   if ((info.customFonts || []).length) fm.customFonts = info.customFonts;   // Google Fonts names
-  // per-workspace file-type → handler-plugin overrides (Settings → File handlers)
+  // per-workspace file-type → handler-plugin overrides (Settings → File
+  // handlers) — one map per layout: fileHandlers = Home, fileHandlersCode = Code
   if (info.fileHandlers && Object.keys(info.fileHandlers).length) fm.fileHandlers = info.fileHandlers;
+  if (info.fileHandlersCode && Object.keys(info.fileHandlersCode).length) fm.fileHandlersCode = info.fileHandlersCode;
   const front = '---\n' + yaml.dump(fm, { lineWidth: -1, noRefs: true }) + '---\n\n';
   return front +
     '# Workspace info\n\n' +
@@ -517,6 +519,8 @@ export function markdownToInfo(text) {
       ? meta.customFonts.filter(f => typeof f === 'string') : [],
     fileHandlers: (meta.fileHandlers && typeof meta.fileHandlers === 'object'
       && !Array.isArray(meta.fileHandlers)) ? meta.fileHandlers : {},
+    fileHandlersCode: (meta.fileHandlersCode && typeof meta.fileHandlersCode === 'object'
+      && !Array.isArray(meta.fileHandlersCode)) ? meta.fileHandlersCode : {},
   };
 }
 
@@ -686,7 +690,8 @@ export function parseFolderTree(files, dirs) {
   // (e.g. ipynb) that should open as 'file' pages beyond the built-in list.
   const infoFile = (files || []).find(f => f && f.path && f.path.replace(/^\/+/, '') === 'info.md');
   if (infoFile) info = markdownToInfo(infoFile.text);
-  const customExts = new Set(Object.keys(info?.fileHandlers || {}).map(e => e.toLowerCase()));
+  const customExts = new Set([...Object.keys(info?.fileHandlers || {}),
+    ...Object.keys(info?.fileHandlersCode || {})].map(e => e.toLowerCase()));
 
   for (const f of files || []) {
     if (!f || !f.path) continue;

@@ -310,7 +310,9 @@ async function _readTreeFromHandle(id, root) {
     const fh = await root.getFileHandle('info.md');
     const text = await (await fh.getFile()).text();
     files.push({ path: 'info.md', text });
-    extraExts = new Set(Object.keys(markdownToInfo(text).fileHandlers || {}).map(e => e.toLowerCase()));
+    const inf = markdownToInfo(text);
+    extraExts = new Set([...Object.keys(inf.fileHandlers || {}),
+      ...Object.keys(inf.fileHandlersCode || {})].map(e => e.toLowerCase()));
   } catch (_) { /* no info.md yet */ }
   try {
     const space = await root.getDirectoryHandle(SPACE_DIR);

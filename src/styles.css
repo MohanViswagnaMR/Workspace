@@ -974,6 +974,7 @@ input,textarea{font-family:inherit;}
 .set-repo-bar .btn{flex-shrink:0;white-space:nowrap;}
 .set-repo-err{font-size:12.5px;color:#d44c47;line-height:1.5;}
 .set-repo-ok{font-size:12.5px;color:#3f9d63;line-height:1.5;}
+.set-repo-warn{font-size:12.5px;color:#cb912f;line-height:1.5;}
 /* plugin compatibility badge + permission toggles (Settings → Plugins) */
 .plug-badge{font-size:11px; font-weight:600; padding:2px 9px; border-radius:20px;
   white-space:nowrap; cursor:default;}
@@ -1057,8 +1058,13 @@ input,textarea{font-family:inherit;}
 .cl-welcome code{font-family:var(--mono);color:var(--cl-text);}
 .cl-term{height:220px;flex-shrink:0;display:flex;flex-direction:column;
   border-top:1px solid var(--cl-border);background:var(--cl-bg);}
+/* maximized terminal — fills the whole main area (tabs + editor stay mounted,
+   just hidden, so editor state survives; xterm refits via ResizeObserver) */
+.cl-main.term-max .cl-tabs,.cl-main.term-max .cl-editor{display:none;}
+.cl-main.term-max .cl-term{height:auto;flex:1;min-height:0;border-top:none;}
 .cl-term-head{display:flex;align-items:center;justify-content:space-between;
   font-size:10.5px;letter-spacing:.08em;color:var(--cl-text2);padding:6px 12px 4px;}
+.cl-term-hbtns{display:flex;align-items:center;gap:12px;}
 .cl-term-x{background:none;border:none;color:var(--cl-text2);cursor:pointer;font-size:15px;}
 .cl-term-x:hover{color:#fff;}
 .cl-term-body{flex:1;overflow-y:auto;padding:2px 12px 10px;font-family:var(--mono);
@@ -2501,6 +2507,26 @@ body.dark{ --page-bg-scrim:rgba(15,23,42,.82); }
   color:var(--text-3); margin:22px 0 4px; padding-top:14px; border-top:1px solid var(--border);}
 .set-note{font-size:12.5px; color:var(--text-3); margin:4px 0 10px; line-height:1.55;}
 .set-note code{font-family:var(--mono); font-size:11.5px; color:var(--text-2);}
+/* start-page app-mode pill (Workspace ⟷ Developer) — sits in the connect
+   panel, right under the name + description fields */
+.mode-pill{display:flex;gap:2px;padding:3px;border-radius:20px;
+  border:1px solid var(--border);background:var(--bg-card);}
+.mode-pill button{border:none;background:none;color:var(--text-3);cursor:pointer;
+  font-size:12px;font-weight:600;padding:4px 12px;border-radius:16px;
+  display:flex;align-items:center;justify-content:center;gap:6px;
+  transition:background .15s,color .15s;}
+.mode-pill button:hover{color:var(--text);}
+.mode-pill button.on{background:var(--accent);color:#fff;}
+.cb-mode{margin:12px 0 4px;}
+.cb-mode .mode-pill{width:100%;box-sizing:border-box;}
+.cb-mode .mode-pill button{flex:1;padding:6px 12px;}
+.cb-mode-hint{font-size:11.5px;color:var(--text-3);margin-top:7px;line-height:1.5;}
+
+/* File handlers: one select per layout (Home / Code) */
+.set-lay-selects{display:flex;gap:12px;flex-shrink:0;}
+.set-lay-select{display:flex;flex-direction:column;gap:3px;}
+.set-lay-select>span{font-size:10.5px;font-weight:600;letter-spacing:.05em;
+  text-transform:uppercase;color:var(--text-3);}
 .set-select{padding:6px 10px; border-radius:8px; border:1px solid var(--border);
   background:var(--bg-input); color:var(--text); font:inherit; font-size:13px; cursor:pointer;}
 .set-select:focus{outline:none; border-color:var(--accent);}

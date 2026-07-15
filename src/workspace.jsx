@@ -332,7 +332,7 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
   trashNode,archiveNode,onDrop,addTop,addFolder,setModal,workspaces,activeWorkspaceId,
   onSwitchWorkspace,onCreateWorkspace,onDeleteWorkspace,onReconnectLocal,
   toggleFav,duplicate,exportPage,renameNode,onGoHome,toggleSidebar,addNamedPage,
-  layout,setLayout}){
+  layout,setLayout,devMode}){
   // one O(n) pass instead of an O(n) filter per tree item — the sidebar
   // re-renders on every store change, so this is hot
   const childrenMap=React.useMemo(()=>{
@@ -377,8 +377,9 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
         onReconnect={onReconnectLocal}
         onClose={()=>setWsPop(null)}/>}
     </div>
-    {/* layout switch — Home (this Notion-style layout) ⟷ Code (VS Code-style) */}
-    <div className="layout-switch">
+    {/* layout switch — Home (this Notion-style layout) ⟷ Code (VS Code-style).
+        Developer mode only; workspace mode gets a plain Home row instead. */}
+    {devMode&&<div className="layout-switch">
       <button className={cx('ls-btn',layout!=='code'&&'on')}
         title="Home layout — pages & databases"
         onClick={()=>{ setLayout&&setLayout('home'); openPage(DASH_ID); }}>
@@ -389,8 +390,9 @@ function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,add
         onClick={()=>setLayout&&setLayout('code')}>
         <span style={{fontFamily:'var(--mono)',fontWeight:700,fontSize:12}}>&lt;/&gt;</span> Code
       </button>
-    </div>
+    </div>}
     <div className="nav">
+      {!devMode&&navRow('home','Home',()=>openPage(DASH_ID),null,currentId===DASH_ID)}
       <button className="new-page-btn" onClick={()=>addNamedPage(null)}
         title={`Create a new page — name it first: hello.py, notes.md, or a plain name for a smart page (${fmtShortcut('Alt + N')})`}>
         <span className="np-ic"><Ic n="plus"/></span>
@@ -2012,7 +2014,8 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
   onOpenTemplates,customTemplates,onUseTemplate,onRemoveTemplate,
   templateRepo,setTemplateRepo,onImportTemplates,onAddRepoTemplate,
   fontSize,setFontSize,customFonts,onAddFont,onRemoveFont,
-  plugins,fileHandlers,setFileHandler,fileExts,onAddPlugin,onAddPluginFiles}){
+  plugins,fileHandlers,fileHandlersCode,setFileHandler,fileExts,onAddPlugin,onAddPluginFiles,
+  devMode,setDevMode}){
   const bgInput=React.useRef();
   const tplInput=React.useRef();
   const [tab,setTab]=React.useState('general');
@@ -2030,14 +2033,22 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
   const [pgBusy,setPgBusy]=React.useState(false);
   const [pgErr,setPgErr]=React.useState('');
   const [pgOk,setPgOk]=React.useState('');
+  const [pgWarn,setPgWarn]=React.useState('');
   const [aiCopied,setAiCopied]=React.useState(false);
   const plugDirInput=React.useRef();
+  /* a Code-layout plugin installed while Developer mode is off would never
+     render — warn right away instead of leaving a dead plugin */
+  const warnIfCodeOnly=entry=>{
+    if((entry.manifest.layout||'all')==='code'&&!devMode)
+      setPgWarn(`“${entry.manifest.name}” is a Code-layout plugin, but Developer mode is off — its pages won't open until you enable Developer mode (Settings → General).`);
+  };
   const installPlugin=async()=>{
     if(!pgUrl.trim()||pgBusy) return;
-    setPgBusy(true); setPgErr(''); setPgOk('');
+    setPgBusy(true); setPgErr(''); setPgOk(''); setPgWarn('');
     try{
       const entry=await onAddPlugin(pgUrl.trim());
       setPgOk(`Installed “${entry.manifest.name}” — find it under the 🧩 button in the sidebar.`);
+      warnIfCodeOnly(entry);
       setPgUrl('');
     }catch(e){ setPgErr(e.message||String(e)); }
     finally{ setPgBusy(false); }
@@ -2045,7 +2056,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
   const uploadPluginFolder=async fileList=>{
     const arr=[...(fileList||[])];
     if(!arr.length||pgBusy) return;
-    setPgBusy(true); setPgErr(''); setPgOk('');
+    setPgBusy(true); setPgErr(''); setPgOk(''); setPgWarn('');
     try{
       const files={};
       for(const f of arr){
@@ -2064,6 +2075,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
         .replace(/[^\w.-]+/g,'-').replace(/^[-.]+|[-.]+$/g,'')||'plugin';
       const entry=await onAddPluginFiles({id:pid,files});
       setPgOk(`Installed “${entry.manifest.name}” — find it under the 🧩 button in the sidebar.`);
+      warnIfCodeOnly(entry);
     }catch(e){ setPgErr(e.message||String(e)); }
     finally{ setPgBusy(false); if(plugDirInput.current) plugDirInput.current.value=''; }
   };
@@ -2133,6 +2145,18 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
       <div className="set-row">
         <div className="sr-l"><b>Storage</b><small>{activeWorkspace?.type==='gdrive'?'Mirrored to your Google Drive as Markdown files.':'Saved on this computer as Markdown files.'}</small></div>
         <span style={{color:'var(--text-3)'}}>{activeWorkspace?.type==='gdrive'?'Google Drive':'Local'}</span>
+      </div>
+      <div className="set-row">
+        <div className="sr-l"><b>App mode</b><small><b>Workspace</b> is the normal
+          workspace. <b>Developer</b> unlocks the Code layout — the Home ⟷ Code
+          switch at the top of the sidebar, with the file explorer, tabs and
+          terminal — and everything the workspace already does keeps working.
+          Code-layout plugins need it.</small></div>
+        <CustomSelect value={devMode?'developer':'workspace'}
+          onChange={v=>setDevMode(v==='developer')} options={[
+            {value:'workspace', label:'Workspace'},
+            {value:'developer', label:'Developer'},
+          ]}/>
       </div>
       <div className="set-row">
         <div className="sr-l"><b>Tutorial</b><small>Replay the guided tour of the workspace.</small></div>
@@ -2314,6 +2338,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
           </div>
           {pgErr&&<div className="set-repo-err">{pgErr}</div>}
           {pgOk&&<div className="set-repo-ok">{pgOk}</div>}
+          {pgWarn&&<div className="set-repo-warn">⚠ {pgWarn}</div>}
         </div>
         <div className="set-row set-row-col" style={{borderBottom:'1px solid var(--border)'}}>
           <div className="set-repo-head">
@@ -2348,7 +2373,8 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
                     <span className={cx('plug-badge',compat.ok?'ok':'bad')}
                       title={compat.checks.map(c=>`${c.pass?'✓':'✕'} ${c.label}${c.detail?' — '+c.detail:''}`).join('\n')}>
                       {compat.ok?'✓ Compatible':'✕ Incompatible'}</span>
-                    <span style={{color:'var(--text-3)',fontFamily:'var(--mono)',fontSize:11}}>plugins/{p.id}/</span>
+                    <span style={{color:'var(--text-3)',fontFamily:'var(--mono)',fontSize:11}}>
+                      {p.builtin?'built-in':`plugins/${p.id}/`}</span>
                   </div>
                 </div>
                 {!compat.ok&&<div className="set-repo-err">
@@ -2372,20 +2398,27 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
     :tab==='handlers'?(()=>{
       const plugs=plugins||[];
       // defaults always listed, plus anything claimed by a plugin, present in
-      // the workspace, or already overridden
+      // the workspace, or already overridden in either layout's map
       const exts=[...new Set([
         ...DEFAULT_HANDLER_EXTS,
         ...plugs.flatMap(p=>p.manifest.handles||[]),
         ...(fileExts||[]),
         ...Object.keys(fileHandlers||{}),
+        ...Object.keys(fileHandlersCode||{}),
       ])].sort();
-      const autoFor=ext=>plugs.find(p=>(p.manifest.handles||[]).includes(ext));
+      // Auto per layout: prefer a plugin scoped to that layout, then an 'all' one
+      const autoFor=(ext,lay)=>
+        plugs.find(p=>(p.manifest.handles||[]).includes(ext)&&p.manifest.layout===lay)
+        ||plugs.find(p=>(p.manifest.handles||[]).includes(ext)&&(p.manifest.layout||'all')==='all');
+      const plugsFor=lay=>plugs.filter(p=>{const l=p.manifest.layout||'all';return l==='all'||l===lay;});
       return <>
-        <p className="set-note">Which page opens each file type in this workspace.
-          A file named <code>name-(plugin-id).ext</code> always uses that plugin;
-          everything else follows this table. <b>Auto</b> means: the first plugin
-          that declares the type in its manifest's <code>"handles"</code>, or the
-          built-in text editor when none does.</p>
+        <p className="set-note">Which page opens each file type — <b>each layout has
+          its own default</b>, so e.g. <code>.py</code> can open in the simple Code
+          Viewer at Home and the IDE-style Coder Page in Code. A file named
+          <code> name-(plugin-id).ext</code> always uses that plugin; everything else
+          follows this table. <b>Auto</b> means: the first plugin that declares the
+          type in its manifest's <code>"handles"</code> (preferring one made for that
+          layout), or the built-in text editor when none does.</p>
         <div className="set-row set-row-col" style={{borderBottom:'1px solid var(--border)'}}>
           <div className="sr-l"><b>Add a file type</b><small>Missing a format —
             say <code>.ipynb</code>? Add any text-file extension, then pick which page opens
@@ -2402,22 +2435,35 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
             <div className="set-repo-err">Letters and digits only, up to 12 characters — e.g. <code>ipynb</code>.</div>}
         </div>
         {exts.map(ext=>{
-          const auto=autoFor(ext);
-          const val=(fileHandlers||{})[ext]||'auto';
-          const isCustom=!DEFAULT_HANDLER_EXTS.includes(ext)&&!auto&&!(fileExts||[]).includes(ext);
+          const isCustom=!DEFAULT_HANDLER_EXTS.includes(ext)
+            &&!plugs.some(p=>(p.manifest.handles||[]).includes(ext))
+            &&!(fileExts||[]).includes(ext);
+          const describe=(val,lay)=>{
+            const auto=autoFor(ext,lay);
+            return val==='auto'?(auto?`Auto — ${auto.manifest.name}`:'Auto — text editor')
+              : val==='text'?'Built-in text editor'
+              : (plugs.find(p=>p.id===val)?.manifest.name||`missing plugin "${val}"`);
+          };
+          const hVal=(fileHandlers||{})[ext]||'auto';
+          const cVal=(fileHandlersCode||{})[ext]||'auto';
           return <div className="set-row" key={ext}>
             <div className="sr-l"><b style={{fontFamily:'var(--mono)'}}>.{ext}</b>
-              <small>{val==='auto'
-                ? (auto?`Auto — ${auto.manifest.name}`:'Auto — built-in text editor (default)')
-                : val==='text'?'Built-in text editor'
-                : (plugs.find(p=>p.id===val)?.manifest.name||`missing plugin "${val}"`)}
-                {isCustom&&' · custom type (choosing Auto removes it)'}</small></div>
-            <select className="set-select" value={val}
-              onChange={e=>setFileHandler(ext,e.target.value)}>
-              <option value="auto">Auto{auto?` (${auto.manifest.name})`:' (text editor)'}</option>
-              <option value="text">Built-in text editor</option>
-              {plugs.map(p=><option key={p.id} value={p.id}>{p.manifest.name}</option>)}
-            </select>
+              <small>Home: {describe(hVal,'home')} · Code: {describe(cVal,'code')}
+                {isCustom&&' · custom type (Auto in both removes it)'}</small></div>
+            <div className="set-lay-selects">
+              {[['home','Home',hVal],['code','Code',cVal]].map(([lay,label,val])=>{
+                const auto=autoFor(ext,lay);
+                return <label key={lay} className="set-lay-select">
+                  <span>{label}</span>
+                  <select className="set-select" value={val}
+                    onChange={e=>setFileHandler(ext,e.target.value,lay)}>
+                    <option value="auto">Auto{auto?` (${auto.manifest.name})`:' (text editor)'}</option>
+                    <option value="text">Built-in text editor</option>
+                    {plugsFor(lay).map(p=><option key={p.id} value={p.id}>{p.manifest.name}</option>)}
+                  </select>
+                </label>;
+              })}
+            </div>
           </div>;
         })}
       </>;
@@ -2563,7 +2609,7 @@ function PageMenu({node,nodes,onClose,trashNode,duplicate,setModal,downloadPage,
 /* =========================================================================
    HOME SCREEN — shown when no workspace is connected
    ========================================================================= */
-function ConnectPanel({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,busy,error}){
+function ConnectPanel({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,busy,error,devMode,onDevMode}){
   const localOK=isLocalFSSupported();
   const [name,setName]=useState('');
   const [desc,setDesc]=useState('');
@@ -2582,6 +2628,23 @@ function ConnectPanel({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,bus
             onChange={e=>setDesc(e.target.value)}/>
         </label>
       </div>
+
+      {/* app mode — decide before entering (also in Settings → General) */}
+      {onDevMode&&<div className="cb-mode">
+        <div className="mode-pill" role="group" aria-label="App mode">
+          <button type="button" className={cx(!devMode&&'on')}
+            title="Workspace mode — the normal workspace"
+            onClick={()=>onDevMode(false)}>Workspace</button>
+          <button type="button" className={cx(devMode&&'on')}
+            title="Developer mode — unlocks the Code layout (explorer, tabs & terminal) and code-layout plugins"
+            onClick={()=>onDevMode(true)}>
+            <span style={{fontFamily:'var(--mono)',fontWeight:700}}>&lt;/&gt;</span> Developer
+          </button>
+        </div>
+        <div className="cb-mode-hint">{devMode
+          ?'Developer — adds the Code layout: file explorer, tabs & a terminal.'
+          :'Workspace — the normal notes, docs & databases workspace.'}</div>
+      </div>}
 
       <div className="cb-choose">Create it in</div>
       <div className="cb-tiles">
@@ -2738,7 +2801,7 @@ function WelcomePage({onGetStarted,onDemo,onDocs,onAbout,onSelfHost,theme,onTogg
   </div>;
 }
 
-function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onManage,onDocs,onWelcome,theme,onToggleTheme,accent,onAccent,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
+function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onManage,onDocs,onWelcome,theme,onToggleTheme,accent,onAccent,devMode,onDevMode,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
   const known=list||[];
   const lastId=pointer?pointer.id:null;
   return <div className="home-screen has-fixed-foot">
@@ -2824,6 +2887,7 @@ function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onMan
           <div className="home-label">{known.length?'Connect another':'Connect a workspace'}</div>
           <ConnectPanel onLocalNew={onLocalNew} onLocalExisting={onLocalExisting}
             onDriveNew={onDriveNew} onDriveExisting={onDriveExisting} busy={busy}
+            devMode={devMode} onDevMode={onDevMode}
             error={known.length?'':error}/>
         </div>
       </div>
@@ -2880,7 +2944,7 @@ function Workspace(){
   const savedRef=React.useRef({id:null});
   const tutorialShown=React.useRef(false);
 
-  /* ---- workspace plugins (plugins/<id>/ folders; demo gets the sample) ----
+  /* ---- workspace plugins (plugins/<id>/ folders + the built-in samples) ----
      Lives up here with the other hooks — everything below the early returns
      runs a variable number of times per mount. */
   const [plugins,setPlugins]=React.useState([]);
@@ -2892,6 +2956,21 @@ function Workspace(){
   const setLayout=l=>{
     setLayoutState(l);
     try{ localStorage.setItem('ws_layout',l); }catch(_){}
+  };
+  /* app mode: 'workspace' (default) is just the normal workspace; DEVELOPMENT
+     mode unlocks the Code layout (the Home⟷Code switch, explorer, terminal).
+     Existing users already in the code layout migrate to development mode. */
+  const [devMode,setDevModeState]=React.useState(()=>{
+    try{
+      const v=localStorage.getItem('ws_devmode');
+      if(v!=null) return v==='1';
+      return localStorage.getItem('ws_layout')==='code';
+    }catch(_){ return false; }
+  });
+  const setDevMode=on=>{
+    setDevModeState(on);
+    try{ localStorage.setItem('ws_devmode',on?'1':'0'); }catch(_){}
+    if(!on) setLayout('home');   // leaving development mode returns to Home
   };
   // id of a just-created page whose typed NAME decides its kind
   // (hello.py → file, notes.md → simple md, plain name → smart page)
@@ -2971,7 +3050,8 @@ function Workspace(){
       fontSize:info.fontSize||'default', customFonts:info.customFonts||[],
       pageBg:info.pageBg||null, pageBgUrl:info.pageBgUrl||null,
       templateRepo:info.templateRepo||'',
-      fileHandlers:info.fileHandlers||{},   // ext → plugin id | 'text' (built-in)
+      fileHandlers:info.fileHandlers||{},   // ext → plugin id | 'text' (Home layout)
+      fileHandlersCode:info.fileHandlersCode||{},   // same map, Code layout
       active, localList:localList||[],
       tutorialCompleted:getCookie('ws_tutorial')==='1',
     });
@@ -3039,7 +3119,7 @@ function Workspace(){
     // Freshly opened / switched workspace → nothing to save yet; don't rewrite it.
     if(savedRef.current.id!==active.id){ savedRef.current.id=active.id; setSaveState('saved'); return; }
 
-    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo,fileHandlers:store.fileHandlers};
+    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo,fileHandlers:store.fileHandlers,fileHandlersCode:store.fileHandlersCode};
     const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
     setSaveState('saving');
     clearTimeout(driveTimer.current);
@@ -3261,7 +3341,7 @@ function Workspace(){
   const flushCurrent=async()=>{
     if(!store) return;
     const a=store.active;
-    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo,fileHandlers:store.fileHandlers};
+    const info={theme:store.theme,accent:store.accent,font:store.font,fontSize:store.fontSize,customFonts:store.customFonts,description:store.description,pageBg:store.pageBg,templateRepo:store.templateRepo,fileHandlers:store.fileHandlers,fileHandlersCode:store.fileHandlersCode};
     const payload={nodes:store.nodes,favorites:store.favorites,uploads:store.uploads,info};
     try{
       if(a?.type==='local') await writeWorkspaceTreeNow(a.id,payload);
@@ -3348,6 +3428,7 @@ function Workspace(){
       onWelcome={()=>setEntry('welcome')}
       theme={homeTheme} onToggleTheme={toggleHomeTheme}
       accent={homeAccent} onAccent={changeHomeAccent}
+      devMode={devMode} onDevMode={setDevMode}
       onOpen={openKnownWorkspace} onRemove={removeKnownWorkspace} onReconnect={reconnectActive}
       onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
       onDriveNew={connectDriveNew} onDriveExisting={()=>connectDriveExisting(null)}/>
@@ -3411,7 +3492,9 @@ function Workspace(){
     if(aw?.type==='local') await writeLocalPlugin(aw.id,raw.id,raw.files);
     else if(aw?.type==='gdrive') await writeDrivePlugin(aw.folderId||aw.id,raw.id,raw.files);
     const entry=await mod.buildPluginEntry(raw);
-    setPlugins(prev=>[...prev.filter(p=>p.id!==entry.id),entry]);
+    // prepend: workspace plugins stay ahead of the built-ins, so an installed
+    // handler wins resolveHandler's first-match for a shared extension
+    setPlugins(prev=>[entry,...prev.filter(p=>p.id!==entry.id)]);
     return entry;
   };
   const addPluginFromGithub=async url=>{
@@ -3419,14 +3502,19 @@ function Workspace(){
     return installPluginRaw(await mod.fetchGithubPlugin(url));
   };
   /* Which plugin opens a 'file' page: explicit "-(plugin)" filename binding →
-     Settings override for the extension → first plugin whose manifest
-     `handles` the extension → null (built-in text editor). */
-  const resolveHandler=n=>{
+     the CURRENT LAYOUT's Settings override for the extension → first plugin
+     whose manifest `handles` the extension, preferring one scoped to this
+     layout → null (built-in text editor). Each layout has its own defaults,
+     so .py can open in the Code Viewer at Home and the Coder Page in Code. */
+  const resolveHandler=(n,lay=(devMode?layout:'home'))=>{
     if(n.plugin) return plugins.find(p=>p.id===n.plugin)||null;
-    const ov=(store.fileHandlers||{})[n.ext];
+    const ov=((lay==='code'?store.fileHandlersCode:store.fileHandlers)||{})[n.ext];
     if(ov==='text') return null;
     if(ov) return plugins.find(p=>p.id===ov)||null;
-    return plugins.find(p=>(p.manifest.handles||[]).includes(n.ext))||null;
+    const claims=p=>(p.manifest.handles||[]).includes(n.ext);
+    return plugins.find(p=>claims(p)&&p.manifest.layout===lay)
+      || plugins.find(p=>claims(p)&&(p.manifest.layout||'all')==='all')
+      || null;
   };
 
   const addNode=(parentId,extra={})=>{
@@ -3483,9 +3571,13 @@ function Workspace(){
         return;
       }
       if(m){
+        // "base-(plugin).ext" binds the handler in the FILE NAME — store it
+        // split (title "base.ext" + plugin), exactly like the disk reader
         const ext=m[2].toLowerCase();
+        const bind=m[1].match(/^(.*)-\(([\w.-]+)\)$/);
         registerExt(name,ext);
-        updateNode(n.id,{kind:'file',title:name,ext,plugin:'',data:'',blocks:undefined});
+        updateNode(n.id,{kind:'file',title:bind?bind[1].trim()+'.'+m[2]:name,
+          ext,plugin:bind?bind[2]:'',data:'',blocks:undefined});
         return;
       }
       updateNode(n.id,{title:name});
@@ -3493,9 +3585,13 @@ function Workspace(){
     }
     if(n.kind!=='file'){ updateNode(n.id,{title:name}); return; }
     if(!/\.[^.]+$/.test(name)) name+='.'+(n.ext||'txt');
-    const ext=(name.match(/\.([^.]+)$/)||[,''])[1].toLowerCase();
+    // the rename input shows the full disk name incl. any "-(plugin)" binding —
+    // re-split it, so editing the binding rebinds (and removing it unbinds)
+    const fm=name.match(/^(.*?)\.([^.]+)$/);
+    const ext=fm[2].toLowerCase();
+    const bind=fm[1].match(/^(.*)-\(([\w.-]+)\)$/);
     registerExt(name,ext);
-    updateNode(n.id,{title:name,ext});
+    updateNode(n.id,{title:bind?bind[1].trim()+'.'+fm[2]:name,ext,plugin:bind?bind[2]:''});
   };
   /* "New page" — the page is created empty, and the topbar immediately asks
      for its NAME (full file name, extension included), which decides the kind. */
@@ -3760,7 +3856,7 @@ function Workspace(){
             plugin={n.kind==='plugin'
               ? plugins.find(p=>p.id===n.plugin)
               : resolveHandler(n)}
-            update={updateNode} api={pluginApi} layout={layout}/>
+            update={updateNode} api={pluginApi} layout={layout} devMode={devMode}/>
         </React.Suspense>
       : <Editor key={n.id} node={n} update={updateNode}
           createChild={createChild} openPage={openPage}
@@ -3771,7 +3867,7 @@ function Workspace(){
 
   return <div className={cx('app',theme==='dark'&&'dark',`t-${accent}`)}
     style={{'--ws-font':fontStack(store.font),'--ws-fs':fontScale(store.fontSize)}}>
-    {layout==='code'
+    {layout==='code'&&devMode
     ? <React.Suspense fallback={<BootScreen/>}>
         <CodeLayout nodes={nodes} currentId={currentId} openPage={openPage}
           renderEditor={renderPageEditor} createNamed={createNamed} addFolder={addFolder}
@@ -3792,7 +3888,7 @@ function Workspace(){
       toggleFav={toggleFav} duplicate={duplicate} exportPage={exportPage}
       renameNode={renameNode} onGoHome={goHome}
       toggleSidebar={()=>setSidebarOpen(o=>!o)}
-      addNamedPage={addNamedPage} layout={layout} setLayout={setLayout}/>
+      addNamedPage={addNamedPage} layout={layout} setLayout={setLayout} devMode={devMode}/>
 
     <div className={cx('main',store.pageBgUrl&&'has-page-bg')}
       style={store.pageBgUrl?{'--page-bg':`url("${store.pageBgUrl}")`}:undefined}>
@@ -3903,16 +3999,19 @@ function Workspace(){
         onRestartTutorial={()=>{setModal(null);setShowTutorial(true);}}
         plugins={plugins}
         fileHandlers={store.fileHandlers||{}}
-        setFileHandler={(ext,val)=>{
-          const fh={...(store.fileHandlers||{})};
+        fileHandlersCode={store.fileHandlersCode||{}}
+        setFileHandler={(ext,val,lay)=>{
+          const key=lay==='code'?'fileHandlersCode':'fileHandlers';
+          const fh={...(store[key]||{})};
           if(val==='auto') delete fh[ext]; else fh[ext]=val;
-          patch({fileHandlers:fh});
+          patch({[key]:fh});
         }}
         fileExts={[...new Set(Object.values(nodes)
           .filter(n=>n&&n.kind==='file'&&!n.trashed&&!n.archived&&n.ext)
           .map(n=>n.ext))]}
         onAddPlugin={addPluginFromGithub}
-        onAddPluginFiles={installPluginRaw}/>}
+        onAddPluginFiles={installPluginRaw}
+        devMode={devMode} setDevMode={setDevMode}/>}
     {modal&&modal.type==='page-menu'&&node&&
       <PageMenu node={node} nodes={nodes} onClose={()=>setModal(null)} trashNode={trashNode}
         duplicate={duplicate} setModal={setModal} downloadPage={downloadPage}
