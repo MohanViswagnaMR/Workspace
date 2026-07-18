@@ -21,7 +21,7 @@
    swaps. Bump CACHE to force a fresh app-shell cache on deploy.
    ========================================================================= */
 
-const CACHE = 'workspace-v3.0.0-dev.1';
+const CACHE = 'workspace-v3.0.0';
 
 const APP_SHELL = [
   '/',

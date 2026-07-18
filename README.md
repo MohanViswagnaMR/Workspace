@@ -1,6 +1,6 @@
 # Workspace
 
-**Version 2.4.0**
+**Version 3.0.0**
 
 A fast, block-based, Notion-style workspace built with **Vite + React 18**. There
 are no accounts and no backend. Everything you write is stored as **ordinary
@@ -45,10 +45,19 @@ away.
 - **Installable PWA** — install it to your desktop or phone and launch it in its
   own window; a service worker caches the app shell so it opens offline (your
   data is already local files or Drive).
+- **Plugins** — extend it like an editor: typed plugins (custom pages, file
+  handlers, CSS themes) as plain folders with per-hash consent and revocable
+  permissions, a community **plugin registry** with automated testing, an
+  in-app **Plugin Store**, and a VS Code-style **Extensions view**.
+- **Code layout** — Developer mode adds a VS Code-style layout: explorer,
+  tabs, breadcrumbs, an Extensions panel, and a **real terminal** via a
+  local Docker bridge. Smart pages can flip to their raw on-disk `.md`.
+- **Guided setup** — creating a workspace is a stepped wizard: name, layout,
+  theme, plugins and starter pages.
 - **Import** — bring in `.docx` files via mammoth.
-- **Homepage** — a top navbar with in-app **Docs**, **Manage workspaces** (rename /
-  edit description / delete Drive workspaces), a Google Drive connection indicator, and a
-  dark/light switch. Defaults to dark mode with a purple accent.
+- **Homepage** — a top navbar with in-app **Docs** and the **Plugin Store**,
+  a Google Drive connection indicator, and a dark/light switch. Defaults to
+  dark mode with a rose accent.
 - **Live save status** — a Saved / Saving… / Unsaved indicator next to the storage badge.
 
 ---
@@ -236,11 +245,12 @@ client, and ensure the Google Drive API is enabled.
 
 ## Versions
 
-Current release: **2.4.0**. Full release notes live in the [`versions/`](./versions)
+Current release: **3.0.0**. Full release notes live in the [`versions/`](./versions)
 folder.
 
 | Version | Date       | Highlights                                                        |
 |---------|------------|-------------------------------------------------------------------|
+| [3.0.0](./versions/v3.0.0.md) | 2026-07-19 | Plugins & the Code layout — **typed plugin system** (pages, file handlers, CSS **themes**) with per-hash consent, permissions & uninstall; the community **plugin registry** (auto-tested, pinned-SHA index) + in-app **Plugin Store**; VS Code-style **Code layout** (menus, extensions view, trash, real terminal, raw-`.md` switch); guided **create-workspace wizard** (layout/theme/plugins/starter pages); simple `.md` pages, name-first creation, redesigned welcome page, rose default accent, `src/` restructure |
 | [2.4.0](./versions/v2.4.0.md) | 2026-07-11 | Folders, tables & customization — **folders** (bare directories, no master page), **simple tables** (GFM) + **smart tables** (multi-view, rows are pages), per-page **table of contents**, custom templates + **GitHub template repositories**, sectioned Settings with font size & **Google Fonts**, md-mark default icons, icon+title header row, word/paragraph/block counts, sidebar collapse button & icon rail, multi-block turn-into fix |
 | [2.3.0](./versions/v2.3.0.md) | 2026-07-11 | Performance release — typing re-renders only the edited block (memoized editor), O(n) sidebar tree, database views keep state across edits (calendar/board fix), **Google Drive opens ~5–10× faster** (parallel I/O), lighter saves, lazy-loaded Docs/About pages (−30 KB main bundle), deferred spell-check dictionary, text-preview & upload-memory fixes |
 | [2.2.1](./versions/v2.2.1.md) | 2026-07-11 | Editor polish release — selection-aware backspace/delete, backspace merges text up (caret at the junction), slash only opens after whitespace and converts the block in place, combined right-click menu with a format toolbar on top, inline-code styling + toggle-off, **offline spell-check with inline suggestions**, undo/redo merge-duplication fix, click-empty-space adds a block, and **/bold · /italic · /red · /yellow-highlight** slash formatting commands |
