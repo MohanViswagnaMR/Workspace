@@ -389,6 +389,15 @@ export async function writeLocalPlugin(wsId, pluginId, files) {
   }
 }
 
+/* Remove a plugin's folder (plugins/<id>/) from a local workspace. */
+export async function deleteLocalPlugin(wsId, pluginId) {
+  const rec = await idbGet(wsId);
+  if (!rec) throw new Error('Workspace not found');
+  if (!(await verifyPermission(rec.handle, true))) throw new Error('Permission to write the workspace folder was denied.');
+  const dir = await rec.handle.getDirectoryHandle(PLUGIN_DIR);
+  await dir.removeEntry(pluginId, { recursive: true });
+}
+
 /* Read a local workspace's full tree → { nodes, favorites, currentId, uploads }.
    Returns null if the folder has no Space/ yet (brand-new). Throws on denied. */
 export async function readWorkspaceTree(id) {

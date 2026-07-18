@@ -27,7 +27,7 @@
   --border-strong:#cbd5e1;
 
   /* accent — indigo → violet */
-  --accent:#6366f1;
+  --accent:#f43f5e;
   --accent-soft:#eef2ff;
   --accent-2:#8b5cf6;
   --accent-grad:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%);
@@ -56,7 +56,7 @@
   --text-3:#94a3b8;
   --border:#1e293b;
   --border-strong:#334155;
-  --accent:#818cf8;
+  --accent:#fb7185;
   --accent-soft:#1e1b4b;
   --accent-2:#a78bfa;
   --accent-grad:linear-gradient(135deg,#818cf8 0%,#a78bfa 100%);
@@ -1015,18 +1015,94 @@ input,textarea{font-family:inherit;}
   background:linear-gradient(135deg,var(--accent),var(--accent-2));
   box-shadow:0 1px 3px color-mix(in srgb,var(--accent) 22%,transparent);}
 
-/* VS Code STRUCTURE, the app's OWN theme — colors all come from the app's
-   theme tokens, so the code layout follows light/dark and the accent. */
-.code-layout{--cl-bg:var(--bg);--cl-side:var(--bg-card);
+/* VS Code STRUCTURE & anatomy — title bar with menus, activity bar,
+   explorer side bar (OPEN EDITORS + tree), tabbed editor with breadcrumbs,
+   a tabbed bottom panel and the status bar. Colors come from the app's own
+   theme tokens so the layout follows light/dark and the accent. */
+.code-layout{--cl-bg:var(--bg);--cl-side:var(--bg-card);--cl-chrome:var(--bg-side);
   --cl-border:var(--border);--cl-text:var(--text);--cl-text2:var(--text-3);
   --cl-hi:var(--bg-active);--cl-status:var(--accent);
-  position:fixed;inset:0;display:grid;z-index:50;
-  grid-template-columns:260px 1fr;grid-template-rows:1fr 22px;
-  grid-template-areas:"side main" "status status";
+  position:fixed;inset:0;display:flex;flex-direction:column;z-index:50;
   background:var(--cl-bg);color:var(--cl-text);
   font-family:var(--ws-font,var(--font));font-size:13px;}
-/* the left column IS the home sidebar (same classes) placed in the grid */
-.cl-sidebar{grid-area:side;height:100%;}
+
+/* ---- title bar ---- */
+/* airy, chrome-free segmented control — the sidebar pill (boxed container,
+   gradient, glow ring) is far too heavy for a 34px VS Code titlebar. Here:
+   no container at all, two ghost buttons with room to breathe, and the
+   active side gets only a soft accent tint. */
+.cl-titlebar .layout-switch{margin:0;padding:0;gap:6px;
+  background:none;border:none;border-radius:0;box-shadow:none;}
+.cl-titlebar .ls-btn{flex:none;padding:0 12px;height:24px;border-radius:6px;gap:5px;
+  font-size:12px;font-weight:600;letter-spacing:.01em;
+  color:var(--cl-text2);background:none;box-shadow:none;}
+.cl-titlebar .ls-btn:hover{color:var(--cl-text);background:var(--bg-hover);}
+.cl-titlebar .ls-btn.on{background:var(--accent-soft);color:var(--accent);
+  box-shadow:none;font-weight:700;}
+.cl-titlebar{display:flex;align-items:center;gap:2px;height:34px;flex-shrink:0;
+  background:var(--cl-chrome);border-bottom:1px solid var(--cl-border);padding:0 8px;}
+/* Brand `small` variant — sized for the 34px titlebar */
+.brand-sm{gap:7px;margin:0 8px 0 4px;}
+.brand-sm .home-nav-mark{font-size:15px;}
+.brand-sm .home-nav-title{font-size:12.5px;font-weight:700;color:var(--cl-text);
+  max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.cl-menus{display:flex;}
+.cl-menu-btn{background:none;border:none;color:var(--cl-text2);font:inherit;font-size:12.5px;
+  padding:4px 9px;border-radius:6px;cursor:pointer;}
+.cl-menu-btn:hover,.cl-menu-btn.on{background:var(--bg-hover);color:var(--cl-text);}
+.cl-tb-center{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;min-width:0;}
+.cl-tb-nav{background:none;border:none;color:var(--cl-text2);cursor:pointer;
+  padding:3px 5px;border-radius:6px;display:flex;}
+.cl-tb-nav:hover{background:var(--bg-hover);color:var(--cl-text);}
+.cl-tb-search{display:flex;align-items:center;gap:7px;justify-content:center;
+  width:min(420px,40vw);height:24px;border-radius:7px;cursor:pointer;
+  border:1px solid var(--cl-border);background:var(--cl-bg);
+  color:var(--cl-text2);font-size:12px;overflow:hidden;white-space:nowrap;}
+.cl-tb-search:hover{border-color:var(--border-strong);color:var(--cl-text);}
+.cl-tb-right{display:flex;align-items:center;}
+
+/* ---- body: activity bar | side bar | main ---- */
+.cl-body{flex:1;min-height:0;display:flex;}
+.cl-activity{width:46px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;
+  gap:2px;padding:6px 0;background:var(--cl-chrome);border-right:1px solid var(--cl-border);}
+.cl-act{width:40px;height:40px;display:flex;align-items:center;justify-content:center;
+  background:none;border:none;border-left:2px solid transparent;cursor:pointer;
+  color:var(--cl-text2);}
+.cl-act svg{width:20px;height:20px;}
+.cl-act:hover{color:var(--cl-text);}
+.cl-act.on{color:var(--cl-text);border-left-color:var(--accent);}
+
+.cl-side{width:238px;flex-shrink:0;display:flex;flex-direction:column;min-height:0;
+  background:var(--cl-side);border-right:1px solid var(--cl-border);}
+/* the HOME sidebar's glowing selection pill (.tree-item.sel::before, absolute
+   at left:-8px) escapes this narrower shell — VS Code selection is just the
+   flat row highlight, so suppress the pill entirely here */
+.code-layout .tree-item.sel::before,.code-layout .row.sel::before{display:none;}
+.cl-side-title{font-size:10.5px;letter-spacing:.08em;color:var(--cl-text2);
+  padding:9px 16px 7px;flex-shrink:0;}
+.cl-sec{display:flex;flex-direction:column;min-height:0;flex-shrink:0;}
+.cl-sec-grow{flex:1;min-height:0;}
+.cl-sec-h{display:flex;align-items:center;gap:4px;font-size:10.5px;font-weight:700;
+  letter-spacing:.04em;color:var(--cl-text);padding:3px 8px;flex-shrink:0;
+  overflow:hidden;white-space:nowrap;}
+.cl-sec-caret{color:var(--cl-text2);font-size:9px;}
+.cl-sec-btn{background:none;border:none;color:var(--cl-text2);cursor:pointer;padding:2px;
+  border-radius:5px;display:flex;flex-shrink:0;}
+.cl-sec-btn svg{width:14px;height:14px;}
+.cl-sec-btn:hover{background:var(--bg-hover);color:var(--cl-text);}
+.cl-sec-body{flex:1;min-height:0;overflow-y:auto;padding-bottom:10px;}
+/* OPEN EDITORS rows are byte-identical to tree rows; hovering a row swaps
+   the FILE ICON itself for the close × (VS Code behaviour) — nothing pops
+   in on the side, so alignment with the tree never shifts */
+.cl-oe-swap{display:inline-flex;align-items:center;justify-content:center;}
+.cl-oe-ic{display:inline-flex;align-items:center;line-height:1;}
+.cl-oe-x{display:none;background:none;border:none;color:var(--cl-text2);cursor:pointer;
+  font-size:14px;padding:0;width:100%;height:100%;border-radius:4px;line-height:1;
+  align-items:center;justify-content:center;}
+.cl-oe:hover .cl-oe-ic{display:none;}
+.cl-oe:hover .cl-oe-x{display:inline-flex;}
+.cl-oe-x:hover{background:var(--bg-hover);color:var(--cl-text);}
+
 .cl-caret{width:12px;flex-shrink:0;font-size:10px;color:var(--cl-text2);}
 .cl-caret.none{visibility:hidden;}
 .cl-caret-ic{display:inline-flex;color:#dcb67a;}
@@ -1035,8 +1111,67 @@ input,textarea{font-family:inherit;}
   justify-content:center;font-size:10px;font-weight:800;font-family:var(--mono);
   letter-spacing:-0.3px;}
 .cl-name{overflow:hidden;text-overflow:ellipsis;}
-.cl-main{grid-area:main;display:flex;flex-direction:column;min-width:0;min-height:0;}
-.cl-tabs{display:flex;background:var(--cl-side);overflow-x:auto;flex-shrink:0;
+
+/* ---- extensions view (VS Code Extensions panel + detail page) ---- */
+.cl-ext-search{display:block;margin:2px 10px 10px;}
+.cl-ext-search input{width:100%;box-sizing:border-box;height:27px;padding:0 9px;
+  border:1px solid var(--cl-border);border-radius:5px;background:var(--cl-bg);
+  color:var(--cl-text);font:inherit;font-size:12px;}
+.cl-ext-search input:focus{outline:none;border-color:var(--accent);}
+.cl-ext-count{margin-left:6px;background:var(--accent);color:#fff;border-radius:20px;
+  font-size:9.5px;padding:1px 7px;font-weight:700;}
+.cl-ext-row{display:flex;gap:9px;padding:8px 10px;cursor:pointer;align-items:flex-start;}
+.cl-ext-row:hover{background:var(--bg-hover);}
+.cl-ext-row.sel{background:var(--cl-hi);}
+.cl-ext-ic{width:36px;height:36px;border-radius:8px;background:var(--bg-2);flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:19px;}
+.cl-ext-tx{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
+.cl-ext-t{font-size:12.5px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.cl-ext-s{font-size:11.5px;color:var(--cl-text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.cl-ext-a{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--cl-text2);}
+.cl-ext-btn{background:var(--bg-2);border:1px solid var(--cl-border);color:var(--cl-text);
+  font:inherit;font-size:11px;font-weight:600;border-radius:4px;padding:1.5px 9px;
+  cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:4px;}
+.cl-ext-btn:hover{border-color:var(--border-strong);}
+.cl-ext-btn.primary,.cl-ext-btn.install{background:var(--accent);border-color:var(--accent);color:#fff;}
+.cl-ext-btn:disabled{opacity:.6;cursor:wait;}
+.cl-ext-tag{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--cl-text2);}
+.cl-ext-none{font-size:11.5px;color:var(--cl-text2);padding:8px 12px;}
+/* raw .md view for smart pages (code layout only) */
+.cl-rawmd{flex:1;min-height:0;display:flex;flex-direction:column;}
+.cl-rawmd-ta{flex:1;min-height:0;resize:none;border:none;outline:none;
+  background:transparent;color:var(--cl-text);padding:16px 20px;
+  font-family:var(--mono);font-size:13px;line-height:1.65;tab-size:4;
+  white-space:pre;overflow:auto;}
+.cl-rawmd-note{flex-shrink:0;padding:5px 20px;font-size:11px;color:var(--cl-text2);
+  border-top:1px solid color-mix(in srgb,var(--cl-border) 60%,transparent);}
+.cl-trash-row{padding-right:6px;}
+.cl-trash-row .cl-sec-btn{opacity:0;}
+.cl-trash-row:hover .cl-sec-btn{opacity:1;}
+.cl-ext-detail{flex:1;min-height:0;overflow-y:auto;padding:30px 40px;}
+.cl-ext-hero{display:flex;gap:22px;align-items:flex-start;padding-bottom:22px;
+  border-bottom:1px solid var(--cl-border);margin-bottom:22px;}
+.cl-ext-hero-ic{width:96px;height:96px;border-radius:18px;background:var(--bg-2);flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;font-size:52px;}
+.cl-ext-hero h1{margin:0 0 6px;font-size:24px;letter-spacing:-.02em;}
+.cl-ext-hero-meta{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--cl-text2);}
+.cl-ext-hero-desc{margin:10px 0 12px;font-size:13.5px;color:var(--cl-text2);max-width:640px;}
+.cl-ext-hero-btns{display:flex;gap:8px;}
+.cl-ext-cols{display:grid;grid-template-columns:1fr 280px;gap:34px;align-items:start;}
+.cl-ext-readme h3,.cl-ext-meta h3{font-size:11px;letter-spacing:.07em;color:var(--cl-text2);
+  text-transform:uppercase;margin:0 0 10px;}
+.cl-ext-readme p{font-size:13px;line-height:1.65;color:var(--cl-text);margin:0 0 10px;max-width:600px;}
+.cl-ext-readme code{font-family:var(--mono);font-size:.9em;background:var(--bg-2);
+  border-radius:4px;padding:1px 5px;}
+.cl-ext-meta-row{display:flex;justify-content:space-between;gap:12px;font-size:12px;
+  padding:5px 0;border-bottom:1px solid color-mix(in srgb,var(--cl-border) 60%,transparent);
+  color:var(--cl-text2);}
+@media(max-width:900px){.cl-ext-cols{grid-template-columns:1fr;}}
+
+/* ---- editor area ---- */
+.cl-main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;}
+.cl-tabs{display:flex;background:var(--cl-chrome);overflow-x:auto;flex-shrink:0;
   border-bottom:1px solid var(--cl-border);scrollbar-width:thin;}
 .cl-tab{display:flex;align-items:center;gap:6px;padding:7px 10px 7px 12px;
   font-size:12.5px;cursor:pointer;color:var(--cl-text2);white-space:nowrap;
@@ -1046,8 +1181,12 @@ input,textarea{font-family:inherit;}
   padding:0 2px;border-radius:4px;opacity:.5;}
 .cl-tab:hover .cl-tab-x,.cl-tab.on .cl-tab-x{opacity:1;}
 .cl-tab-x:hover{background:var(--bg-hover);}
+.cl-crumbs{display:flex;align-items:center;gap:6px;padding:4px 14px;flex-shrink:0;
+  font-size:11.5px;color:var(--cl-text2);border-bottom:1px solid
+  color-mix(in srgb,var(--cl-border) 60%,transparent);overflow:hidden;white-space:nowrap;}
+.cl-crumbs .cur{color:var(--cl-text);}
+.cl-crumb-sep{opacity:.6;}
 .cl-editor{flex:1;min-height:0;display:flex;flex-direction:column;position:relative;}
-/* the hosted page editors keep the APP's theme variables inside this shell */
 .cl-editor-host{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;}
 .cl-editor-host>.scroll{flex:1;min-height:0;}
 .cl-welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -1056,22 +1195,29 @@ input,textarea{font-family:inherit;}
 .cl-welcome h2{margin:0;color:var(--cl-text);font-weight:600;font-size:18px;}
 .cl-welcome p{margin:0;font-size:13px;}
 .cl-welcome code{font-family:var(--mono);color:var(--cl-text);}
-.cl-term{height:220px;flex-shrink:0;display:flex;flex-direction:column;
+.cl-welcome-keys{display:flex;gap:18px;margin-top:14px;font-size:12px;}
+.cl-welcome-keys b{font-family:var(--mono);font-weight:600;color:var(--cl-text);
+  background:var(--bg-2);border-radius:5px;padding:1px 6px;margin-left:4px;}
+
+/* ---- bottom panel (problems / output / terminal) ---- */
+.cl-panel{height:230px;flex-shrink:0;display:flex;flex-direction:column;
   border-top:1px solid var(--cl-border);background:var(--cl-bg);}
-/* maximized terminal — fills the whole main area (tabs + editor stay mounted,
-   just hidden, so editor state survives; xterm refits via ResizeObserver) */
-.cl-main.term-max .cl-tabs,.cl-main.term-max .cl-editor{display:none;}
-.cl-main.term-max .cl-term{height:auto;flex:1;min-height:0;border-top:none;}
-.cl-term-head{display:flex;align-items:center;justify-content:space-between;
-  font-size:10.5px;letter-spacing:.08em;color:var(--cl-text2);padding:6px 12px 4px;}
-.cl-term-hbtns{display:flex;align-items:center;gap:12px;}
+.cl-main.term-max .cl-tabs,.cl-main.term-max .cl-crumbs,.cl-main.term-max .cl-editor{display:none;}
+.cl-main.term-max .cl-panel{height:auto;flex:1;min-height:0;border-top:none;}
+.cl-panel-head{display:flex;align-items:center;gap:2px;padding:2px 12px 0;flex-shrink:0;}
+.cl-panel-tab{background:none;border:none;border-bottom:1.5px solid transparent;
+  color:var(--cl-text2);font:inherit;font-size:10.5px;letter-spacing:.07em;
+  padding:5px 8px;cursor:pointer;}
+.cl-panel-tab:hover{color:var(--cl-text);}
+.cl-panel-tab.on{color:var(--cl-text);border-bottom-color:var(--accent);}
+.cl-panel-body{flex:1;overflow-y:auto;padding:8px 16px;font-family:var(--mono);
+  font-size:12.5px;line-height:1.7;color:var(--cl-text2);}
+.cl-term{flex:1;min-height:0;display:flex;flex-direction:column;}
 .cl-term-x{background:none;border:none;color:var(--cl-text2);cursor:pointer;font-size:15px;}
-.cl-term-x:hover{color:#fff;}
-.cl-term-body{flex:1;overflow-y:auto;padding:2px 12px 10px;font-family:var(--mono);
-  font-size:12.5px;line-height:1.55;cursor:text;}
-.cl-term-xterm{flex:1;min-height:0;padding:0 4px 4px 10px;}
+.cl-term-x:hover{color:var(--cl-text);}
+.cl-term-xterm{flex:1;min-height:0;padding:4px 4px 4px 12px;}
 .cl-term-xterm .xterm{height:100%;}
-.cl-term-off{flex:1;overflow-y:auto;padding:4px 14px 12px;font-family:var(--mono);
+.cl-term-off{flex:1;overflow-y:auto;padding:8px 16px 12px;font-family:var(--mono);
   font-size:12.5px;line-height:1.6;}
 .cl-term-cmd{margin:8px 0;padding:10px 12px;border:1px solid var(--cl-border);
   border-radius:8px;background:var(--bg-input);color:var(--cl-text);
@@ -1082,17 +1228,38 @@ input,textarea{font-family:inherit;}
 .cl-term-retry:hover{border-color:var(--accent);}
 .cl-term-line{white-space:pre-wrap;word-break:break-word;color:var(--cl-text);}
 .cl-term-line.err{color:#d44c47;}
-.cl-term-line.in{color:var(--text-2);}
 .cl-prompt{color:var(--accent);font-weight:700;}
-.cl-term-body input{background:none;border:none;outline:none;color:var(--text-2);
-  font:inherit;width:70%;}
-.cl-status{grid-area:status;display:flex;align-items:center;background:var(--cl-status);
-  color:#fff;font-size:11.5px;overflow:hidden;}
+
+/* ---- status bar ---- */
+.cl-status{display:flex;align-items:center;height:22px;flex-shrink:0;
+  background:var(--cl-status);font-size:11.5px;overflow:hidden;
+  /* text in a DARK SHADE of the theme color — same recipe as the mini-switch */
+  color:color-mix(in srgb,var(--accent) 30%,#000000e0);}
 .cl-status-item{display:flex;align-items:center;gap:4px;padding:0 9px;height:100%;
-  background:none;border:none;color:#fff;font:inherit;white-space:nowrap;}
+  background:none;border:none;color:inherit;font:inherit;white-space:nowrap;}
 button.cl-status-item{cursor:pointer;}
-button.cl-status-item:hover{background:#ffffff22;}
-.cl-status-branch{font-weight:600;}
+button.cl-status-item:hover{background:#00000018;}
+.cl-status-remote{background:#00000030;font-weight:700;}
+/* "smart page" mini switch — ON = block editor, OFF = raw on-disk .md */
+.cl-mini-switch{width:26px;height:13px;border-radius:20px;background:#00000045;
+  position:relative;display:inline-block;flex-shrink:0;transition:background .15s;}
+.cl-mini-switch i{position:absolute;top:2px;left:2px;width:9px;height:9px;border-radius:50%;
+  background:#fff;transition:left .15s;}
+/* ON = a dark shade of the theme color, so the track reads clearly against
+   the accent bar and the bright accent knob pops inside it */
+.cl-mini-switch.on{background:color-mix(in srgb,var(--accent) 30%,#000000c8);}
+.cl-mini-switch.on i{left:15px;background:var(--accent);
+  box-shadow:0 0 0 1.5px #00000035;}
+/* the shared SavePill, compact for the 22px status bar — SOLID dark pill +
+   bright state color, so it stays readable on EVERY accent color */
+.save-pill.compact{padding:1px 8px 1px 6px;font-size:11px;margin:0;gap:4px;}
+/* !important-free but must OUTRANK `body.dark .save-pill.<state>` (0,3,1):
+   four classes (0,4,0) keep these solid colors on every accent + theme */
+.cl-status .save-pill.compact{background:#00000060;color:#f1f1f1;}
+.cl-status .save-pill.compact.saved{color:#3ee88f;background:#0b2b1cdd;}
+.cl-status .save-pill.compact.saving{color:#f1f1f1;background:#00000060;}
+.cl-status .save-pill.compact.error{color:#ff8f8f;background:#3a0d0ddd;}
+.cl-status .save-pill.compact.demo{color:#ffd48a;background:#332208dd;}
 
 /* the copyable "build a plugin with AI" prompt */
 .set-ai-prompt{width:100%;box-sizing:border-box;max-height:200px;overflow:auto;margin:0;
@@ -2034,6 +2201,81 @@ body.dark .home-aurora .orb{opacity:.42; filter:blur(72px);}
   border:1px solid color-mix(in srgb,var(--border-strong) 55%,transparent);}
 @media(max-width:760px){.wl-files{grid-template-columns:1fr; gap:20px;}}
 
+/* ---- welcome: version badge ---- */
+.wl-badge{display:inline-flex; align-items:center; gap:8px; padding:6px 14px;
+  border-radius:100px; font-size:12px; font-weight:600; color:var(--text-2);
+  border:1px solid color-mix(in srgb,var(--accent) 35%,var(--border));
+  background:color-mix(in srgb,var(--accent-soft) 55%,transparent); margin-bottom:18px;}
+.wl-badge-dot{width:7px; height:7px; border-radius:50%; background:var(--accent);
+  box-shadow:0 0 8px var(--accent); animation:pulse 2.4s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+/* ---- welcome: CSS product shot ---- */
+.wl-mock{max-width:760px; margin:0 auto 52px; border-radius:16px; overflow:hidden;
+  border:1px solid var(--border-strong); background:var(--bg-card);
+  box-shadow:0 24px 70px -28px rgba(0,0,0,.5), var(--shadow);}
+.wl-mock-bar{display:flex; align-items:center; gap:7px; padding:10px 14px;
+  border-bottom:1px solid var(--border); background:var(--bg-2);}
+.wl-dot{width:11px; height:11px; border-radius:50%;}
+.wl-dot.r{background:#ff5f57;} .wl-dot.y{background:#febc2e;} .wl-dot.g{background:#28c840;}
+.wl-mock-title{margin-left:10px; font-size:12px; font-weight:600; color:var(--text-3);}
+.wl-mock-body{display:flex; min-height:250px;}
+.wl-mock-side{width:184px; flex-shrink:0; border-right:1px solid var(--border);
+  background:var(--bg-side); padding:12px 10px; display:flex; flex-direction:column; gap:3px;}
+.wl-mock-nav{display:flex; align-items:center; gap:8px; font-size:12px; font-weight:700;
+  color:#fff; background:var(--accent); border-radius:8px; padding:7px 10px; margin-bottom:8px;}
+.wl-mock-item{display:flex; align-items:center; gap:8px; font-size:12.5px; color:#c9cdd6;
+  padding:6px 9px; border-radius:7px;}
+.wl-mock-item.on{background:color-mix(in srgb,var(--accent) 28%,transparent); color:#fff; font-weight:600;}
+.wl-mock-main{flex:1; padding:22px 26px; text-align:left; display:flex; flex-direction:column; gap:11px;}
+.wl-mock-h1{font-size:21px; font-weight:800; letter-spacing:-.02em;}
+.wl-mock-callout{font-size:13px; background:var(--accent-soft); border-radius:9px;
+  padding:9px 13px; color:var(--text-2);}
+.wl-mock-todo{display:flex; align-items:center; gap:9px; font-size:13.5px; color:var(--text-2);}
+.wl-mock-check{width:17px; height:17px; border-radius:5px; background:var(--accent); color:#fff;
+  font-size:11px; font-weight:800; display:flex; align-items:center; justify-content:center; flex-shrink:0;}
+.wl-mock-check.off{background:transparent; border:1.5px solid var(--border-strong);}
+.wl-mock-lines{display:flex; flex-direction:column; gap:8px; margin-top:4px;}
+.wl-mock-lines i{height:9px; border-radius:5px; background:var(--bg-2); display:block;}
+@media(max-width:640px){.wl-mock-side{display:none;}}
+
+/* ---- welcome: "and more" chips + plugin spotlight ---- */
+.wl-chips{display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin:-26px 0 52px;}
+.wl-chip{font-size:11.5px; font-weight:600; color:var(--text-3); padding:5px 12px;
+  border-radius:100px; border:1px solid var(--border);
+  background:color-mix(in srgb,var(--bg-card) 72%,transparent);}
+.wl-plug{display:grid; grid-template-columns:1.1fr .9fr; gap:32px; align-items:center;
+  margin-bottom:52px;}
+.wl-plug-planned{font-size:11.5px; color:var(--text-3); margin-left:6px;}
+@media(max-width:760px){.wl-plug{grid-template-columns:1fr; gap:20px;}}
+
+/* ---- plugin store (app-store style gallery, on the docs-page shell) ---- */
+.store-head{display:flex; align-items:flex-start; justify-content:space-between;
+  gap:20px; margin-bottom:20px;}
+.store-head .btn{flex-shrink:0; text-decoration:none;}
+.store-sub{font-size:13.5px; color:var(--text-2); line-height:1.6; margin:0; max-width:560px;}
+.store-search{margin-bottom:10px;}
+.store-count{font-size:11.5px; color:var(--text-3); font-weight:600;
+  text-transform:uppercase; letter-spacing:.05em; margin-bottom:14px;}
+.store-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:14px;}
+.store-card{display:flex; flex-direction:column; gap:9px; padding:16px;
+  border-radius:14px; border:1px solid var(--border); background:var(--bg-card);
+  transition:transform .15s,box-shadow .15s,border-color .15s;}
+.store-card:hover{transform:translateY(-2px); box-shadow:var(--shadow);
+  border-color:var(--border-strong);}
+.store-card-top{display:flex; align-items:center; gap:12px;}
+.store-card-ic{width:44px; height:44px; border-radius:12px; background:var(--bg-2);
+  display:flex; align-items:center; justify-content:center; font-size:22px; flex-shrink:0;}
+.store-card-t{font-weight:700; font-size:14.5px; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap;}
+.store-card-meta{display:flex; align-items:center; gap:2px; margin-top:3px;}
+.store-card-meta .cb-type-badge,.store-card-meta .cb-incl{margin-left:0; margin-right:5px;}
+.store-card-s{font-size:12.5px; color:var(--text-2); line-height:1.5; flex:1;}
+.store-card-foot{display:flex; align-items:center; justify-content:space-between;
+  font-size:11.5px; color:var(--text-3);}
+.store-card-foot a{color:var(--accent); text-decoration:none; font-weight:600;}
+.store-card-foot a:hover{text-decoration:underline;}
+
 .home-section{margin-bottom:26px;}
 .home-label{font-size:12px; font-weight:700; color:var(--text-3);
   text-transform:uppercase; letter-spacing:.06em; margin-bottom:12px;}
@@ -2370,6 +2612,78 @@ body.dark{ --page-bg-scrim:rgba(15,23,42,.82); }
 .cb-link:disabled{opacity:.5; cursor:not-allowed; text-decoration:none;}
 .cb-dot{color:var(--text-3);}
 @media (max-width:420px){ .cb-tiles{grid-template-columns:1fr;} }
+
+/* --- connect panel: system launcher tiles + the popup wizard --- */
+.cb-launch{display:flex; flex-direction:column; gap:12px;}
+.cb-tile.launch{width:100%; padding:16px 18px; border-radius:14px;}
+.cb-tile.launch .cb-tile-ic{width:44px; height:44px; border-radius:12px; font-size:20px;
+  background:var(--bg-2); color:var(--text);}
+.cb-tile.launch.accent .cb-tile-ic{background:var(--accent-soft); color:var(--accent); font-weight:700;}
+.cb-tile.launch .cb-tile-t{font-size:15px;}
+
+/* centered viewport popup: overrides the top-anchored house modal; the modal
+   is a column whose BODY scrolls, so tall stages never push it off-screen */
+.wz-overlay{align-items:center;}
+.modal.wizard{width:560px; margin-top:0; max-height:min(640px,88vh);
+  display:flex; flex-direction:column;}
+.modal.wizard .modal-h,.wz-steps,.wz-foot{flex-shrink:0;}
+.wz-steps{display:flex; align-items:flex-start; padding:18px 26px 4px; user-select:none;}
+.wz-step{display:flex; flex-direction:column; align-items:center; gap:5px; min-width:52px;}
+.wz-step-n{width:26px; height:26px; border-radius:50%; display:flex; align-items:center;
+  justify-content:center; font-size:12px; font-weight:700;
+  background:var(--bg-2); color:var(--text-3); border:1.5px solid var(--border-strong);
+  transition:background .2s,color .2s,border-color .2s,box-shadow .2s;}
+.wz-step-l{font-size:10.5px; font-weight:600; color:var(--text-3); letter-spacing:.02em;}
+.wz-step.on .wz-step-n{background:var(--accent); border-color:var(--accent); color:#fff;
+  box-shadow:0 0 0 4px var(--accent-soft);}
+.wz-step.on .wz-step-l{color:var(--text);}
+.wz-step.done{cursor:pointer;}
+.wz-step.done .wz-step-n{background:var(--accent-soft); border-color:var(--accent); color:var(--accent);}
+.wz-step.done .wz-step-l{color:var(--text-2,var(--text-3));}
+.wz-line{flex:1; height:1.5px; background:var(--border-strong); margin-top:13px; min-width:10px;
+  transition:background .2s;}
+.wz-line.done{background:var(--accent);}
+.wz-body{display:flex; flex-direction:column; gap:16px; padding:18px 26px 22px;
+  min-height:200px; flex:1; overflow-y:auto;}
+.wz-stage-head{display:flex; align-items:flex-start; gap:13px;}
+.wz-stage-ic{width:42px; height:42px; border-radius:12px; background:var(--bg-2);
+  display:flex; align-items:center; justify-content:center; font-size:21px; flex-shrink:0;}
+.wz-stage-t{font-size:16.5px; font-weight:700; letter-spacing:-.01em;}
+.wz-stage-s{font-size:12.5px; color:var(--text-3); margin-top:2px; line-height:1.45;}
+.wz-foot{display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:14px 26px; border-top:1px solid var(--border);}
+.wz-count{font-size:11.5px; color:var(--text-3); font-weight:600; font-variant-numeric:tabular-nums;}
+.cb-theme{display:flex; flex-direction:column; gap:12px;}
+.cb-theme-row{display:flex; align-items:center; justify-content:space-between; gap:12px;}
+.cb-theme-lb{font-size:13px; font-weight:600;}
+.cb-swatches{display:flex; gap:7px; flex-wrap:wrap;}
+.cb-swatch{width:22px; height:22px; border-radius:50%; border:2px solid transparent;
+  cursor:pointer; padding:0; transition:transform .15s,border-color .15s;}
+.cb-swatch:hover{transform:scale(1.15);}
+.cb-swatch.on{border-color:var(--text); transform:scale(1.15);}
+.cb-checklist{display:flex; flex-direction:column; gap:8px;}
+.cb-checkrow{display:flex; align-items:center; gap:11px; padding:9px 12px;
+  border-radius:11px; border:1px solid var(--border); background:var(--bg-card);
+  cursor:pointer; transition:border-color .15s,background .15s;}
+.cb-checkrow:hover{border-color:var(--border-strong); background:var(--bg-hover);}
+.cb-checkrow input{accent-color:var(--accent); width:15px; height:15px; flex-shrink:0;}
+.cb-check-ic{font-size:18px; flex-shrink:0;}
+.cb-type-badge{font-size:9.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--accent); background:var(--accent-soft); border-radius:20px;
+  padding:1.5px 7px; margin-left:7px; vertical-align:1px;}
+.plug-enable{display:flex; align-items:center; gap:6px; font-size:12px;
+  font-weight:600; cursor:pointer; user-select:none;}
+.plug-enable input{accent-color:var(--accent); width:14px; height:14px; margin:0;}
+.wz-plug-bar{display:flex; gap:10px; align-items:center;}
+.wz-plug-bar .cb-input{height:42px;}
+.cb-checkrow.ro{cursor:default;}
+.cb-incl{font-size:9.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--text-3); background:var(--bg-2); border-radius:20px;
+  padding:1.5px 7px; margin-left:7px; vertical-align:1px;}
+.cb-incl.new{color:#fff; background:var(--accent);}
+.wz-plug-rm{background:none; border:none; color:var(--text-3); cursor:pointer;
+  padding:6px; border-radius:7px; display:flex; flex-shrink:0;}
+.wz-plug-rm:hover{background:var(--bg-hover); color:var(--text);}
 
 /* =========================================================================
    TRASH / ARCHIVE — full pages (was modals)

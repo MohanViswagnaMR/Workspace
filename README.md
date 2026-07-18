@@ -141,6 +141,8 @@ There is **no JSON** anywhere in your data.
 ```
 index.html          Boot screen, root mount point, PWA manifest + meta tags
 vite.config.js      Vite config (vendor chunk splitting)
+registry/           Plugin-registry scaffold — push to its own repo; issues
+                    submit plugins, Actions auto-test & index them (links only)
 public/             Static assets copied to the site root
   manifest.webmanifest  PWA web app manifest (name, icons, colors, display)
   sw.js                 Service worker (offline app-shell cache)
@@ -148,13 +150,39 @@ public/             Static assets copied to the site root
 src/
   main.jsx          Entry point + service-worker registration
   App.jsx           Restores theme, renders the workspace
-  workspace.jsx     The full app: homepage, editor, databases, sidebar, modals
-  sitepages.jsx     Docs, About & Self-hosting pages (lazy-loaded chunk)
-  markdown.js       Workspace ⇄ folder-of-Markdown serialization (pure)
-  localfs.js        Local folder storage (File System Access API + IndexedDB)
-  cloudstorage.js   Google Drive folder-tree mirror
-  cookies.js        Tiny cookie helpers (active-workspace pointer + theme)
+  workspace.jsx     App shell: modals, connection & persistence, page ops
+  plugins.jsx       Plugin loader & consent gate (lazy chunk)
   styles.css        Theme tokens, components, dark mode
+  layouts/
+    layout.jsx      Layout mode (Home ⟷ Code) state + the AppLayout switch
+    homelayout.jsx  Notion-style Home layout: sidebar, topbar, special pages
+    codelayout.jsx  VS Code-style Code layout (lazy chunk, xterm terminal)
+  pages/
+    welcome.jsx     Marketing landing for first-time visitors
+    start.jsx       Start page: workspace list + the create/connect wizard
+    sitepages.jsx   Docs, About & Self-hosting pages (lazy-loaded chunk)
+  components/
+    Navbar.jsx      Shared site navbar + footer (welcome/start pages)
+    SlashMenu.jsx   The "/" command menu
+    ContextMenu.jsx Generic right-click menu primitive
+    RightClickMenu.jsx  Block right-click menu + format toolbar
+    ui/             Small UI primitives (button, icons, popup, select)
+  views/
+    smart.jsx       Block editor (smart pages) + databases
+    markdown.jsx    Simple raw-markdown page editor
+    coderpage.jsx   IDE-style editor page (source of the built-in plugin)
+  services/
+    plugin.js       Plugin-type registry (page, theme; planned: layout, …)
+    filehandler.js  File-extension → handler/plugin resolution
+    spellcheck.js   Offline spell-check dictionary + suggestions
+    theme.js        Accent colors, fonts, Google Fonts loading
+  storage/
+    markdown.js     Workspace ⇄ folder-of-Markdown serialization (pure)
+    localfs.js      Local folder storage (File System Access API + IndexedDB)
+    cloudstorage.js Google Drive folder-tree mirror
+    cookies.js      Tiny cookie helpers (active-workspace pointer + theme)
+  lib/
+    utils.js        Tiny shared helpers (ids, class join, formatting)
 ```
 
 ---

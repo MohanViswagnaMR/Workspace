@@ -1,12 +1,12 @@
 /* =========================================================================
    WORKSPACE — the app shell (Markdown-on-disk edition)
-   Composes the app around the editors: sidebar, topbar, homepage, modals,
-   storage page, workspace connection & persistence. The SMART (block) page
-   editor lives in ./smart.jsx; the SIMPLE markdown-page editor lives in
-   ./markdown.jsx; serialization in ./markdown.js.
+   Composes the app around the editors: homepage, modals, workspace
+   connection & persistence. The Home-layout chrome (sidebar, topbar,
+   storage page) lives in ./layouts/homelayout.jsx; the SMART (block) page
+   editor in ./views/smart.jsx; the SIMPLE markdown-page editor in
+   ./views/markdown.jsx; serialization in ./markdown.js.
    ========================================================================= */
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, Fragment } from 'react';
-import { Eye, HardDrive, Plus, Home } from 'lucide-react';
 import {
   isLocalFSSupported,
   createLocalWorkspaceFolder,
@@ -21,12 +21,8 @@ import {
   writeLocalUploadFile,
   deleteLocalUploadFile,
   writeLocalPlugin,
-} from './localfs.js';
-
-/* Shown when the browser lacks the File System Access API (Firefox/Zen/Safari). */
-const LOCAL_FS_UNSUPPORTED_MSG =
-  'Local folders require a Chromium browser (Chrome, Edge, or Brave). '+
-  'In Firefox or Safari, use a Google Drive workspace instead.';
+  deleteLocalPlugin,
+} from './storage/localfs.js';
 
 /* Turn a permission-failure reason into a human-readable message. */
 function localPermMessage(reason){
@@ -50,25 +46,33 @@ import {
   writeDriveUpload, deleteDriveWorkspace,
   readDriveWorkspaceMeta, renameDriveWorkspace, updateDriveWorkspaceDescription,
   writeDrivePlugin,
-} from './cloudstorage.js';
+  deleteDrivePlugin,
+} from './storage/cloudstorage.js';
 import {
   readActivePointer, writeActivePointer, clearActivePointer,
   readTheme, writeTheme, getCookie, setCookie,
-} from './cookies.js';
-import { nodeDiskPath, markdownToNode, FILE_PAGE_EXT_RE } from './markdown.js';
+} from './storage/cookies.js';
+import { markdownToNode, FILE_PAGE_EXT_RE } from './storage/markdown.js';
 
 /* The block editor (smart pages), databases and the shared UI primitives
    live in ./smart.jsx; the plain-markdown page editor lives in ./markdown.jsx. */
 import {
-  nid, cx, clone, fmtBytes,
+  nid, cx, clone,
   CMDS, SHORTCUTS, fmtShortcut, APP_VERSION,
-  DASH_ID, STORAGE_ID, TRASH_ID, ARCHIVE_ID, TEMPLATES_ID,
-  Ic, MdMark, NodeMark, FolderMark,
+  DASH_ID, TEMPLATES_ID,
+  Ic, MdMark, NodeMark,
   newDB, buildSeed,
-  Popup, FILE_ICON, fileAccentColor, ContextMenu,
-  Editor, RowPeek, FilePreviewModal,
-} from './smart.jsx';
-import MarkdownEditor from './markdown.jsx';
+  Editor, RowPeek,
+} from './views/smart.jsx';
+import MarkdownEditor from './views/markdown.jsx';
+import CustomSelect from './components/ui/select.jsx';
+import { GitHubIcon } from './components/Navbar.jsx';
+import { ACCENT_COLORS, FONT_OPTIONS, FONT_SIZES, fontStack, fontScale, ensureGoogleFont } from './services/theme.js';
+import WelcomePage from './pages/welcome.jsx';
+import HomeScreen, { ConnectPanel } from './pages/start.jsx';
+import { useLayoutMode, AppLayout, BootScreen } from './layouts/layout.jsx';
+import HomeLayout, { TEMPLATES } from './layouts/homelayout.jsx';
+import { DEFAULT_HANDLER_EXTS, resolveHandler as resolveFileHandler, splitNameBinding } from './services/filehandler.js';
 
 
 /* =========================================================================
@@ -181,718 +185,9 @@ function TutorialOverlay({onComplete,onSkip}){
 }
 
 /* =========================================================================
-   PART 5 — Sidebar, Topbar, Modals, App
+   PART 5 — Modals, App
+   (the sidebar, topbar and built-in full pages live in ./layouts/homelayout.jsx)
    ========================================================================= */
-
-/* ---------------- Workspace Switcher popup ---------------- */
-function WorkspaceSwitcher({workspaces,activeId,onSwitch,onCreate,onDelete,onReconnect,onClose,rect}){
-  const localSupported=isLocalFSSupported();
-  return <Popup rect={rect} onClose={onClose} width={300}>
-    <div className="menu">
-      <div className="menu-h">Switch workspace</div>
-      {(workspaces||[]).map(ws=>{
-        const isLocal=ws.type==='local';
-        const isDemo=ws.type==='demo';
-        const localUnavailable=isLocal&&!localSupported;
-        const needsAccess=isLocal&&!localUnavailable&&ws.accessible===false;
-        const avatarBg=isDemo?'linear-gradient(135deg,#f59e0b,#fbbf24)'
-          :isLocal?'linear-gradient(135deg,#7c3aed,#a78bfa)':GDRIVE.gradient;
-        const subtitle=isDemo?'🧪 Demo — not saved'
-          :isLocal?'💻 Local folder':`${GDRIVE.emoji} Google Drive`;
-        const avatarLabel=isDemo?'🧪':isLocal?'💻':GDRIVE.emoji;
-        return <div key={ws.id} className={cx('mi',ws.id===activeId&&'hi')} style={{gap:0,paddingRight:6}}>
-          <div style={{display:'flex',alignItems:'center',gap:8,flex:1,
-            cursor:localUnavailable?'not-allowed':'pointer',minWidth:0,
-            opacity:(needsAccess||localUnavailable)?.6:1}}
-            onMouseDown={e=>{
-              e.preventDefault();
-              if(localUnavailable){ alert(LOCAL_FS_UNSUPPORTED_MSG); onClose(); return; }
-              if(needsAccess){ onReconnect&&onReconnect(ws.id); onClose(); return; }
-              if(ws.id!==activeId) onSwitch(ws.id);
-              onClose();
-            }}>
-            <div className="mi-ic ws-ic" style={{background:avatarBg,color:'#fff',fontWeight:700,
-              fontSize:16,border:'none',borderRadius:6,flexShrink:0}}>{avatarLabel}</div>
-            <div className="mi-tx" style={{minWidth:0}}>{ws.name}
-              <small style={{display:'flex',alignItems:'center',gap:4}}>
-                {localUnavailable&&<span style={{color:'#d4894c'}}>💻 Local — needs Chrome / Edge</span>}
-                {needsAccess&&<span style={{color:'#d44c47'}}>🔒 Needs access — click to reconnect</span>}
-                {!needsAccess&&!localUnavailable&&subtitle}
-              </small>
-            </div>
-            {ws.id===activeId&&<Ic n="check" style={{width:14,height:14,color:'var(--accent)',flexShrink:0}}/>}
-          </div>
-          {!isDemo&&<button className="icon-btn" style={{width:22,height:22,flexShrink:0,marginLeft:4}}
-            title={isLocal?'Remove local workspace from list (files are not deleted)':'Remove Drive workspace from list (folder is not deleted)'}
-            onMouseDown={e=>{e.preventDefault();e.stopPropagation();onDelete(ws.id);onClose();}}>
-            <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
-          </button>}
-        </div>;
-      })}
-      <div className="menu-sep"/>
-      <div className="mi" onMouseDown={e=>{e.preventDefault();onCreate();onClose();}}>
-        <div className="mi-ic"><Ic n="plus" style={{width:15,height:15}}/></div>
-        <div className="mi-tx">Connect a workspace…</div>
-      </div>
-    </div>
-  </Popup>;
-}
-
-function TreeItem({node,childrenMap,depth,currentId,expanded,toggleExp,openPage,addChild,
-  addFolder,trashNode,archiveNode,onDrop,setModal,favorites,toggleFav,duplicate,exportPage,renameNode}){
-  const kids=childrenMap[node.id]||[];
-  const hasKids=kids.length>0;
-  const isFolder=node.kind==='folder';
-  const isOpen=expanded[node.id];
-  const [dragOver,setDragOver]=React.useState(false);
-  const [ctxMenu,setCtxMenu]=React.useState(null);
-  const isFav=(favorites||[]).includes(node.id);
-  const isRoot=!node.parentId;
-
-  function openCtx(e){
-    e.preventDefault();e.stopPropagation();
-    setCtxMenu({x:e.clientX,y:e.clientY});
-  }
-
-  const ctxItems=isFolder?[
-    {header:'Folder'},
-    {label:'Rename',action:()=>{
-      const t=prompt('Rename',node.title||'');
-      if(t!==null&&t.trim()!=='') renameNode&&renameNode(node.id,t.trim());
-    }},
-    {sep:true},
-    {label:'Add page inside',action:()=>{toggleExp(node.id,true);addChild(node.id);}},
-    {label:'Add Markdown page inside',action:()=>{toggleExp(node.id,true);addChild(node.id,'md');}},
-    {label:'Add folder inside',action:()=>addFolder&&addFolder(node.id)},
-    {sep:true},
-    {label:'Archive',action:()=>archiveNode&&archiveNode(node.id)},
-    {label:'Move to Trash',action:()=>trashNode&&trashNode(node.id),danger:true},
-  ]:[
-    {header: node.kind==='database'?'Database':node.kind==='md'?'Markdown page'
-      :node.kind==='plugin'?'Plugin page':node.kind==='file'?'File':'Page'},
-    {label:'Open',action:()=>openPage(node.id)},
-    {label:'Rename',action:()=>{
-      const t=prompt('Rename',node.title||'');
-      if(t!==null&&t.trim()!=='') renameNode&&renameNode(node.id,t.trim());
-    }},
-    {sep:true},
-    {label:'Add sub-page',action:()=>{toggleExp(node.id,true);addChild(node.id);}},
-    {label:'Add Markdown sub-page',action:()=>{toggleExp(node.id,true);addChild(node.id,'md');}},
-    {label:'Add folder inside',action:()=>addFolder&&addFolder(node.id)},
-    {label:'Duplicate',action:()=>duplicate&&duplicate(node.id)},
-    {label:'Export as Markdown',action:()=>exportPage&&exportPage(node.id)},
-    {sep:true},
-    {label:isFav?'Remove from Favorites':'Add to Favorites',action:()=>toggleFav&&toggleFav(node.id)},
-    {label:'Copy link',action:()=>navigator.clipboard?.writeText(window.location.href+'#'+node.id)},
-    {sep:true},
-    {label:'Archive',action:()=>archiveNode&&archiveNode(node.id)},
-    {label:'Move to Trash',action:()=>trashNode&&trashNode(node.id),danger:true},
-  ];
-
-  return <div>
-    <div className={cx('tree-item',currentId===node.id&&'sel',dragOver&&'drop-target')}
-      style={{paddingLeft:8+depth*16}}
-      draggable
-      onDragStart={e=>{e.dataTransfer.setData('node',node.id);e.stopPropagation();}}
-      onDragOver={e=>{e.preventDefault();setDragOver(true);}}
-      onDragLeave={()=>setDragOver(false)}
-      onDrop={e=>{e.preventDefault();e.stopPropagation();setDragOver(false);
-        const id=e.dataTransfer.getData('node'); if(id&&id!==node.id) onDrop(id,node.id);}}
-      onClick={()=>isFolder?toggleExp(node.id):openPage(node.id)}
-      onContextMenu={openCtx}>
-      {(hasKids||isFolder)
-        ? <span className={cx('twist',isOpen&&'open')}
-            onClick={e=>{e.stopPropagation();toggleExp(node.id);}}>
-            <Ic n="chevron"/></span>
-        : <span className="twist blank"/>}
-      <span className="tree-emoji">{isFolder?<FolderMark open={!!isOpen}/>:node.icon||(node.kind==='database'?'🗄️':<NodeMark node={node}/>)}</span>
-      <span className="tree-label">{node.title||'Untitled'}</span>
-      <span className="tree-actions">
-        <button title="More options" onClick={openCtx}>
-          <Ic n="dots"/></button>
-        <button title="Add page inside" onClick={e=>{e.stopPropagation();
-          toggleExp(node.id,true);addChild(node.id);}}>
-          <Ic n="plus"/></button>
-      </span>
-    </div>
-    {isOpen&&isFolder&&!hasKids&&
-      <div className="tree-empty" style={{paddingLeft:30+depth*16}}>Empty folder</div>}
-    {isOpen&&hasKids&&kids.map(k=>
-      <TreeItem key={k.id} node={k} childrenMap={childrenMap} depth={depth+1} currentId={currentId}
-        expanded={expanded} toggleExp={toggleExp} openPage={openPage}
-        addChild={addChild} addFolder={addFolder} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
-        setModal={setModal} favorites={favorites} toggleFav={toggleFav}
-        duplicate={duplicate} exportPage={exportPage} renameNode={renameNode}/>)}
-    {ctxMenu&&<ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxItems} onClose={()=>setCtxMenu(null)}/>}
-  </div>;
-}
-
-/* ---------------- Sidebar ---------------- */
-function Sidebar({open,nodes,favorites,currentId,expanded,toggleExp,openPage,addChild,
-  trashNode,archiveNode,onDrop,addTop,addFolder,setModal,workspaces,activeWorkspaceId,
-  onSwitchWorkspace,onCreateWorkspace,onDeleteWorkspace,onReconnectLocal,
-  toggleFav,duplicate,exportPage,renameNode,onGoHome,toggleSidebar,addNamedPage,
-  layout,setLayout,devMode}){
-  // one O(n) pass instead of an O(n) filter per tree item — the sidebar
-  // re-renders on every store change, so this is hot
-  const childrenMap=React.useMemo(()=>{
-    const m={};
-    Object.values(nodes).forEach(n=>{
-      if(!n||n.trashed||n.archived) return;
-      const k=n.parentId||'';
-      (m[k]||(m[k]=[])).push(n);
-    });
-    Object.values(m).forEach(a=>a.sort((x,y)=>(x.sort||0)-(y.sort||0)));
-    return m;
-  },[nodes]);
-  const roots=childrenMap['']||[];
-  const favNodes=favorites.map(id=>nodes[id]).filter(n=>n&&!n.trashed&&!n.archived);
-  const [wsPop,setWsPop]=React.useState(null);
-  const activeWs=(workspaces||[]).find(w=>w.id===activeWorkspaceId)||{id:'',name:'Workspace',type:'local'};
-  const wsSub=activeWs.type==='demo'?'🧪 Demo — not saved'
-    :activeWs.type==='gdrive'?`${GDRIVE.emoji} Google Drive`:'💻 Local folder';
-  const navRow=(icon,label,onClick,kbd,active)=>
-    <div className={cx('tree-item',active&&'sel')} onClick={onClick}>
-      <span className="tree-emoji" style={{fontSize:14}}><Ic n={icon==='layout'?'template':icon==='edit'?'plus':icon==='close'?'x':icon}/></span>
-      <span className="tree-label">{label}</span>
-      {kbd&&<span style={{fontSize:11,color:'var(--text-3)'}}>{kbd}</span>}
-    </div>;
-  return <div className={cx('sidebar',!open&&'closed')}>
-    <div className="ws">
-      <div className="ws-btn" onClick={e=>setWsPop(e.currentTarget.getBoundingClientRect())}
-        title="Switch workspace">
-        <div className="ws-ava">{(activeWs.name||'W')[0].toUpperCase()}</div>
-        <div className="ws-name">{activeWs.name}
-          <small>{wsSub}</small>
-        </div>
-      </div>
-      <button className="icon-btn sb-collapse" onClick={toggleSidebar}
-        title={`Close sidebar (${fmtShortcut('Ctrl/⌘ + \\')})`}
-        aria-label="Close sidebar">
-        <Ic n="panel-left-close"/>
-      </button>
-      {wsPop&&<WorkspaceSwitcher rect={wsPop} workspaces={workspaces||[activeWs]}
-        activeId={activeWorkspaceId} onSwitch={onSwitchWorkspace}
-        onCreate={onCreateWorkspace} onDelete={onDeleteWorkspace}
-        onReconnect={onReconnectLocal}
-        onClose={()=>setWsPop(null)}/>}
-    </div>
-    {/* layout switch — Home (this Notion-style layout) ⟷ Code (VS Code-style).
-        Developer mode only; workspace mode gets a plain Home row instead. */}
-    {devMode&&<div className="layout-switch">
-      <button className={cx('ls-btn',layout!=='code'&&'on')}
-        title="Home layout — pages & databases"
-        onClick={()=>{ setLayout&&setLayout('home'); openPage(DASH_ID); }}>
-        <Ic n="home" style={{width:14,height:14}}/> Home
-      </button>
-      <button className={cx('ls-btn',layout==='code'&&'on')}
-        title="Code layout — explorer, tabs & terminal"
-        onClick={()=>setLayout&&setLayout('code')}>
-        <span style={{fontFamily:'var(--mono)',fontWeight:700,fontSize:12}}>&lt;/&gt;</span> Code
-      </button>
-    </div>}
-    <div className="nav">
-      {!devMode&&navRow('home','Home',()=>openPage(DASH_ID),null,currentId===DASH_ID)}
-      <button className="new-page-btn" onClick={()=>addNamedPage(null)}
-        title={`Create a new page — name it first: hello.py, notes.md, or a plain name for a smart page (${fmtShortcut('Alt + N')})`}>
-        <span className="np-ic"><Ic n="plus"/></span>
-        <span className="np-label">New page</span>
-        <span className="np-kbd">{fmtShortcut('Alt + N')}</span>
-      </button>
-      {navRow('search','Search',()=>setModal({type:'search'}),fmtShortcut('Ctrl/⌘ + K'))}
-    </div>
-    <div className="nav-scroll">
-      {favNodes.length>0&&<>
-        <div className="sec-title"><span>Favorites</span></div>
-        <div className="nav">
-          {favNodes.map(n=>
-            <div key={n.id} className={cx('tree-item',currentId===n.id&&'sel')}
-              onClick={()=>openPage(n.id)}>
-              <span className="twist"/>
-              <span className="tree-emoji">{n.icon||<NodeMark node={n}/>}</span>
-              <span className="tree-label">{n.title||'Untitled'}</span>
-            </div>)}
-        </div>
-      </>}
-
-      <div className="sec-title"><span>Pages</span>
-        <button title="Add a folder" onClick={()=>addFolder(null)}><Ic n="folder-plus"/></button>
-        <button title="Add a page — the name decides the kind: hello.py, notes.md, or a plain name"
-          onClick={()=>addNamedPage(null)}><Ic n="plus"/></button>
-      </div>
-      <div className="nav">
-        {roots.map(n=>
-          <TreeItem key={n.id} node={n} childrenMap={childrenMap} depth={0} currentId={currentId}
-            expanded={expanded} toggleExp={toggleExp} openPage={openPage}
-            addChild={addChild} addFolder={addFolder} trashNode={trashNode} archiveNode={archiveNode} onDrop={onDrop}
-            setModal={setModal} favorites={favorites} toggleFav={toggleFav}
-            duplicate={duplicate} exportPage={exportPage} renameNode={renameNode}/>)}
-        {roots.length===0&&<div className="tree-empty">No pages yet</div>}
-      </div>
-
-    </div>
-    <div className="sidebar-foot">
-      <div className="foot-icons">
-        {[['template','Templates',()=>openPage(TEMPLATES_ID),currentId===TEMPLATES_ID],
-          ['import','Import',()=>setModal({type:'import'}),false],
-          ['database','Storage',()=>openPage(STORAGE_ID),currentId===STORAGE_ID],
-          ['archive','Archive',()=>openPage(ARCHIVE_ID),currentId===ARCHIVE_ID],
-          ['trash','Trash',()=>openPage(TRASH_ID),currentId===TRASH_ID]]
-          .map(([ic,label,fn,active])=>
-            <button key={label} className={cx(active&&'on')} title={label}
-              aria-label={label} onClick={fn}>
-              <Ic n={ic} style={{width:16,height:16}}/>
-            </button>)}
-      </div>
-      {navRow('settings','Settings',()=>setModal({type:'settings'}))}
-      {navRow('keyboard','Keyboard shortcuts',()=>setModal({type:'shortcuts'}),fmtShortcut('Ctrl/⌘ + /'))}
-      <div className="tree-item ws-close" onClick={onGoHome}
-        title="Close this workspace and return to the homepage">
-        <span className="tree-emoji" style={{fontSize:14}}><Ic n="log-out"/></span>
-        <span className="tree-label">Close workspace</span>
-      </div>
-    </div>
-  </div>;
-}
-
-/* =========================================================================
-   STORAGE PAGE  — shows all uploaded files for the active workspace
-   ========================================================================= */
-/* ---- Grid card (medium) ---- */
-
-function UploadCard({upload,onDelete,onPreview}){
-  const isImg=upload.type?.startsWith('image/');
-  return <div className="upload-card">
-    <div className="uc-thumb" onClick={onPreview} style={{cursor:'pointer',position:'relative'}}>
-      {isImg
-        ? <img src={upload.dataUrl} alt={upload.name} style={{width:'100%',height:'100%',objectFit:'cover',borderRadius:6}}/>
-        : <div className="uc-icon" style={{'--fc-accent':fileAccentColor(upload.type)}}>{FILE_ICON(upload.type)}</div>}
-      <div className="uc-preview-hint"><Eye size={14}/></div>
-    </div>
-    <div className="uc-info">
-      <div className="uc-name" title={upload.name}>{upload.name}</div>
-      <div className="uc-meta">
-        {fmtBytes(upload.size||0)}
-        {upload.uploadedAt?' · '+new Date(upload.uploadedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):''}
-      </div>
-    </div>
-    <div className="uc-actions">
-      <button className="icon-btn" style={{width:28,height:28}} title="Preview" onClick={onPreview}>
-        <Ic n="eye" style={{width:13,height:13}}/>
-      </button>
-      <a href={upload.dataUrl} download={upload.name} className="icon-btn" title="Download"
-        style={{display:'flex',alignItems:'center',justifyContent:'center',width:28,height:28}}>
-        <Ic n="download" style={{width:13,height:13}}/>
-      </a>
-      <button className="icon-btn" style={{width:28,height:28}} title="Delete" onClick={onDelete}>
-        <Ic n="trash" style={{width:13,height:13,color:'#d44c47'}}/>
-      </button>
-    </div>
-  </div>;
-}
-
-/* ---- Large gallery card ---- */
-function UploadCardLarge({upload,onDelete,onPreview}){
-  const isImg=upload.type?.startsWith('image/');
-  return <div className="upload-card-large">
-    <div className="ucl-thumb" onClick={onPreview} style={{cursor:'pointer',position:'relative'}}>
-      {isImg
-        ? <img src={upload.dataUrl} alt={upload.name}/>
-        : <div className="ucl-icon" style={{'--fc-accent':fileAccentColor(upload.type)}}>{FILE_ICON(upload.type)}</div>}
-      <div className="uc-preview-hint"><Eye size={16}/></div>
-    </div>
-    <div className="ucl-footer">
-      <div style={{flex:1,minWidth:0}}>
-        <div className="ucl-name" title={upload.name}>{upload.name}</div>
-        <div className="uc-meta">{fmtBytes(upload.size||0)}</div>
-      </div>
-      <div style={{display:'flex',gap:2,flexShrink:0}}>
-        <button className="icon-btn" style={{width:26,height:26}} title="Preview" onClick={onPreview}>
-          <Ic n="eye" style={{width:12,height:12}}/>
-        </button>
-        <a href={upload.dataUrl} download={upload.name} className="icon-btn" title="Download"
-          style={{display:'flex',alignItems:'center',justifyContent:'center',width:26,height:26}}>
-          <Ic n="download" style={{width:12,height:12}}/>
-        </a>
-        <button className="icon-btn" style={{width:26,height:26}} title="Delete" onClick={onDelete}>
-          <Ic n="trash" style={{width:12,height:12,color:'#d44c47'}}/>
-        </button>
-      </div>
-    </div>
-  </div>;
-}
-
-/* ---- List row ---- */
-function UploadListRow({upload,onDelete,onPreview}){
-  const isImg=upload.type?.startsWith('image/');
-  const ext=upload.type?.split('/').pop()||'file';
-  const date=upload.uploadedAt?new Date(upload.uploadedAt).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}):'—';
-  return <div className="ul-row">
-    <div className="ul-name-cell" onClick={onPreview} style={{cursor:'pointer'}}>
-      {isImg
-        ? <img src={upload.dataUrl} alt="" className="ul-thumb"/>
-        : <span className="ul-file-icon" style={{'--fc-accent':fileAccentColor(upload.type)}}>{FILE_ICON(upload.type)}</span>}
-      <span className="ul-fname" title={upload.name}>{upload.name}</span>
-    </div>
-    <span className="ul-ext">{ext.toUpperCase()}</span>
-    <span className="ul-size">{fmtBytes(upload.size||0)}</span>
-    <span className="ul-date">{date}</span>
-    <div className="ul-actions">
-      <button className="icon-btn" style={{width:26,height:26}} title="Preview" onClick={onPreview}>
-        <Ic n="eye" style={{width:13,height:13}}/>
-      </button>
-      <a href={upload.dataUrl} download={upload.name} className="icon-btn" title="Download"
-        style={{display:'flex',alignItems:'center',justifyContent:'center',width:26,height:26}}>
-        <Ic n="download" style={{width:13,height:13}}/>
-      </a>
-      <button className="icon-btn" style={{width:26,height:26}} title="Delete" onClick={onDelete}>
-        <Ic n="trash" style={{width:13,height:13,color:'#d44c47'}}/>
-      </button>
-    </div>
-  </div>;
-}
-
-function StoragePage({uploads,activeWorkspace,onDeleteUpload,onUpload}){
-  const [filter,setFilter]=useState('all');
-  const [view,setView]=useState('grid'); // 'grid' | 'list' | 'large'
-  const [uploading,setUploading]=useState(false);
-  const [previewId,setPreviewId]=useState(null);
-  const uploadRef=useRef();
-  const sorted=[...(uploads||[])].sort((a,b)=>b.uploadedAt-a.uploadedAt);
-  const filtered=filter==='all'?sorted
-    :filter==='images'?sorted.filter(u=>u.type?.startsWith('image/'))
-    :sorted.filter(u=>!u.type?.startsWith('image/'));
-  const totalSize=(uploads||[]).reduce((s,u)=>s+(u.size||0),0);
-  const previewIdx=filtered.findIndex(u=>u.id===previewId);
-  const previewUpload=previewIdx>=0?filtered[previewIdx]:null;
-
-  async function handleFiles(files){
-    setUploading(true);
-    for(const file of Array.from(files)){
-      await onUpload?.(file);
-    }
-    setUploading(false);
-  }
-
-  let locationIcon,locationLabel,locationDetail,folderPath;
-  if(activeWorkspace?.type==='gdrive'){
-    locationIcon='📁'; locationLabel='Google Drive';
-    folderPath=(activeWorkspace.name||'Workspace')+' / Upload';
-    locationDetail='Files are stored in your Google Drive workspace under an Upload/ folder.';
-  } else {
-    locationIcon='💻'; locationLabel='Local folder';
-    folderPath=(activeWorkspace?.name||'Workspace')+' / Upload';
-    locationDetail='Files are stored in your local workspace folder under an Upload/ subfolder.';
-  }
-
-  const VIEW_BTNS=[
-    {id:'grid',   icon:'gallery', title:'Grid view'},
-    {id:'list',   icon:'list',    title:'List view'},
-    {id:'large',  icon:'expand',  title:'Gallery view'},
-  ];
-
-  return <div className="storage-page scroll">
-    <div className="page-wrap">
-      <div className="storage-pg-head">
-        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
-          <div style={{display:'flex',alignItems:'center',gap:12}}>
-            <div className="storage-pg-icon">📦</div>
-            <h1 className="storage-pg-title">Storage</h1>
-          </div>
-          <button className="btn primary" style={{display:'flex',alignItems:'center',gap:6,padding:'7px 14px'}}
-            onClick={()=>uploadRef.current?.click()} disabled={uploading}>
-            <Ic n="import" style={{width:14,height:14}}/>
-            {uploading?'Uploading…':'Upload files'}
-          </button>
-          <input ref={uploadRef} type="file" multiple style={{display:'none'}}
-            onChange={e=>{if(e.target.files?.length) handleFiles(e.target.files); e.target.value='';}}/>
-        </div>
-        <div className="storage-loc-row">
-          <div className="storage-loc-badge">
-            <span>{locationIcon}</span>
-            <span>{locationLabel}</span>
-          </div>
-          <div className="storage-loc-path">{folderPath}</div>
-          <div className="storage-loc-desc">{locationDetail}</div>
-        </div>
-      </div>
-
-      <div className="storage-stats-row">
-        <div className="st-stat">
-          <span className="st-n">{(uploads||[]).length}</span>
-          <span className="st-l">Files uploaded</span>
-        </div>
-        <div className="st-stat">
-          <span className="st-n">{fmtBytes(totalSize)}</span>
-          <span className="st-l">Total size</span>
-        </div>
-        <div className="st-stat">
-          <span className="st-n">{(uploads||[]).filter(u=>u.type?.startsWith('image/')).length}</span>
-          <span className="st-l">Images</span>
-        </div>
-      </div>
-
-      {(uploads||[]).length===0
-        ? <div className="empty-state" style={{marginTop:60}}>
-            <div className="es-em">📦</div>
-            <b>No uploads yet</b>
-            <p>Upload files directly using the button above, or attach them in any page using the image block or the <code>/file</code> command.</p>
-            <button className="btn primary" style={{display:'flex',alignItems:'center',gap:6,padding:'8px 18px',margin:'12px auto 0'}}
-              onClick={()=>uploadRef.current?.click()} disabled={uploading}>
-              <Ic n="import" style={{width:14,height:14}}/>
-              {uploading?'Uploading…':'Upload files'}
-            </button>
-          </div>
-        : <>
-            {/* toolbar: filters + view toggle */}
-            <div className="storage-toolbar">
-              <div className="storage-filters">
-                {[['all','All files'],['images','🖼️ Images'],['docs','📄 Documents']].map(([f,l])=>
-                  <button key={f} className={cx('storage-filter-btn',filter===f&&'on')} onClick={()=>setFilter(f)}>{l}</button>
-                )}
-              </div>
-              <div className="storage-view-toggle">
-                {VIEW_BTNS.map(v=>
-                  <button key={v.id} className={cx('svt-btn',view===v.id&&'on')}
-                    title={v.title} onClick={()=>setView(v.id)}>
-                    <Ic n={v.icon} style={{width:15,height:15}}/>
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {filtered.length===0
-              ? <div className="empty-state" style={{marginTop:40}}>
-                  <div className="es-em">🔍</div>
-                  <b>No {filter==='images'?'images':'documents'} uploaded yet</b>
-                </div>
-              : view==='grid'
-              ? <div className="upload-grid">
-                  {filtered.map(u=><UploadCard key={u.id} upload={u}
-                    onDelete={()=>onDeleteUpload(u.id)} onPreview={()=>setPreviewId(u.id)}/>)}
-                </div>
-              : view==='large'
-              ? <div className="upload-grid-large">
-                  {filtered.map(u=><UploadCardLarge key={u.id} upload={u}
-                    onDelete={()=>onDeleteUpload(u.id)} onPreview={()=>setPreviewId(u.id)}/>)}
-                </div>
-              : /* list view */
-                <div className="upload-list">
-                  <div className="ul-header">
-                    <span>Name</span><span>Type</span><span>Size</span><span>Date</span><span/>
-                  </div>
-                  {filtered.map(u=><UploadListRow key={u.id} upload={u}
-                    onDelete={()=>onDeleteUpload(u.id)} onPreview={()=>setPreviewId(u.id)}/>)}
-                </div>}
-          </>}
-    </div>
-    {previewUpload&&<FilePreviewModal
-      upload={previewUpload}
-      onClose={()=>setPreviewId(null)}
-      hasPrev={previewIdx>0}
-      hasNext={previewIdx<filtered.length-1}
-      onPrev={()=>setPreviewId(filtered[previewIdx-1].id)}
-      onNext={()=>setPreviewId(filtered[previewIdx+1].id)}
-    />}
-  </div>;
-}
-
-/* ---------------- Storage location badge ---------------- */
-function StorageBadge({ws, onCreateWorkspace, onGoHome, saveState}) {
-  const [pop, setPop] = useState(null);
-  if (!ws) return null;
-  const isLocal = ws.type === 'local';
-  const isDemo = ws.type === 'demo';
-  const label = isDemo ? 'Demo' : isLocal ? 'Local' : GDRIVE.shortName;
-  const detail = isDemo ? 'Demo — nothing is saved' : isLocal ? 'Saved on this computer' : `Saved to ${GDRIVE.name}`;
-  const BIcon = isDemo ? <span style={{fontSize:11,lineHeight:1}}>🧪</span>
-    : isLocal ? <HardDrive size={12}/> : <span style={{fontSize:11,lineHeight:1}}>{GDRIVE.emoji}</span>;
-  const where = isLocal ? 'your local folder' : GDRIVE.name;
-  return <>
-    <div className="storage-badge" onClick={e=>setPop(e.currentTarget.getBoundingClientRect())}
-      title={`Storage: ${detail}`}>
-      {BIcon}
-      <span>{label}</span>
-    </div>
-    {saveState&&<div className={cx('save-pill',saveState)}
-      title={saveState==='demo'?'You’re in the demo — changes are not saved. Use “Keep this workspace” to save your work.'
-        :saveState==='saving'?`Saving your changes to ${where}…`
-        :saveState==='error'?`Could not save to ${where} — your changes are still here. Check your connection or reconnect.`
-        :`All changes saved to ${where}.`}>
-      {saveState==='saving'?<span className="save-spin"/>
-        :saveState==='error'||saveState==='demo'?<Ic n="x" style={{width:13,height:13}}/>
-        :<Ic n="check" style={{width:13,height:13}}/>}
-      <span className="save-pill-tx">{saveState==='saving'?'Saving…':saveState==='error'?'Unsaved':saveState==='demo'?'Not saved':'Saved'}</span>
-    </div>}
-    {pop&&<Popup rect={pop} onClose={()=>setPop(null)} width={250}>
-      <div style={{padding:'14px 16px 10px'}}>
-        <div style={{fontSize:10,fontWeight:700,color:'var(--text-3)',textTransform:'uppercase',
-          letterSpacing:'.06em',marginBottom:10}}>{isDemo?'Storage':'Saved to'}</div>
-        <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:12}}>
-          <div style={{width:40,height:40,borderRadius:10,flexShrink:0,display:'flex',
-            alignItems:'center',justifyContent:'center',fontSize:22,
-            background: isDemo?'linear-gradient(135deg,#f59e0b,#fbbf24)'
-              :isLocal?'linear-gradient(135deg,#7c3aed,#a78bfa)':GDRIVE.gradient}}>
-            {isDemo?'🧪':isLocal?'💻':GDRIVE.emoji}
-          </div>
-          <div style={{minWidth:0}}>
-            <div style={{fontWeight:600,fontSize:14,whiteSpace:'nowrap',overflow:'hidden',
-              textOverflow:'ellipsis'}}>{detail}</div>
-            <div style={{fontSize:11,color:'var(--text-3)',marginTop:2,whiteSpace:'nowrap',
-              overflow:'hidden',textOverflow:'ellipsis'}}>{ws.name}</div>
-          </div>
-        </div>
-        <div className="menu-sep"/>
-        <div className="mi" style={{borderRadius:7,marginTop:4}}
-          onMouseDown={e=>{e.preventDefault();setPop(null);onCreateWorkspace();}}>
-          <div className="mi-ic"><Plus size={14}/></div>
-          <div className="mi-tx">{isDemo?'Keep this workspace…':'Connect another workspace…'}</div>
-        </div>
-        {onGoHome&&<div className="mi" style={{borderRadius:7}}
-          onMouseDown={e=>{e.preventDefault();setPop(null);onGoHome();}}>
-          <div className="mi-ic"><Home size={14}/></div>
-          <div className="mi-tx">Close &amp; go to homepage</div>
-        </div>}
-      </div>
-    </Popup>}
-  </>;
-}
-
-
-
-/* The current page's FULL on-disk name for the topbar: "Title.md",
-   "Title-(plugin-id).md", "name.py", "name-(handler).py". */
-function crumbDiskName(n){
-  if(!n) return 'Untitled';
-  if(n.kind==='folder') return n.title||'Untitled';
-  if(n.kind==='file'){
-    const m=(n.title||'file.txt').match(/^(.*?)(\.[^.]+)?$/);
-    return (m[1]||'file')+(n.plugin?'-('+n.plugin+')':'')+(m[2]||'');
-  }
-  if(n.kind==='plugin') return (n.title||'Untitled')+'-('+(n.plugin||'plugin')+').md';
-  return (n.title||'Untitled')+'.md';
-}
-/* Fixed part shown after the rename input (files edit their whole name). */
-const crumbSuffix=n=>!n?'':n.kind==='file'?''
-  :n.kind==='plugin'?'-('+(n.plugin||'plugin')+').md'
-  :n.kind==='folder'?'':'.md';
-
-/* ---------------- Topbar ---------------- */
-function Topbar({node,nodes,openPage,toggleSidebar,sidebarOpen,toggleFav,isFav,setModal,
-  downloadPage,activeWorkspace,onGoHome,saveState,update,commitRename,
-  pendingRename,pendingIsCreate,clearPendingRename}){
-  const chain=[]; let c=node;
-  while(c){ chain.unshift(c); c=c.parentId?nodes[c.parentId]:null; }
-  const [dlMenu,setDlMenu]=useState(null);
-  /* Inline rename: clicking the CURRENT page's name in the crumbs turns it
-     into a text input with the name pre-selected. Enter/blur saves, Esc cancels.
-     Newly created pages land here automatically (pendingRename); creation
-     edits the FULL file name (extension decides the page kind). */
-  const [renaming,setRenaming]=useState(false);
-  const [fullEdit,setFullEdit]=useState(false);   // editing the whole name, no fixed suffix
-  const [draft,setDraft]=useState('');
-  const lastNodeId=useRef(null);
-  const startRename=full=>{ if(!node) return;
-    setDraft(node.title||''); setFullEdit(!!full); setRenaming(true); };
-  useEffect(()=>{
-    if(node&&pendingRename===node.id){
-      startRename(node.kind==='file'||pendingIsCreate);
-      clearPendingRename&&clearPendingRename();
-    }
-    // reset only when the PAGE changes — clearing pendingRename must not
-    // cancel the rename it just started
-    else if(lastNodeId.current!==(node?.id??null)) setRenaming(false);
-    lastNodeId.current=node?.id??null;
-  },[node?.id,pendingRename]);
-  // On-disk location of the current page within the local workspace folder.
-  const diskPath=activeWorkspace?.type==='local'&&node
-    ? `${activeWorkspace.name}/${nodeDiskPath({nodes},node.id)}` : null;
-  return <div className="topbar">
-    {!sidebarOpen&&<div className="tb-btn" title="Open sidebar" onClick={toggleSidebar}>
-      <Ic n="menu" style={{width:17,height:17}}/></div>}
-    <div className="crumbs">
-      {chain.map((n,i)=>{
-        const last=i===chain.length-1;
-        return <React.Fragment key={n.id}>
-          {i>0&&<span className="crumb-sep">/</span>}
-          <div className={cx('crumb',last&&renaming&&'renaming')}
-            title={last?'Rename':undefined}
-            onClick={()=>{ if(last){ if(!renaming) startRename(n.kind==='file'); } else openPage(n.id); }}>
-            <span>{n.icon||<NodeMark node={n}/>}</span>
-            {last&&renaming
-              ? <>
-                  <input className="crumb-rename" value={draft}
-                    placeholder={fullEdit&&node.kind!=='file'?'name · hello.py · notes.md':'Untitled'}
-                    ref={el=>{ if(el&&!el.dataset.init){ el.dataset.init='1';
-                      // next tick, so it wins over the page editor's autoFocus
-                      setTimeout(()=>{ el.focus(); el.select(); },0); } }}
-                    style={{width:Math.min(Math.max(draft.length+2,fullEdit?24:8),42)+'ch'}}
-                    onChange={e=>setDraft(e.target.value)}
-                    onClick={e=>e.stopPropagation()}
-                    onKeyDown={e=>{
-                      if(e.key==='Enter'){ e.preventDefault(); e.currentTarget.blur(); }
-                      else if(e.key==='Escape'){ e.currentTarget.dataset.esc='1'; e.currentTarget.blur(); }
-                    }}
-                    onBlur={e=>{
-                      setRenaming(false);
-                      if(e.currentTarget.dataset.esc) return;
-                      const t=e.currentTarget.value.trim();
-                      if(t!==(node.title||''))
-                        (commitRename||((nn,v)=>update(nn.id,{title:v})))(node,t);
-                    }}/>
-                  {!fullEdit&&crumbSuffix(node)&&<span className="crumb-suffix">{crumbSuffix(node)}</span>}
-                </>
-              : <span>{last?crumbDiskName(n):(n.title||'Untitled')}</span>}
-          </div>
-        </React.Fragment>;
-      })}
-    </div>
-    {diskPath&&<div className="file-loc" title={"Location inside your workspace folder:\n"+diskPath}
-      onClick={()=>navigator.clipboard?.writeText(diskPath)}
-      style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'var(--text-3)',
-        fontFamily:'ui-monospace,SFMono-Regular,Menlo,monospace',cursor:'copy',
-        maxWidth:340,minWidth:0,marginLeft:6}}>
-      <HardDrive size={12} style={{flexShrink:0}}/>
-      <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{diskPath}</span>
-    </div>}
-    <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
-      onGoHome={onGoHome} saveState={saveState}/>
-    <div className="topbar-actions">
-      <div className="tb-btn" title={isFav?'Favorited':'Add to Favorites'}
-        onClick={()=>toggleFav(node.id)} style={{color:isFav?'#eab308':undefined}}>
-        <Ic n="star" style={{width:17,height:17}}/></div>
-      {downloadPage&&<div className="tb-btn" title="Download page"
-        onClick={e=>setDlMenu(e.currentTarget.getBoundingClientRect())}>
-        <Ic n="download" style={{width:17,height:17}}/>
-      </div>}
-      {dlMenu&&(()=>{
-        const hasSub=Object.values(nodes).some(n=>n.parentId===node.id&&!n.trashed&&!n.archived);
-        const fmtRow=(fmt,icon,label,ext,withSub)=>
-          <div className="mi" onMouseDown={e=>{e.preventDefault();downloadPage(node.id,fmt,withSub);setDlMenu(null);}}>
-            <div className="mi-ic">{icon}</div>
-            <div className="mi-tx">{label}<small style={{color:'var(--text-3)'}}>{ext}</small></div>
-          </div>;
-        return <Popup rect={dlMenu} onClose={()=>setDlMenu(null)} width={230}>
-          <div className="menu">
-            <div className="menu-h">This page only</div>
-            {fmtRow('md','📝','Markdown','.md',false)}
-            {fmtRow('txt','📄','Plain text','.txt',false)}
-            {fmtRow('html','🌐','HTML','.html',false)}
-            {hasSub&&<>
-              <div className="menu-sep"/>
-              <div className="menu-h">With all sub-pages</div>
-              {fmtRow('md','📝','Markdown','.md',true)}
-              {fmtRow('txt','📄','Plain text','.txt',true)}
-              {fmtRow('html','🌐','HTML  + TOC','.html',true)}
-            </>}
-          </div>
-        </Popup>;
-      })()}
-      <div className="tb-btn" title="History & more" onClick={()=>setModal({type:'page-menu'})}>
-        <Ic n="dots" style={{width:17,height:17}}/></div>
-    </div>
-  </div>;
-}
 
 /* ---------------- Search modal ---------------- */
 /* =========================================================================
@@ -1185,355 +480,6 @@ function SearchModal({nodes,openPage,onClose}){
   </div>;
 }
 
-/* ---------------- Trash modal ---------------- */
-/* Full-page list of trashed / archived pages (shared layout). */
-function BinPage({emoji,title,subtitle,folder,rows,searchLabel,emptyText,onPrimary,primaryLabel,onDelete}){
-  const [q,setQ]=React.useState('');
-  const list=rows.filter(n=>(n.title||'').toLowerCase().includes(q.toLowerCase()));
-  return <div className="binpage">
-    <div className="binpage-head">
-      <div className="binpage-title"><span className="binpage-em">{emoji}</span>{title}</div>
-      <div className="binpage-sub">{subtitle} Kept in the <code>{folder}/</code> folder.</div>
-    </div>
-    <div className="binpage-tools">
-      <div className="search-in"><Ic n="search"/>
-        <input placeholder={searchLabel} value={q} onChange={e=>setQ(e.target.value)}/></div>
-      <span className="binpage-count">{list.length} item{list.length!==1?'s':''}</span>
-    </div>
-    {list.length===0
-      ? <div className="binpage-empty"><div className="bpe-em">{emoji}</div><b>{emptyText}</b></div>
-      : <div className="binpage-list">
-          {list.map(n=>
-            <div key={n.id} className="bp-row">
-              <span className="bp-em">{n.kind==='folder'?<FolderMark/>:n.icon||(n.kind==='database'?'🗄️':<NodeMark node={n}/>)}</span>
-              <div className="bp-tx"><b>{n.title||'Untitled'}</b>
-                <small>{n.kind==='database'?'Database':'Page'}</small></div>
-              <button className="btn ghost" onClick={()=>onPrimary(n.id)}>{primaryLabel}</button>
-              <button className="btn ghost" style={{color:'#d44c47'}} onClick={()=>onDelete(n.id)}>Delete</button>
-            </div>)}
-        </div>}
-  </div>;
-}
-
-function TrashPage({nodes,restore,deleteForever}){
-  return <BinPage emoji="🗑️" title="Trash" folder="trash"
-    subtitle="Deleted pages you can restore or remove permanently."
-    searchLabel="Search in Trash…" emptyText="Trash is empty"
-    rows={Object.values(nodes).filter(n=>n.trashed)}
-    primaryLabel="Restore" onPrimary={restore} onDelete={deleteForever}/>;
-}
-
-/* ---------------- Archive modal ---------------- */
-function ArchivePage({nodes,unarchiveNode,deleteForever}){
-  return <BinPage emoji="📦" title="Archive" folder="archive"
-    subtitle="Archived pages you can restore to your workspace."
-    searchLabel="Search in Archive…" emptyText="Archive is empty"
-    rows={Object.values(nodes).filter(n=>n.archived&&!n.trashed)}
-    primaryLabel="Restore" onPrimary={unarchiveNode} onDelete={deleteForever}/>;
-}
-
-/* ---------------- Templates modal ---------------- */
-const TEMPLATE_CATS=[
-  {id:'all',label:'All'},
-  {id:'basics',label:'Basics'},
-  {id:'personal',label:'Personal'},
-  {id:'work',label:'Work'},
-  {id:'learning',label:'Learning'},
-  {id:'planning',label:'Planning'},
-];
-
-const TEMPLATES=[
-  /* ── Basics ─────────────────────────────────────── */
-  {id:'blank',cat:'basics',icon:'📄',color:'#94a3b8',name:'Blank page',
-    desc:'A clean slate — just start writing.',
-    tags:['text'],
-    blocks:[{type:'text',html:''}]},
-
-  {id:'quick-note',cat:'basics',icon:'⚡',color:'#f59e0b',name:'Quick note',
-    desc:'Jot down a thought before it disappears.',
-    tags:['text'],
-    blocks:[
-      {type:'h1',html:'Untitled'},
-      {type:'text',html:''},
-    ]},
-
-  {id:'todo',cat:'basics',icon:'✅',color:'#22c55e',name:'To-do list',
-    desc:'A focused checklist to clear your head.',
-    tags:['todo'],
-    blocks:[
-      {type:'h1',html:'To-do list'},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-    ]},
-
-  /* ── Personal ────────────────────────────────────── */
-  {id:'daily-journal',cat:'personal',icon:'🌅',color:'#f97316',name:'Daily journal',
-    desc:'Morning check-in, gratitude, highlights, and tomorrow\'s focus.',
-    tags:['h3','bullet','todo'],
-    blocks:[
-      {type:'h1',html:'Daily Journal'},
-      {type:'callout',html:'<strong>Date:</strong> &nbsp;&nbsp;&nbsp; <strong>Mood:</strong> 😊',emoji:'🗓️',color:'yellow'},
-      {type:'h3',html:'Morning intention'},
-      {type:'quote',html:'What do I want to achieve today?'},
-      {type:'text',html:''},
-      {type:'h3',html:'Grateful for'},
-      {type:'bullet',html:''},
-      {type:'bullet',html:''},
-      {type:'bullet',html:''},
-      {type:'h3',html:'Highlights of the day'},
-      {type:'text',html:''},
-      {type:'h3',html:'Tomorrow\'s focus'},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-    ]},
-
-  {id:'weekly-review',cat:'personal',icon:'📅',color:'#8b5cf6',name:'Weekly review',
-    desc:'Reflect on the week, celebrate wins, and plan ahead.',
-    tags:['h2','bullet','todo'],
-    blocks:[
-      {type:'h1',html:'Weekly Review'},
-      {type:'callout',html:'Week of:&nbsp;',emoji:'📅',color:'purple'},
-      {type:'h2',html:'✅ What went well'},
-      {type:'bullet',html:''},
-      {type:'bullet',html:''},
-      {type:'h2',html:'🔄 What to improve'},
-      {type:'bullet',html:''},
-      {type:'bullet',html:''},
-      {type:'h2',html:'🎯 Top 3 priorities for next week'},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'h2',html:'💡 Key insights'},
-      {type:'text',html:''},
-    ]},
-
-  {id:'goal-tracker',cat:'personal',icon:'🎯',color:'#10b981',name:'Goal tracker',
-    desc:'Define a goal, break it into milestones, track progress.',
-    tags:['callout','todo','numbered'],
-    blocks:[
-      {type:'h1',html:'Goal Tracker'},
-      {type:'callout',html:'<strong>Goal:</strong> ',emoji:'🎯',color:'green'},
-      {type:'text',html:'<strong>Why it matters:</strong> '},
-      {type:'text',html:'<strong>Deadline:</strong> '},
-      {type:'divider',html:''},
-      {type:'h2',html:'Milestones'},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'h2',html:'Action steps'},
-      {type:'numbered',html:''},
-      {type:'numbered',html:''},
-      {type:'numbered',html:''},
-      {type:'h2',html:'Progress notes'},
-      {type:'text',html:''},
-    ]},
-
-  /* ── Work ────────────────────────────────────────── */
-  {id:'meeting-notes',cat:'work',icon:'🤝',color:'#3b82f6',name:'Meeting notes',
-    desc:'Agenda, discussion points, decisions, and action items.',
-    tags:['h2','numbered','todo'],
-    blocks:[
-      {type:'h1',html:'Meeting Notes'},
-      {type:'callout',html:'<strong>Date:</strong> &nbsp;&nbsp; <strong>Attendees:</strong> ',emoji:'🤝',color:'blue'},
-      {type:'text',html:'<strong>Type:</strong> &nbsp;&nbsp;&nbsp; <strong>Duration:</strong> '},
-      {type:'divider',html:''},
-      {type:'h2',html:'Agenda'},
-      {type:'numbered',html:''},
-      {type:'numbered',html:''},
-      {type:'h2',html:'Notes'},
-      {type:'text',html:''},
-      {type:'h2',html:'Decisions made'},
-      {type:'bullet',html:''},
-      {type:'h2',html:'Action items'},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'h2',html:'Next meeting'},
-      {type:'text',html:''},
-    ]},
-
-  {id:'project-brief',cat:'work',icon:'🚀',color:'#6366f1',name:'Project brief',
-    desc:'Overview, goals, scope, stakeholders, timeline, and risks.',
-    tags:['h2','callout','bullet'],
-    blocks:[
-      {type:'h1',html:'Project Brief'},
-      {type:'callout',html:'One-line summary of what this project is and why it matters.',emoji:'🚀',color:'purple'},
-      {type:'h2',html:'Problem statement'},
-      {type:'text',html:'What problem are we solving? Who does it affect?'},
-      {type:'h2',html:'Goals & success metrics'},
-      {type:'bullet',html:'Goal 1 — '},
-      {type:'bullet',html:'Goal 2 — '},
-      {type:'h2',html:'Scope'},
-      {type:'callout',html:'<strong>In scope:</strong> ',emoji:'✅',color:'green'},
-      {type:'callout',html:'<strong>Out of scope:</strong> ',emoji:'🚫',color:'red'},
-      {type:'h2',html:'Stakeholders'},
-      {type:'bullet',html:'<strong>Owner:</strong> '},
-      {type:'bullet',html:'<strong>Team:</strong> '},
-      {type:'h2',html:'Timeline'},
-      {type:'text',html:'<strong>Start:</strong> &nbsp;&nbsp; <strong>Target launch:</strong> '},
-      {type:'h2',html:'Risks & mitigations'},
-      {type:'bullet',html:''},
-    ]},
-
-  {id:'one-on-one',cat:'work',icon:'💬',color:'#0ea5e9',name:'1:1 Notes',
-    desc:'Check-in, agenda, talking points, feedback, and follow-ups.',
-    tags:['h2','bullet','todo'],
-    blocks:[
-      {type:'h1',html:'1:1 Notes'},
-      {type:'callout',html:'<strong>With:</strong> &nbsp;&nbsp;&nbsp; <strong>Date:</strong> ',emoji:'💬',color:'blue'},
-      {type:'h2',html:'How are things?'},
-      {type:'text',html:''},
-      {type:'h2',html:'Their agenda'},
-      {type:'bullet',html:''},
-      {type:'h2',html:'My agenda'},
-      {type:'bullet',html:''},
-      {type:'h2',html:'Feedback & recognition'},
-      {type:'text',html:''},
-      {type:'h2',html:'Action items'},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-    ]},
-
-  {id:'sprint-plan',cat:'work',icon:'⚡',color:'#f43f5e',name:'Sprint planning',
-    desc:'Sprint goal, committed stories, stretch items, and blockers.',
-    tags:['callout','todo','bullet'],
-    blocks:[
-      {type:'h1',html:'Sprint Planning'},
-      {type:'callout',html:'<strong>Sprint:</strong> &nbsp;&nbsp; <strong>Dates:</strong> &nbsp;&nbsp; <strong>Team:</strong> ',emoji:'⚡',color:'red'},
-      {type:'h2',html:'Sprint goal'},
-      {type:'quote',html:''},
-      {type:'h2',html:'Committed items'},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'h2',html:'Stretch items'},
-      {type:'todo',html:'',checked:false},
-      {type:'h2',html:'Blockers & risks'},
-      {type:'bullet',html:''},
-      {type:'h2',html:'Definition of done'},
-      {type:'bullet',html:''},
-      {type:'bullet',html:''},
-    ]},
-
-  /* ── Learning ────────────────────────────────────── */
-  {id:'study-notes',cat:'learning',icon:'📖',color:'#0891b2',name:'Study notes',
-    desc:'Topic overview, key concepts, questions, and a summary.',
-    tags:['h2','bullet','todo'],
-    blocks:[
-      {type:'h1',html:'Study Notes'},
-      {type:'callout',html:'<strong>Subject:</strong> &nbsp;&nbsp; <strong>Date:</strong> ',emoji:'📖',color:'blue'},
-      {type:'h2',html:'Overview'},
-      {type:'text',html:''},
-      {type:'h2',html:'Key concepts'},
-      {type:'bullet',html:'<strong>Concept:</strong> '},
-      {type:'bullet',html:'<strong>Concept:</strong> '},
-      {type:'bullet',html:'<strong>Concept:</strong> '},
-      {type:'h2',html:'My questions'},
-      {type:'todo',html:'',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'h2',html:'Summary in my own words'},
-      {type:'quote',html:''},
-      {type:'h2',html:'Further reading'},
-      {type:'bullet',html:''},
-    ]},
-
-  {id:'book-notes',cat:'learning',icon:'📚',color:'#7c3aed',name:'Book notes',
-    desc:'Capture key ideas, quotes, and actionable takeaways.',
-    tags:['h2','quote','bullet'],
-    blocks:[
-      {type:'h1',html:'Book Notes'},
-      {type:'callout',html:'<strong>Title:</strong> &nbsp;&nbsp; <strong>Author:</strong> &nbsp;&nbsp; <strong>Rating:</strong> ⭐⭐⭐⭐',emoji:'📚',color:'purple'},
-      {type:'h2',html:'In one sentence'},
-      {type:'quote',html:''},
-      {type:'h2',html:'Key ideas'},
-      {type:'bullet',html:''},
-      {type:'bullet',html:''},
-      {type:'bullet',html:''},
-      {type:'h2',html:'Favourite quotes'},
-      {type:'quote',html:''},
-      {type:'h2',html:'How I\'ll apply this'},
-      {type:'text',html:''},
-      {type:'h2',html:'Action items'},
-      {type:'todo',html:'',checked:false},
-    ]},
-
-  /* ── Planning ────────────────────────────────────── */
-  {id:'travel-plan',cat:'planning',icon:'✈️',color:'#14b8a6',name:'Travel planning',
-    desc:'Trip details, packing list, bookings, and day-by-day itinerary.',
-    tags:['h2','todo','bullet'],
-    blocks:[
-      {type:'h1',html:'Travel Planning'},
-      {type:'callout',html:'<strong>Destination:</strong> &nbsp;&nbsp; <strong>Dates:</strong> &nbsp;&nbsp; <strong>Budget:</strong> ',emoji:'✈️',color:'green'},
-      {type:'h2',html:'Packing list'},
-      {type:'todo',html:'Passport / ID',checked:false},
-      {type:'todo',html:'Phone & charger',checked:false},
-      {type:'todo',html:'',checked:false},
-      {type:'h2',html:'Bookings'},
-      {type:'bullet',html:'<strong>Flights:</strong> '},
-      {type:'bullet',html:'<strong>Hotel:</strong> '},
-      {type:'bullet',html:'<strong>Transport:</strong> '},
-      {type:'h2',html:'Itinerary'},
-      {type:'h3',html:'Day 1'},
-      {type:'text',html:''},
-      {type:'h3',html:'Day 2'},
-      {type:'text',html:''},
-      {type:'h2',html:'Notes & tips'},
-      {type:'text',html:''},
-    ]},
-];
-
-const TAG_COLORS={
-  h1:'#6366f1',h2:'#8b5cf6',h3:'#a78bfa',
-  text:'#64748b',bullet:'#0891b2',numbered:'#0ea5e9',
-  todo:'#22c55e',callout:'#f59e0b',quote:'#f97316',
-  divider:'#94a3b8',
-};
-
-function TemplatesPage({create}){
-  const [cat,setCat]=useState('all');
-  const filtered=cat==='all'?TEMPLATES:TEMPLATES.filter(t=>t.cat===cat);
-  return <div className="binpage">
-    <div className="binpage-head">
-      <div className="binpage-title"><span className="binpage-em">🧩</span>Templates</div>
-      <div className="binpage-sub">Start a new page from a ready-made template — it’s added to your workspace.</div>
-    </div>
-
-    {/* ── Category pills ── */}
-    <div className="tpl-cats">
-      {TEMPLATE_CATS.map(c=>(
-        <button key={c.id} className={cx('tpl-cat',cat===c.id&&'sel')}
-          onClick={()=>setCat(c.id)}>{c.label}</button>
-      ))}
-    </div>
-
-    {/* ── Template grid ── */}
-    <div className="tpl-page-grid">
-      <div className="tpl-grid-new">
-        {filtered.map(t=>(
-          <div key={t.id} className="tpl-card-new" onClick={()=>create(t)}>
-            <div className="tpl-card-hd" style={{'--tpl-col':t.color}}>
-              <span className="tpl-card-em">{t.icon}</span>
-            </div>
-            <div className="tpl-card-bd">
-              <div className="tpl-card-nm">{t.name}</div>
-              <div className="tpl-card-ds">{t.desc}</div>
-              {t.tags&&<div className="tpl-tags">
-                {t.tags.map(tag=>(
-                  <span key={tag} className="tpl-tag"
-                    style={{'--tag-col':TAG_COLORS[tag]||'#94a3b8'}}>{tag}</span>
-                ))}
-              </div>}
-            </div>
-            <div className="tpl-card-use">Use template →</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  </div>;
-}
-
 /* ---------------- Shortcuts modal ---------------- */
 function ShortcutsModal({onClose}){
   return <div className="overlay" onClick={onClose}>
@@ -1821,83 +767,9 @@ function ManageWorkspacesModal({connectedWorkspaces,onOpen,onDeleted,onRenamed,o
 
 
 
-/* ---------------- Custom select dropdown ---------------- */
-function CustomSelect({value,onChange,options}){
-  const [open,setOpen]=React.useState(false);
-  const ref=React.useRef();
-  React.useEffect(()=>{
-    if(!open) return;
-    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};
-    setTimeout(()=>document.addEventListener('mousedown',h),0);
-    return()=>document.removeEventListener('mousedown',h);
-  },[open]);
-  const current=options.find(o=>o.value===value);
-  return <div ref={ref} className="csel" style={{position:'relative'}}>
-    <button className={`csel-btn${open?' open':''}`} onMouseDown={e=>{e.preventDefault();setOpen(o=>!o);}}>
-      <div className="csel-opt-left">
-        {current?.dot&&<span className="csel-dot" style={{background:current.dot}}/>}
-        <span>{current?.label??value}</span>
-      </div>
-      <Ic n="chevron-down"/>
-    </button>
-    {open&&<div className="csel-menu">
-      {options.map(o=><div key={o.value}
-        className={`csel-opt${o.value===value?' sel':''}`}
-        onMouseDown={e=>{e.preventDefault();onChange(o.value);setOpen(false);}}>
-        <div className="csel-opt-left">
-          {o.dot&&<span className="csel-dot" style={{background:o.dot}}/>}
-          {o.label}
-        </div>
-        {o.value===value&&<Ic n="check"/>}
-      </div>)}
-    </div>}
-  </div>;
-}
-
-const ACCENT_COLORS=[
-  {id:'indigo', label:'Indigo',  light:'#6366f1', dark:'#818cf8'},
-  {id:'blue',   label:'Blue',    light:'#3b82f6', dark:'#60a5fa'},
-  {id:'ocean',  label:'Ocean',   light:'#0ea5e9', dark:'#38bdf8'},
-  {id:'forest', label:'Forest',  light:'#10b981', dark:'#34d399'},
-  {id:'rose',   label:'Rose',    light:'#f43f5e', dark:'#fb7185'},
-  {id:'sunset', label:'Sunset',  light:'#f59e0b', dark:'#fbbf24'},
-  {id:'violet', label:'Violet',  light:'#8b5cf6', dark:'#c084fc'},
-];
-
-/* Workspace font choices (applied to page content, saved in info.md).
-   Imported Google Fonts are stored as `g:<Family>` values on top of these. */
-const FONT_OPTIONS=[
-  {id:'default', label:'Default (Sans)', stack:"'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif"},
-  {id:'serif',   label:'Serif',          stack:"Georgia,'Iowan Old Style','Times New Roman',serif"},
-  {id:'mono',    label:'Monospace',      stack:"'JetBrains Mono','SFMono-Regular',Menlo,Consolas,monospace"},
-];
-const fontStack=id=>{
-  if(id&&id.startsWith('g:')) return `'${id.slice(2)}','Inter',-apple-system,sans-serif`;
-  return (FONT_OPTIONS.find(f=>f.id===id)||FONT_OPTIONS[0]).stack;
-};
-
-/* Page-content font size (a scale factor over the default sizes). */
-const FONT_SIZES=[
-  {id:'small',   label:'Small',       scale:.9},
-  {id:'default', label:'Default',     scale:1},
-  {id:'large',   label:'Large',       scale:1.15},
-  {id:'xl',      label:'Extra large', scale:1.3},
-];
-const fontScale=id=>(FONT_SIZES.find(f=>f.id===id)||FONT_SIZES[1]).scale;
-
-/* Load a Google Font by injecting its stylesheet (regular weight; the browser
-   synthesizes bold). Cross-origin, so the service worker never caches it —
-   offline it falls back to the default stack. */
-const ensureGoogleFont=name=>{
-  const id='gf-'+name.toLowerCase().replace(/[^a-z0-9]+/g,'-');
-  if(document.getElementById(id)) return;
-  const l=document.createElement('link');
-  l.id=id; l.rel='stylesheet';
-  l.href=`https://fonts.googleapis.com/css2?family=${name.replace(/ /g,'+')}&display=swap`;
-  document.head.appendChild(l);
-};
-
 /* ---------------- Settings modal ---------------- */
+/* CustomSelect lives in ./components/ui/select.jsx; the accent/font
+   constants live in ./theme.js (both imported above). */
 /* ---- external template repositories ----
    A "template repository" is any public GitHub repo holding pages in this
    app's own .md format — in a templates/ folder or at the repo root. It's
@@ -1946,15 +818,10 @@ const SETTINGS_TABS=[
   {id:'general',   label:'General',   icon:'settings'},
   {id:'theme',     label:'Appearance', icon:'sun'},
   {id:'templates', label:'Templates', icon:'template'},
-  {id:'plugins',   label:'Plugins',   icon:'puzzle'},
+  {id:'plugins',   label:'Plugins',   icon:'plug'},
   {id:'handlers',  label:'File handlers', icon:'doc'},
   {id:'about',     label:'About',     icon:'info'},
 ];
-
-/* File types always offered in Settings → File handlers, even before any
-   plugin or file of that type exists — the built-in text editor is the
-   default handler for all of them. */
-const DEFAULT_HANDLER_EXTS=['txt','html','css','js','ts','json','py','yaml','xml','csv','sh','sql'];
 
 /* Ready-made prompt users paste into an AI assistant to generate a plugin.
    Keep in sync with the real contract in plugins.jsx. */
@@ -1972,7 +839,7 @@ manifest.json:
   "id": "my-plugin",
   "name": "My Plugin",
   "version": "1.0.0",
-  "type": "page",       ← the plugin type; "page" is the only supported type today
+  "type": "page",       ← plugin type: "page" (custom page / file handler) or "theme" (a CSS-only skin: no entry, add "styles": "theme.css"). Planned: layout, icons, syntax, components.
   "layout": "all",      ← which app layout it works in: "home", "code" or "all"
   "entry": "page.jsx",
   "icon": "🧩",
@@ -2014,7 +881,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
   onOpenTemplates,customTemplates,onUseTemplate,onRemoveTemplate,
   templateRepo,setTemplateRepo,onImportTemplates,onAddRepoTemplate,
   fontSize,setFontSize,customFonts,onAddFont,onRemoveFont,
-  plugins,fileHandlers,fileHandlersCode,setFileHandler,fileExts,onAddPlugin,onAddPluginFiles,
+  plugins,fileHandlers,fileHandlersCode,setFileHandler,fileExts,onAddPlugin,onAddPluginFiles,onTogglePlugin,onUninstallPlugin,
   devMode,setDevMode}){
   const bgInput=React.useRef();
   const tplInput=React.useRef();
@@ -2352,7 +1219,7 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
         </div>
         {plugs.length===0
           ? <div className="set-empty">
-              <span className="set-empty-ic"><Ic n="puzzle" style={{width:28,height:28}}/></span>
+              <span className="set-empty-ic"><Ic n="plug" style={{width:28,height:28}}/></span>
               <b>No plugins in this workspace</b>
               <small>Install one from GitHub above, or create your own at
                 <code> plugins/&lt;id&gt;/</code> inside the workspace folder —
@@ -2370,11 +1237,24 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
                       {(p.manifest.handles||[]).length>0&&
                         <> · handles {p.manifest.handles.map(h=>'.'+h).join(', ')}</>}</small></div>
                   <div style={{display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
+                    {/* themes have no page to consent on — this switch IS their consent;
+                        for regular plugins it enables (or disables) the current version */}
+                    {compat.ok&&(p.manifest.type==='theme'||!p.builtin)&&
+                      <label className="plug-enable"
+                        title={p.manifest.type==='theme'?'Apply this theme workspace-wide'
+                          :'Enable this plugin version now (otherwise you’re asked when one of its pages first opens)'}>
+                        <input type="checkbox" checked={!!p.enabled}
+                          onChange={e=>onTogglePlugin&&onTogglePlugin(p,e.target.checked)}/>
+                        <span>{p.manifest.type==='theme'?'Applied':'Enabled'}</span>
+                      </label>}
                     <span className={cx('plug-badge',compat.ok?'ok':'bad')}
                       title={compat.checks.map(c=>`${c.pass?'✓':'✕'} ${c.label}${c.detail?' — '+c.detail:''}`).join('\n')}>
                       {compat.ok?'✓ Compatible':'✕ Incompatible'}</span>
                     <span style={{color:'var(--text-3)',fontFamily:'var(--mono)',fontSize:11}}>
                       {p.builtin?'built-in':`plugins/${p.id}/`}</span>
+                    {!p.builtin&&<button className="btn ghost sm"
+                      title={`Delete plugins/${p.id}/ from this workspace`}
+                      onClick={()=>onUninstallPlugin&&onUninstallPlugin(p)}>Uninstall</button>}
                   </div>
                 </div>
                 {!compat.ok&&<div className="set-repo-err">
@@ -2396,7 +1276,9 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
       </>;
     })()
     :tab==='handlers'?(()=>{
-      const plugs=plugins||[];
+      // only PAGE plugins can open files — themes are CSS-only skins and
+      // future types (layouts, icons…) aren't file handlers either
+      const plugs=(plugins||[]).filter(p=>p.manifest.type==='page');
       // defaults always listed, plus anything claimed by a plugin, present in
       // the workspace, or already overridden in either layout's map
       const exts=[...new Set([
@@ -2410,11 +1292,17 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
       const autoFor=(ext,lay)=>
         plugs.find(p=>(p.manifest.handles||[]).includes(ext)&&p.manifest.layout===lay)
         ||plugs.find(p=>(p.manifest.handles||[]).includes(ext)&&(p.manifest.layout||'all')==='all');
-      const plugsFor=lay=>plugs.filter(p=>{const l=p.manifest.layout||'all';return l==='all'||l===lay;});
+      // a dropdown only offers plugins that DECLARE the extension in their
+      // manifest "handles" (and fit the layout) — a page plugin with no
+      // handles isn't a file handler (bind it per-file with "name-(id).ext")
+      const plugsFor=(ext,lay)=>plugs.filter(p=>{
+        const l=p.manifest.layout||'all';
+        return (l==='all'||l===lay)&&(p.manifest.handles||[]).includes(ext);
+      });
       return <>
         <p className="set-note">Which page opens each file type — <b>each layout has
-          its own default</b>, so e.g. <code>.py</code> can open in the simple Code
-          Viewer at Home and the IDE-style Coder Page in Code. A file named
+          its own default</b> (e.g. the IDE-style Coder Page for <code>.py</code>,
+          in both layouts). A file named
           <code> name-(plugin-id).ext</code> always uses that plugin; everything else
           follows this table. <b>Auto</b> means: the first plugin that declares the
           type in its manifest's <code>"handles"</code> (preferring one made for that
@@ -2459,7 +1347,10 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
                     onChange={e=>setFileHandler(ext,e.target.value,lay)}>
                     <option value="auto">Auto{auto?` (${auto.manifest.name})`:' (text editor)'}</option>
                     <option value="text">Built-in text editor</option>
-                    {plugsFor(lay).map(p=><option key={p.id} value={p.id}>{p.manifest.name}</option>)}
+                    {plugsFor(ext,lay).map(p=><option key={p.id} value={p.id}>{p.manifest.name}</option>)}
+                    {/* keep a stale/name-bound selection visible instead of a blank select */}
+                    {val!=='auto'&&val!=='text'&&!plugsFor(ext,lay).some(p=>p.id===val)&&
+                      <option value={val}>{plugs.find(p=>p.id===val)?.manifest.name||`missing plugin "${val}"`}</option>}
                   </select>
                 </label>;
               })}
@@ -2500,66 +1391,6 @@ function SettingsModal({theme,setTheme,accent,setAccent,font,setFont,description
         <div className="set-body">{body}</div>
       </div>
     </div>
-  </div>;
-}
-
-
-/* ---------------- Dashboard ---------------- */
-function Dashboard({nodes,favorites,openPage,addTop,setModal,activeWorkspace}){
-  const allNodes=Object.values(nodes).filter(n=>!n.trashed&&!n.archived);
-  const pageCount=allNodes.filter(n=>n.kind==='page').length;
-  const dbCount=allNodes.filter(n=>n.kind==='database').length;
-  const favNodes=favorites.map(id=>nodes[id]).filter(n=>n&&!n.trashed&&!n.archived);
-  const privatePages=allNodes.filter(n=>n.parentId===null&&n.kind!=='folder')
-    .sort((a,b)=>(a.sort||0)-(b.sort||0)).slice(0,6);
-  const hour=new Date().getHours();
-  const greeting=hour<12?'Good morning':hour<17?'Good afternoon':'Good evening';
-  return <div className="dash-page">
-    <div className="dash-hero">
-      <div className="dash-greeting">{greeting}</div>
-      <div className="dash-ws-name">{activeWorkspace?.name||'My Workspace'}</div>
-    </div>
-    <div className="dash-stats">
-      <div className="dash-stat"><span className="dash-stat-n">{pageCount}</span><span className="dash-stat-l">Pages</span></div>
-      <div className="dash-stat"><span className="dash-stat-n">{dbCount}</span><span className="dash-stat-l">Databases</span></div>
-      <div className="dash-stat"><span className="dash-stat-n">{favNodes.length}</span><span className="dash-stat-l">Favorites</span></div>
-    </div>
-    <div className="dash-actions">
-      <button className="dash-action-btn" onClick={()=>addTop('private')}>
-        <Ic n="plus" style={{width:18,height:18}}/><span>New page</span>
-      </button>
-      <button className="dash-action-btn" onClick={()=>openPage(TEMPLATES_ID)}>
-        <Ic n="template" style={{width:18,height:18}}/><span>Templates</span>
-      </button>
-      <button className="dash-action-btn" onClick={()=>setModal({type:'search'})}>
-        <Ic n="search" style={{width:18,height:18}}/><span>Search</span>
-      </button>
-      <button className="dash-action-btn" onClick={()=>setModal({type:'settings'})}>
-        <Ic n="settings" style={{width:18,height:18}}/><span>Settings</span>
-      </button>
-    </div>
-    {favNodes.length>0&&<>
-      <div className="dash-section-title">⭐ Favorites</div>
-      <div className="dash-page-grid">
-        {favNodes.map(n=><div key={n.id} className="dash-page-card" onClick={()=>openPage(n.id)}>
-          <div className="dpc-cover" style={{background:n.cover||'var(--bg-2)'}}/>
-          <div className="dpc-icon">{n.icon||<NodeMark node={n} size={22}/>}</div>
-          <div className="dpc-title">{n.title||'Untitled'}</div>
-          <div className="dpc-kind">{n.kind==='database'?'Database':n.kind==='md'?'Markdown':n.kind==='plugin'?'Plugin':n.kind==='file'?'File':'Page'}</div>
-        </div>)}
-      </div>
-    </>}
-    {privatePages.length>0&&<>
-      <div className="dash-section-title">📂 My Workspace</div>
-      <div className="dash-page-grid">
-        {privatePages.map(n=><div key={n.id} className="dash-page-card" onClick={()=>openPage(n.id)}>
-          <div className="dpc-cover" style={{background:n.cover||'var(--bg-2)'}}/>
-          <div className="dpc-icon">{n.icon||<NodeMark node={n} size={22}/>}</div>
-          <div className="dpc-title">{n.title||'Untitled'}</div>
-          <div className="dpc-kind">{n.kind==='database'?'Database':n.kind==='md'?'Markdown':n.kind==='plugin'?'Plugin':n.kind==='file'?'File':'Page'}</div>
-        </div>)}
-      </div>
-    </>}
   </div>;
 }
 
@@ -2606,313 +1437,8 @@ function PageMenu({node,nodes,onClose,trashNode,duplicate,setModal,downloadPage,
 /* =========================================================================
    WORKSPACE  (the authenticated app surface)
    ========================================================================= */
-/* =========================================================================
-   HOME SCREEN — shown when no workspace is connected
-   ========================================================================= */
-function ConnectPanel({onLocalNew,onLocalExisting,onDriveNew,onDriveExisting,busy,error,devMode,onDevMode}){
-  const localOK=isLocalFSSupported();
-  const [name,setName]=useState('');
-  const [desc,setDesc]=useState('');
-  const named=!!name.trim();
-  return <div className="connect">
-    <div className="connect-block">
-      <div className="cb-fields">
-        <label className="cb-field">
-          <span className="cb-field-ic">◧</span>
-          <input className="cb-input" placeholder="Workspace name" value={name}
-            onChange={e=>setName(e.target.value)} autoFocus/>
-        </label>
-        <label className="cb-field">
-          <span className="cb-field-ic">✎</span>
-          <input className="cb-input" placeholder="Description (optional)" value={desc}
-            onChange={e=>setDesc(e.target.value)}/>
-        </label>
-      </div>
-
-      {/* app mode — decide before entering (also in Settings → General) */}
-      {onDevMode&&<div className="cb-mode">
-        <div className="mode-pill" role="group" aria-label="App mode">
-          <button type="button" className={cx(!devMode&&'on')}
-            title="Workspace mode — the normal workspace"
-            onClick={()=>onDevMode(false)}>Workspace</button>
-          <button type="button" className={cx(devMode&&'on')}
-            title="Developer mode — unlocks the Code layout (explorer, tabs & terminal) and code-layout plugins"
-            onClick={()=>onDevMode(true)}>
-            <span style={{fontFamily:'var(--mono)',fontWeight:700}}>&lt;/&gt;</span> Developer
-          </button>
-        </div>
-        <div className="cb-mode-hint">{devMode
-          ?'Developer — adds the Code layout: file explorer, tabs & a terminal.'
-          :'Workspace — the normal notes, docs & databases workspace.'}</div>
-      </div>}
-
-      <div className="cb-choose">Create it in</div>
-      <div className="cb-tiles">
-        <button className="cb-tile local" disabled={!localOK||busy||!named}
-          onClick={()=>onLocalNew(name.trim(),desc.trim())}>
-          <span className="cb-tile-ic">💻</span>
-          <span className="cb-tile-tx">
-            <span className="cb-tile-t">Local folder</span>
-            <span className="cb-tile-s">Saved on this computer</span>
-          </span>
-        </button>
-        <button className="cb-tile drive" disabled={busy||!named}
-          onClick={()=>onDriveNew(name.trim(),desc.trim())}>
-          <span className="cb-tile-ic">📁</span>
-          <span className="cb-tile-tx">
-            <span className="cb-tile-t">Google Drive</span>
-            <span className="cb-tile-s">Synced across devices</span>
-          </span>
-        </button>
-      </div>
-
-      <div className="cb-existing">
-        <span>Already have a workspace?</span>
-        <button className="cb-link" disabled={!localOK||busy} onClick={onLocalExisting}>Open a folder</button>
-        <span className="cb-dot">·</span>
-        <button className="cb-link" disabled={busy} onClick={onDriveExisting}>Open from Drive</button>
-      </div>
-      {!localOK&&<div className="cc-warn">Local folders need Chrome, Edge or Brave — Google Drive works everywhere.</div>}
-    </div>
-    {error&&<div className="connect-error">{error}</div>}
-    {busy&&<div className="connect-busy"><span className="spin"/> Working…</div>}
-  </div>;
-}
-
-const GitHubIcon=({size=17})=>
-  <svg viewBox="0 0 16 16" width={size} height={size} fill="currentColor" aria-hidden="true">
-    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
-  </svg>;
-
-/* =========================================================================
-   WELCOME PAGE — the public landing for first-time visitors (no workspace
-   data in this browser yet). Explains the app; "Get Started" leads to the
-   start page (HomeScreen).
-   ========================================================================= */
-function WelcomePage({onGetStarted,onDemo,onDocs,onAbout,onSelfHost,theme,onToggleTheme,accent,onAccent}){
-  return <div className="home-screen welcome-page has-fixed-foot">
-    <div className="home-aurora" aria-hidden="true">
-      <span className="orb o1"/><span className="orb o2"/><span className="orb o3"/><span className="orb o4"/>
-      <span className="home-grid"/>
-    </div>
-    <nav className="home-nav">
-      <div className="home-nav-brand">
-        <span className="home-nav-mark">◧</span>
-        <span className="home-nav-title">Workspace</span>
-      </div>
-      <div className="home-nav-links">
-        <button type="button" className="home-nav-link" onClick={onAbout}>About</button>
-        <button type="button" className="home-nav-link" onClick={onSelfHost}>Self-hosting</button>
-        <button type="button" className="home-nav-link" onClick={onDocs}>Docs</button>
-        <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
-          target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
-          <GitHubIcon/>
-        </a>
-        {APP_VERSION&&<a className="home-nav-ver"
-          href="https://github.com/MohanViswagnaMR/Workspace/tree/main/versions"
-          target="_blank" rel="noopener noreferrer" title="Release notes">v{APP_VERSION}</a>}
-      </div>
-    </nav>
-    <div className="welcome-inner">
-      <section className="wl-hero">
-        <h1 className="wl-title home-rise" style={{animationDelay:'60ms'}}>
-          Notes, docs &amp; databases.<br/>
-          Saved as plain <span className="grad">Markdown files</span>.
-        </h1>
-        <p className="wl-sub home-rise" style={{animationDelay:'120ms'}}>
-          Workspace is a free, open-source, Notion-style block editor with no accounts and
-          no backend. Everything you write lives in ordinary folders and <code>.md</code> files —
-          in a folder on your computer or in your own Google Drive — readable and usable
-          even if this app goes away.
-        </p>
-        <div className="wl-actions home-rise" style={{animationDelay:'170ms'}}>
-          <button type="button" className="btn-demo" onClick={onGetStarted}>
-            Get Started <Ic n="fwd" style={{width:16,height:16}}/>
-          </button>
-          <button type="button" className="btn-demo-ghost" onClick={onDemo}>
-            <Ic n="play" style={{width:15,height:15}}/> Try the demo
-          </button>
-        </div>
-        <div className="wl-hint home-rise" style={{animationDelay:'200ms'}}>
-          The demo runs right here in your browser — no sign-up, nothing saved until you keep it.
-        </div>
-      </section>
-
-      <section className="home-feats wl-feats home-rise" style={{animationDelay:'240ms'}}>
-        {[['🧱','Block editor','Headings, to-dos, toggles, callouts, quotes, code, images and files — type / for everything.'],
-          ['📊','Databases','Tables, boards, galleries, lists and calendars, with multiple views per database.'],
-          ['🗂️','Nested pages','Infinite page hierarchy with instant search, favorites, templates, trash and archive.'],
-          ['📁','Plain files, yours','Pages are Markdown files in real folders — open them with any editor, forever.'],
-          ['🔒','No account, no cloud','Nothing is sent anywhere except, optionally, your own Google Drive.'],
-          ['⚡','Installable & offline','A PWA you can install on desktop or phone; local workspaces work fully offline.']]
-          .map(([ic,t,s])=><div className="home-feat" key={t}>
-            <span className="home-feat-ic">{ic}</span>
-            <span className="home-feat-t">{t}</span>
-            <span className="home-feat-s">{s}</span>
-          </div>)}
-      </section>
-
-      <section className="wl-files home-rise" style={{animationDelay:'280ms'}}>
-        <div className="wl-files-copy">
-          <h2 className="wl-h2">Your data is just files.</h2>
-          <p className="wl-p">
-            Each workspace is a self-describing folder tree: pages with children become
-            folders, leaf pages are single <code>.md</code> files, and metadata lives in a
-            little YAML frontmatter. There is <b>no JSON</b> anywhere in your data — open
-            it in any editor, sync it with any tool, keep it forever.
-          </p>
-          <p className="wl-p">
-            Curious how it works? Read the <button type="button" className="home-demo-link"
-              onClick={onDocs}>documentation</button> or learn about{' '}
-            <button type="button" className="home-demo-link" onClick={onSelfHost}>hosting it yourself</button>.
-          </p>
-        </div>
-        <pre className="wl-tree"><code>{`My Workspace/
-├── Upload/            images & attachments
-└── Space/             all top-level pages
-    ├── Meeting Notes.md
-    └── Homework/
-        ├── master page.md
-        ├── Essay.md
-        └── Math/
-            ├── Problem set 1.md
-            └── Problem set 2.md`}</code></pre>
-      </section>
-
-    </div>
-    <div className="home-foot home-foot-fixed home-rise" style={{animationDelay:'320ms'}}>
-      <div className="home-foot-copy">
-        © {new Date().getFullYear()} Workspace · Mohan Viswagna MR. All rights reserved.
-      </div>
-      <div className="home-foot-controls">
-        <button type="button" role="switch" aria-checked={theme==='dark'}
-          className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
-          title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
-          aria-label={theme==='dark'?'Switch to light mode':'Switch to dark mode'}>
-          <Ic n="sun" style={{width:13,height:13}}/>
-          <Ic n="moon" style={{width:13,height:13}}/>
-          <span className="theme-switch-knob"/>
-        </button>
-        <CustomSelect value={accent} onChange={onAccent}
-          options={ACCENT_COLORS.map(c=>({value:c.id,label:c.label,
-            dot:theme==='dark'?c.dark:c.light}))}/>
-      </div>
-    </div>
-  </div>;
-}
-
-function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onManage,onDocs,onWelcome,theme,onToggleTheme,accent,onAccent,devMode,onDevMode,onOpen,onRemove,onReconnect,onLocalNew,onLocalExisting,onDriveNew,onDriveExisting}){
-  const known=list||[];
-  const lastId=pointer?pointer.id:null;
-  return <div className="home-screen has-fixed-foot">
-    <div className="home-aurora" aria-hidden="true">
-      <span className="orb o1"/><span className="orb o2"/><span className="orb o3"/><span className="orb o4"/>
-      <span className="home-grid"/>
-    </div>
-    <nav className="home-nav">
-      <div className="home-nav-brand">
-        <span className="home-nav-mark">◧</span>
-        <span className="home-nav-title">Workspace</span>
-      </div>
-      <div className="home-nav-links">
-        <button type="button" className="home-nav-link" onClick={onWelcome}>Welcome</button>
-        <button type="button" className="home-nav-link" onClick={onDocs}>Docs</button>
-        <button type="button" className="home-nav-link" onClick={onManage}>
-          <Ic n="cloud" style={{width:15,height:15}}/> Manage workspaces
-        </button>
-        <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
-          target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
-          <GitHubIcon/>
-        </a>
-        {APP_VERSION&&<a className="home-nav-ver"
-          href="https://github.com/MohanViswagnaMR/Workspace/tree/main/versions"
-          target="_blank" rel="noopener noreferrer" title="Release notes">v{APP_VERSION}</a>}
-      </div>
-    </nav>
-    <div className="home-inner">
-      <h1 className="home-title home-rise" style={{animationDelay:'60ms'}}>
-        Your notes, as plain&nbsp;<span className="grad">Markdown</span>.
-      </h1>
-      <p className="home-sub home-rise" style={{animationDelay:'120ms'}}>
-        {known.length?'Open a workspace you’ve connected before, or start a new one.'
-          :'Connect a workspace to get started.'} Everything you write is saved as ordinary
-        folders and <code>.md</code> files — readable and usable even if this app goes away.
-      </p>
-
-      <div className={cx('home-columns',known.length>0&&'two-col')}>
-        {known.length>0&&<div className="home-col home-rise" style={{animationDelay:'180ms'}}>
-          <div className="home-label home-label-row">
-            <span>Your workspaces</span>
-            <button type="button"
-              className={cx('drive-cloud',driveConnected?'on':'off')}
-              disabled={busy} onClick={onConnectDrive}
-              title={driveConnected?'Google Drive connected — click to refresh':'Click to connect to Google Drive'}
-              aria-label={driveConnected?'Google Drive connected — click to refresh':'Connect to Google Drive'}>
-              <Ic n="cloud" style={{width:24,height:24}}/>
-              <span className="drive-cloud-badge">
-                <Ic n={driveConnected?'check':'x'} style={{width:10,height:10}}/>
-              </span>
-            </button>
-          </div>
-          <div className="home-ws-list">
-            {known.map(ws=>{
-              const isLocal=ws.type==='local';
-              const isLast=ws.id===lastId;
-              return <div key={ws.id} className={cx('home-ws-row',isLast&&'last')}
-                onClick={()=>!busy&&onOpen(ws)}>
-                <div className={cx('home-ws-ava',isLocal?'local':'drive')}>{isLocal?'💻':GDRIVE.emoji}</div>
-                <div className="home-ws-meta">
-                  <div className="home-ws-name">{ws.name}
-                    {isLast&&<span className="home-ws-badge">Last used</span>}
-                  </div>
-                  <div className="home-ws-type">
-                    {isLocal?'Local folder':'Google Drive'}
-                    {isLocal&&ws.accessible===false?' · needs access':''}
-                  </div>
-                </div>
-                <button className="btn primary sm" disabled={busy}
-                  onClick={e=>{e.stopPropagation();onOpen(ws);}}>Open</button>
-                <button className="btn ghost sm home-ws-unlink"
-                  title="Unlink — remove from this list (your files are NOT deleted)"
-                  disabled={busy} onClick={e=>{e.stopPropagation();onRemove(ws);}}>
-                  <Ic n="unlink" style={{width:13,height:13}}/> Unlink
-                </button>
-              </div>;
-            })}
-          </div>
-          {error&&<div className="connect-error" style={{marginTop:10}}>{error}</div>}
-        </div>}
-
-        <div className="home-col home-rise" style={{animationDelay:'240ms'}}>
-          <div className="home-label">{known.length?'Connect another':'Connect a workspace'}</div>
-          <ConnectPanel onLocalNew={onLocalNew} onLocalExisting={onLocalExisting}
-            onDriveNew={onDriveNew} onDriveExisting={onDriveExisting} busy={busy}
-            devMode={devMode} onDevMode={onDevMode}
-            error={known.length?'':error}/>
-        </div>
-      </div>
-
-    </div>
-    <div className="home-foot home-foot-fixed home-rise" style={{animationDelay:'300ms'}}>
-      <div className="home-foot-copy">
-        © {new Date().getFullYear()} Workspace · Mohan Viswagna MR. All rights reserved.
-      </div>
-      <div className="home-foot-controls">
-        <button type="button" role="switch" aria-checked={theme==='dark'}
-          className={cx('theme-switch',theme==='dark'&&'on')} onClick={onToggleTheme}
-          title={theme==='dark'?'Switch to light mode':'Switch to dark mode'}
-          aria-label={theme==='dark'?'Switch to light mode':'Switch to dark mode'}>
-          <Ic n="sun" style={{width:13,height:13}}/>
-          <Ic n="moon" style={{width:13,height:13}}/>
-          <span className="theme-switch-knob"/>
-        </button>
-        <CustomSelect value={accent} onChange={onAccent}
-          options={ACCENT_COLORS.map(c=>({value:c.id,label:c.label,
-            dot:theme==='dark'?c.dark:c.light}))}/>
-      </div>
-    </div>
-  </div>;
-}
+/* The Welcome landing lives in ./pages/welcome.jsx; the start page
+   (HomeScreen) and ConnectPanel in ./pages/start.jsx (imported above). */
 
 /* =========================================================================
    WORKSPACE  (the app surface)
@@ -2920,11 +1446,12 @@ function HomeScreen({pointer,list,busy,error,driveConnected,onConnectDrive,onMan
 /* Docs / About / Self-hosting are website pages most sessions never open —
    they load as a separate chunk on first visit (see sitepages.jsx). */
 const PluginHost=React.lazy(()=>import('./plugins.jsx').then(m=>({default:m.PluginHost})));
-const CodeLayout=React.lazy(()=>import('./codeview.jsx'));
-const DocsPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.DocsPage})));
-const AboutPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.AboutPage})));
-const SelfHostPage=React.lazy(()=>import('./sitepages.jsx').then(m=>({default:m.SelfHostPage})));
-const BootScreen=()=><div className="app-loading"><div className="app-loading-logo">◧</div><div className="app-loading-bar"><i /></div></div>;
+const ThemeStyles=React.lazy(()=>import('./plugins.jsx').then(m=>({default:m.ThemeStyles})));
+const DocsPage=React.lazy(()=>import('./pages/sitepages.jsx').then(m=>({default:m.DocsPage})));
+const AboutPage=React.lazy(()=>import('./pages/sitepages.jsx').then(m=>({default:m.AboutPage})));
+const SelfHostPage=React.lazy(()=>import('./pages/sitepages.jsx').then(m=>({default:m.SelfHostPage})));
+const PluginStorePage=React.lazy(()=>import('./pages/sitepages.jsx').then(m=>({default:m.PluginStorePage})));
+/* The Code layout chunk, BootScreen and the layout/devMode state live in ./layout.jsx. */
 
 function Workspace(){
   const [store,setStore]=React.useState(null);   // connected workspace, or null → home
@@ -2949,29 +1476,9 @@ function Workspace(){
      runs a variable number of times per mount. */
   const [plugins,setPlugins]=React.useState([]);
   const [pendingRename,setPendingRename]=React.useState(null); // node id → topbar auto-rename
-  /* app layout: 'home' (Notion-style) | 'code' (VS Code-style). Persisted. */
-  const [layout,setLayoutState]=React.useState(()=>{
-    try{ return localStorage.getItem('ws_layout')==='code'?'code':'home'; }catch(_){ return 'home'; }
-  });
-  const setLayout=l=>{
-    setLayoutState(l);
-    try{ localStorage.setItem('ws_layout',l); }catch(_){}
-  };
-  /* app mode: 'workspace' (default) is just the normal workspace; DEVELOPMENT
-     mode unlocks the Code layout (the Home⟷Code switch, explorer, terminal).
-     Existing users already in the code layout migrate to development mode. */
-  const [devMode,setDevModeState]=React.useState(()=>{
-    try{
-      const v=localStorage.getItem('ws_devmode');
-      if(v!=null) return v==='1';
-      return localStorage.getItem('ws_layout')==='code';
-    }catch(_){ return false; }
-  });
-  const setDevMode=on=>{
-    setDevModeState(on);
-    try{ localStorage.setItem('ws_devmode',on?'1':'0'); }catch(_){}
-    if(!on) setLayout('home');   // leaving development mode returns to Home
-  };
+  /* app layout ('home' | 'code') + Developer mode — persisted state owned by
+     ./layout.jsx (two useState calls inside; keep this position in hook order). */
+  const {layout,setLayout,devMode,setDevMode}=useLayoutMode();
   // id of a just-created page whose typed NAME decides its kind
   // (hello.py → file, notes.md → simple md, plain name → smart page)
   const creatingRef=React.useRef(null);
@@ -3109,7 +1616,7 @@ function Workspace(){
     writeTheme({theme:store.theme,accent:store.accent});
     document.body.classList.toggle('dark',store.theme==='dark');
     ['indigo','blue','ocean','forest','rose','sunset','violet'].forEach(a=>document.body.classList.remove(`t-${a}`));
-    document.body.classList.add(`t-${store.accent||'violet'}`);
+    document.body.classList.add(`t-${store.accent||'rose'}`);
     // expose the workspace font to popups portaled to <body> (block menus etc.)
     document.body.style.setProperty('--ws-font',fontStack(store.font));
 
@@ -3192,7 +1699,43 @@ function Workspace(){
       {id:'demo',name:'Demo workspace',type:'demo'});
   };
 
-  const connectLocalNew=async(name,description)=>{
+  /* Wizard extras (ConnectPanel's create flow): append the chosen starter
+     pages to a fresh seed, and pre-enable the chosen plugins (consent by
+     content hash — the exact mechanism Settings → Plugins uses). */
+  const seedWithPages=(seed,opts)=>{
+    const pages=opts?.pages||[];
+    if(!pages.length) return seed;
+    const nodes={...seed.nodes};
+    let sort=Object.values(nodes).filter(n=>n.parentId===null&&!n.trashed).length;
+    let first=null;
+    pages.forEach(p=>{
+      const pid=nid(); first=first||pid;
+      nodes[pid]={id:pid,kind:'page',title:p.title,icon:p.icon,cover:'',parentId:null,
+        sort:sort++,blocks:(p.blocks||[]).map(b=>({id:nid(),...b}))};
+    });
+    return {...seed,nodes,currentId:seed.currentId||first};
+  };
+  /* Install the wizard's GitHub plugins into the new workspace's plugins/
+     folder, then pre-enable everything chosen (hash consent). Demo keeps
+     installs in memory only — nothing has a disk yet. */
+  const applyChosenPlugins=async(opts,active)=>{
+    const ids=opts?.plugins||[], install=opts?.install||[];
+    if(!ids.length&&!install.length) return;
+    try{
+      const m=await import('./plugins.jsx');
+      for(const raw of install){
+        try{
+          if(active?.type==='local') await writeLocalPlugin(active.id,raw.id,raw.files);
+          else if(active?.type==='gdrive') await writeDrivePlugin(active.folderId,raw.id,raw.files);
+        }catch(e){ console.warn('[wizard] plugin install failed:',raw.id,e?.message); }
+      }
+      const entries=[...await Promise.all(install.map(r=>m.buildPluginEntry(r))),
+        ...await m.discoverPlugins(null)];
+      entries.filter(p=>ids.includes(p.id)).forEach(p=>m.setPluginEnabled(p,true));
+    }catch(_){}
+  };
+
+  const connectLocalNew=async(name,description,opts)=>{
     if(!name||!name.trim()) return;
     const id=nid();
     try{
@@ -3207,14 +1750,15 @@ function Workspace(){
         await finishConnect(data,{id,name:rec.name,type:'local'});
         return;
       }
-      // New workspaces start empty — sample pages exist only in the demo;
+      // New workspaces start empty (unless the wizard picked starter pages) —
       // keeping the demo carries its current content into the new workspace.
-      const seed=store&&store.active?.type==='demo'
+      const seed=seedWithPages(store&&store.active?.type==='demo'
         ? {nodes:store.nodes,favorites:store.favorites,currentId:store.currentId}
-        : {nodes:{},favorites:[],currentId:null};
+        : {nodes:{},favorites:[],currentId:null},opts);
       const info={...readTheme(),font:'default',pageBg:null,description:(description||'').trim()};
       data={nodes:seed.nodes,favorites:seed.favorites,currentId:seed.currentId,uploads:[],info};
       await writeWorkspaceTreeNow(id,{nodes:data.nodes,favorites:data.favorites,uploads:[],info});
+      await applyChosenPlugins(opts,{id,type:'local'});
       await finishConnect(data,{id,name:rec.name,type:'local'});
     }catch(e){ if(e?.name!=='AbortError') alert('Could not create the workspace: '+(e?.message||e)); }
   };
@@ -3233,17 +1777,18 @@ function Workspace(){
     }catch(e){ if(e?.name!=='AbortError') alert('Could not open the folder: '+(e?.message||e)); }
   };
 
-  const connectDriveNew=async(name,description)=>{
+  const connectDriveNew=async(name,description,opts)=>{
     setHome(h=>({...h,busy:true,error:''}));
     try{
       const folderId=await createDriveWorkspace(name);
-      // New workspaces start empty — sample pages exist only in the demo;
+      // New workspaces start empty (unless the wizard picked starter pages) —
       // keeping the demo carries its current content into the new workspace.
-      const seed=store&&store.active?.type==='demo'
+      const seed=seedWithPages(store&&store.active?.type==='demo'
         ? {nodes:store.nodes,favorites:store.favorites,currentId:store.currentId}
-        : {nodes:{},favorites:[],currentId:null};
+        : {nodes:{},favorites:[],currentId:null},opts);
       const info={...readTheme(),font:'default',pageBg:null,description:(description||'').trim()};
       await writeGdriveWorkspaceTree(folderId,{nodes:seed.nodes,favorites:seed.favorites,uploads:[],info});
+      await applyChosenPlugins(opts,{type:'gdrive',folderId});
       await finishConnect({nodes:seed.nodes,favorites:seed.favorites,currentId:seed.currentId,uploads:[],info},
         {id:folderId,name,type:'gdrive',folderId});
     }catch(e){ setHome(h=>({...h,busy:false,error:e.message||'Could not create the Drive workspace.'})); }
@@ -3407,6 +1952,10 @@ function Workspace(){
     return <React.Suspense fallback={<BootScreen/>}>
       <SelfHostPage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>
     </React.Suspense>;
+  if(sitePage==='plugins')
+    return <React.Suspense fallback={<BootScreen/>}>
+      <PluginStorePage onBack={()=>setSitePage(null)} theme={homeTheme} onToggleTheme={toggleHomeTheme}/>
+    </React.Suspense>;
 
   /* First visit (no workspace data in this browser) → the Welcome landing.
      Any browser memory — known workspaces, an active pointer, a live Drive
@@ -3417,18 +1966,19 @@ function Workspace(){
   if(!store&&showWelcome)
     return <WelcomePage onGetStarted={()=>setEntry('start')} onDemo={openDemo}
       onDocs={()=>setSitePage('docs')} onAbout={()=>setSitePage('about')}
-      onSelfHost={()=>setSitePage('selfhost')}
+      onSelfHost={()=>setSitePage('selfhost')} onPlugins={()=>setSitePage('plugins')}
       theme={homeTheme} onToggleTheme={toggleHomeTheme}
       accent={homeAccent} onAccent={changeHomeAccent}/>;
 
   if(!store) return <>
     <HomeScreen pointer={home.pointer} list={home.list} busy={home.busy} error={home.error}
       driveConnected={home.driveConnected} onConnectDrive={connectDriveList}
-      onManage={()=>setModal({type:'manage-ws'})} onDocs={()=>setSitePage('docs')}
+      onDocs={()=>setSitePage('docs')} onPlugins={()=>setSitePage('plugins')}
       onWelcome={()=>setEntry('welcome')}
       theme={homeTheme} onToggleTheme={toggleHomeTheme}
       accent={homeAccent} onAccent={changeHomeAccent}
-      devMode={devMode} onDevMode={setDevMode}
+      devMode={devMode}
+      onDevMode={on=>{setDevMode(on);if(on)setLayout('code');}}
       onOpen={openKnownWorkspace} onRemove={removeKnownWorkspace} onReconnect={reconnectActive}
       onLocalNew={connectLocalNew} onLocalExisting={connectLocalExisting}
       onDriveNew={connectDriveNew} onDriveExisting={()=>connectDriveExisting(null)}/>
@@ -3457,7 +2007,7 @@ function Workspace(){
         }}/>}
   </>;
 
-  const {nodes,favorites,currentId,theme,accent='violet'}=store;
+  const {nodes,favorites,currentId,theme,accent='rose'}=store;
   const node=currentId===DASH_ID?null:nodes[currentId]||nodes[Object.keys(nodes)[0]]||null;
   const workspaces=buildWsList(store.localList,store.active);
   const activeWorkspaceId=store.active.id;
@@ -3497,25 +2047,44 @@ function Workspace(){
     setPlugins(prev=>[entry,...prev.filter(p=>p.id!==entry.id)]);
     return entry;
   };
+  /* Settings → Plugins "Applied/Approved" switch: store hash-consent, then
+     refresh the entry's enabled snapshot so ThemeStyles & the UI re-render. */
+  const togglePlugin=async(p,on)=>{
+    const m=await import('./plugins.jsx');
+    m.setPluginEnabled(p,on);
+    setPlugins(list=>list.map(x=>x.id===p.id?{...x,enabled:on}:x));
+  };
+  /* Uninstall a workspace plugin: delete plugins/<id>/ from storage, forget
+     its consent + permission grants, re-discover (which also restores a
+     built-in the plugin was overriding). Built-ins can't be uninstalled.
+     Returns true on success so callers can close detail views. */
+  const uninstallPlugin=async p=>{
+    if(p.builtin) return false;
+    if(!confirm(`Uninstall “${p.manifest.name}”?\n\nThis deletes plugins/${p.id}/ from this workspace. Pages made with it stay on disk and show “plugin missing” until it's reinstalled.`)) return false;
+    const aw=store.active;
+    try{
+      if(aw?.type==='local') await deleteLocalPlugin(aw.id,p.id);
+      else if(aw?.type==='gdrive') await deleteDrivePlugin(aw.folderId||aw.id,p.id);
+      // demo installs live only in memory — nothing on disk to delete
+    }catch(e){
+      if(e?.name!=='NotFoundError'){ alert('Could not delete the plugin folder: '+(e?.message||e)); return false; }
+    }
+    const m=await import('./plugins.jsx');
+    m.clearPluginState(p.id);
+    m.discoverPlugins(aw).then(setPlugins).catch(()=>{
+      setPlugins(list=>list.filter(x=>x.id!==p.id));
+    });
+    return true;
+  };
   const addPluginFromGithub=async url=>{
     const mod=await import('./plugins.jsx');
     return installPluginRaw(await mod.fetchGithubPlugin(url));
   };
-  /* Which plugin opens a 'file' page: explicit "-(plugin)" filename binding →
-     the CURRENT LAYOUT's Settings override for the extension → first plugin
-     whose manifest `handles` the extension, preferring one scoped to this
-     layout → null (built-in text editor). Each layout has its own defaults,
-     so .py can open in the Code Viewer at Home and the Coder Page in Code. */
-  const resolveHandler=(n,lay=(devMode?layout:'home'))=>{
-    if(n.plugin) return plugins.find(p=>p.id===n.plugin)||null;
-    const ov=((lay==='code'?store.fileHandlersCode:store.fileHandlers)||{})[n.ext];
-    if(ov==='text') return null;
-    if(ov) return plugins.find(p=>p.id===ov)||null;
-    const claims=p=>(p.manifest.handles||[]).includes(n.ext);
-    return plugins.find(p=>claims(p)&&p.manifest.layout===lay)
-      || plugins.find(p=>claims(p)&&(p.manifest.layout||'all')==='all')
-      || null;
-  };
+  /* Which plugin opens a 'file' page — thin closure over the pure resolver in
+     ./services/filehandler.js, fed the live plugin list + Settings overrides. */
+  const resolveHandler=(n,lay=(devMode?layout:'home'))=>
+    resolveFileHandler(n,lay,{plugins,
+      fileHandlers:store.fileHandlers,fileHandlersCode:store.fileHandlersCode});
 
   const addNode=(parentId,extra={})=>{
     const id=nid();
@@ -3564,9 +2133,9 @@ function Workspace(){
     if(creating&&n.kind==='page'){
       const m=name.match(/^(.*?)\.([^.]+)$/);
       if(m&&m[2].toLowerCase()==='md'){
-        const bind=m[1].match(/^(.*)-\(([\w.-]+)\)$/);   // plugin binding in the name
-        if(bind) updateNode(n.id,{kind:'plugin',plugin:bind[2],data:'',blocks:undefined,
-          title:bind[1].trim()||'Untitled',icon:plugins.find(p=>p.id===bind[2])?.manifest.icon||''});
+        const bind=splitNameBinding(m[1]);   // plugin binding in the name
+        if(bind) updateNode(n.id,{kind:'plugin',plugin:bind.plugin,data:'',blocks:undefined,
+          title:bind.title.trim()||'Untitled',icon:plugins.find(p=>p.id===bind.plugin)?.manifest.icon||''});
         else updateNode(n.id,{kind:'md',md:'',blocks:undefined,title:m[1]||'Untitled'});
         return;
       }
@@ -3574,10 +2143,10 @@ function Workspace(){
         // "base-(plugin).ext" binds the handler in the FILE NAME — store it
         // split (title "base.ext" + plugin), exactly like the disk reader
         const ext=m[2].toLowerCase();
-        const bind=m[1].match(/^(.*)-\(([\w.-]+)\)$/);
+        const bind=splitNameBinding(m[1]);
         registerExt(name,ext);
-        updateNode(n.id,{kind:'file',title:bind?bind[1].trim()+'.'+m[2]:name,
-          ext,plugin:bind?bind[2]:'',data:'',blocks:undefined});
+        updateNode(n.id,{kind:'file',title:bind?bind.title.trim()+'.'+m[2]:name,
+          ext,plugin:bind?bind.plugin:'',data:'',blocks:undefined});
         return;
       }
       updateNode(n.id,{title:name});
@@ -3589,9 +2158,9 @@ function Workspace(){
     // re-split it, so editing the binding rebinds (and removing it unbinds)
     const fm=name.match(/^(.*?)\.([^.]+)$/);
     const ext=fm[2].toLowerCase();
-    const bind=fm[1].match(/^(.*)-\(([\w.-]+)\)$/);
+    const bind=splitNameBinding(fm[1]);
     registerExt(name,ext);
-    updateNode(n.id,{title:bind?bind[1].trim()+'.'+fm[2]:name,ext,plugin:bind?bind[2]:''});
+    updateNode(n.id,{title:bind?bind.title.trim()+'.'+fm[2]:name,ext,plugin:bind?bind.plugin:''});
   };
   /* "New page" — the page is created empty, and the topbar immediately asks
      for its NAME (full file name, extension included), which decides the kind. */
@@ -3829,22 +2398,7 @@ function Workspace(){
   const peekData=getPeekData();
   const editorOpenRow=(db,rowId)=>openRow(currentId,rowId);
   const lookupNode=id=>nodes[id];
-  const isDashboard=currentId===DASH_ID;
-  const isStoragePage=currentId===STORAGE_ID;
-  const isTrashPage=currentId===TRASH_ID;
-  const isArchivePage=currentId===ARCHIVE_ID;
-  const isTemplatesPage=currentId===TEMPLATES_ID;
   const renameNode=(id,title)=>updateNode(id,{...(title!==undefined?{title}:{})});
-
-  /* simple full-page topbar (Home / Storage / Trash / Archive) */
-  const pageTopbar=(emoji,label)=>
-    <div className="topbar">
-      {!sidebarOpen&&<div className="tb-btn" title="Open sidebar" onClick={()=>setSidebarOpen(o=>!o)}>
-        <Ic n="menu" style={{width:17,height:17}}/></div>}
-      <div className="crumbs"><div className="crumb"><span>{emoji}</span><span>{label}</span></div></div>
-      <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})} onGoHome={goHome} saveState={saveState}/>
-      <div className="topbar-actions"/>
-    </div>;
 
   /* One editor router for BOTH layouts (home + code). */
   const renderPageEditor=n=>
@@ -3867,93 +2421,35 @@ function Workspace(){
 
   return <div className={cx('app',theme==='dark'&&'dark',`t-${accent}`)}
     style={{'--ws-font':fontStack(store.font),'--ws-fs':fontScale(store.fontSize)}}>
-    {layout==='code'&&devMode
-    ? <React.Suspense fallback={<BootScreen/>}>
-        <CodeLayout nodes={nodes} currentId={currentId} openPage={openPage}
-          renderEditor={renderPageEditor} createNamed={createNamed} addFolder={addFolder}
-          trashNode={trashNode} wsName={activeWorkspace?.name}
-          plugins={plugins} saveState={saveState}
-          setLayout={setLayout} setModal={setModal} dashId={DASH_ID}/>
-      </React.Suspense>
-    : <>
-    <Sidebar open={sidebarOpen} nodes={nodes} favorites={favorites} currentId={currentId}
+    {/* enabled theme plugins restyle the whole app; the chunk only loads if one exists */}
+    {plugins.some(p=>p.manifest.type==='theme'&&p.enabled)&&
+      <React.Suspense fallback={null}><ThemeStyles plugins={plugins}/></React.Suspense>}
+    <AppLayout layout={layout} devMode={devMode}
+      codeProps={{nodes,currentId,openPage,
+        renderEditor:renderPageEditor,createNamed,addFolder,
+        trashNode,restore,deleteForever,updateNode,wsName:activeWorkspace?.name,
+        plugins,saveState,
+        onTogglePlugin:togglePlugin,onInstallPlugin:installPluginRaw,
+        onUninstallPlugin:uninstallPlugin,
+        setLayout,setModal,dashId:DASH_ID,goHome}}>
+    <HomeLayout nodes={nodes} favorites={favorites} currentId={currentId} node={node}
       expanded={expanded} toggleExp={toggleExp} openPage={openPage}
-      addChild={addChild} trashNode={trashNode} archiveNode={archiveNode} onDrop={moveNode}
-      addTop={addTop} addFolder={addFolder} setModal={setModal}
-      workspaces={workspaces} activeWorkspaceId={activeWorkspaceId}
-      onSwitchWorkspace={switchWorkspace}
-      onCreateWorkspace={()=>setModal({type:'create-workspace'})}
-      onDeleteWorkspace={deleteWorkspace}
-      onReconnectLocal={switchWorkspace}
-      toggleFav={toggleFav} duplicate={duplicate} exportPage={exportPage}
-      renameNode={renameNode} onGoHome={goHome}
-      toggleSidebar={()=>setSidebarOpen(o=>!o)}
-      addNamedPage={addNamedPage} layout={layout} setLayout={setLayout} devMode={devMode}/>
-
-    <div className={cx('main',store.pageBgUrl&&'has-page-bg')}
-      style={store.pageBgUrl?{'--page-bg':`url("${store.pageBgUrl}")`}:undefined}>
-      {activeWorkspace.type==='demo'&&<div className="demo-banner">
-        <span className="demo-banner-ic">🧪</span>
-        <span className="demo-banner-tx"><b>You’re exploring the demo.</b> Edit anything —
-          nothing is saved until you keep it.</span>
-        <button className="btn primary sm" onClick={()=>setModal({type:'create-workspace'})}>
-          Keep this workspace</button>
-        <button className="btn ghost sm" onClick={goHome}>Exit demo</button>
-      </div>}
-      {isStoragePage
-        ? <>
-            <div className="topbar">
-              {!sidebarOpen&&<div className="tb-btn" title="Open sidebar"
-                onClick={()=>setSidebarOpen(o=>!o)}>
-                <Ic n="menu" style={{width:17,height:17}}/></div>}
-              <div className="crumbs">
-                <div className="crumb"><span>📦</span><span>Storage</span></div>
-              </div>
-              <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
-                onGoHome={goHome} saveState={saveState}/>
-              <div className="topbar-actions"/>
-            </div>
-            <StoragePage uploads={scopedUploads} activeWorkspace={activeWorkspace}
-              onDeleteUpload={deleteUpload} onUpload={uploadFile}/>
-          </>
-        : isDashboard
-        ? <>
-            <div className="topbar">
-              {!sidebarOpen&&<div className="tb-btn" title="Open sidebar"
-                onClick={()=>setSidebarOpen(o=>!o)}>
-                <Ic n="menu" style={{width:17,height:17}}/></div>}
-              <div className="crumbs">
-                <div className="crumb"><span>🏠</span><span>Home</span></div>
-              </div>
-              <StorageBadge ws={activeWorkspace} onCreateWorkspace={()=>setModal({type:'create-workspace'})}
-                onGoHome={goHome} saveState={saveState}/>
-              <div className="topbar-actions"/>
-            </div>
-            <Dashboard nodes={nodes} favorites={favorites} openPage={openPage}
-              addTop={()=>addNamedPage(null)} setModal={setModal} activeWorkspace={activeWorkspace}/>
-          </>
-        : isTrashPage
-        ? <>{pageTopbar('🗑️','Trash')}
-            <TrashPage nodes={nodes} restore={restore} deleteForever={deleteForever}/></>
-        : isArchivePage
-        ? <>{pageTopbar('📦','Archive')}
-            <ArchivePage nodes={nodes} unarchiveNode={unarchiveNode} deleteForever={deleteForever}/></>
-        : isTemplatesPage
-        ? <>{pageTopbar('🧩','Templates')}
-            <TemplatesPage create={createFromTemplate}/></>
-        : <>
-            <Topbar node={node} nodes={nodes} openPage={openPage}
-              toggleSidebar={()=>setSidebarOpen(o=>!o)} sidebarOpen={sidebarOpen}
-              toggleFav={toggleFav} isFav={node&&favorites.includes(node.id)} setModal={setModal}
-              downloadPage={downloadPage} activeWorkspace={activeWorkspace} onGoHome={goHome}
-              saveState={saveState} update={updateNode} commitRename={commitRename}
-              pendingRename={pendingRename}
-              pendingIsCreate={pendingRename!=null&&creatingRef.current===pendingRename}
-              clearPendingRename={()=>setPendingRename(null)}/>
-            {node&&renderPageEditor(node)}
-          </>}
-    </div>
-    </>}
+      addChild={addChild} addTop={addTop} addFolder={addFolder} addNamedPage={addNamedPage}
+      trashNode={trashNode} archiveNode={archiveNode} moveNode={moveNode}
+      restore={restore} deleteForever={deleteForever} unarchiveNode={unarchiveNode}
+      duplicate={duplicate} exportPage={exportPage} renameNode={renameNode} toggleFav={toggleFav}
+      workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} activeWorkspace={activeWorkspace}
+      switchWorkspace={switchWorkspace} deleteWorkspace={deleteWorkspace} goHome={goHome}
+      setModal={setModal} sidebarOpen={sidebarOpen} setSidebarOpen={setSidebarOpen}
+      layout={layout} setLayout={setLayout} devMode={devMode}
+      pageBgUrl={store.pageBgUrl} saveState={saveState}
+      scopedUploads={scopedUploads} deleteUpload={deleteUpload} uploadFile={uploadFile}
+      downloadPage={downloadPage} updateNode={updateNode} commitRename={commitRename}
+      pendingRename={pendingRename}
+      pendingIsCreate={pendingRename!=null&&creatingRef.current===pendingRename}
+      clearPendingRename={()=>setPendingRename(null)}
+      createFromTemplate={createFromTemplate} renderPageEditor={renderPageEditor}/>
+    </AppLayout>
 
     {showTutorial&&
       <TutorialOverlay
@@ -3997,7 +2493,7 @@ function Workspace(){
         onImportTemplates={importTemplateFiles}
         onAddRepoTemplate={t=>addTemplatesFromTexts([t])}
         onRestartTutorial={()=>{setModal(null);setShowTutorial(true);}}
-        plugins={plugins}
+        plugins={plugins} onTogglePlugin={togglePlugin} onUninstallPlugin={uninstallPlugin}
         fileHandlers={store.fileHandlers||{}}
         fileHandlersCode={store.fileHandlersCode||{}}
         setFileHandler={(ext,val,lay)=>{

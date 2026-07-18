@@ -462,6 +462,16 @@ export async function writeDrivePlugin(rootId, pluginId, files) {
   }
 }
 
+/* Remove a plugin's folder (plugins/<id>/) from a Drive workspace. */
+export async function deleteDrivePlugin(rootId, pluginId) {
+  const token = _getToken();
+  if (!token) throw new Error('Not authenticated with Google Drive.');
+  const pf = await _findChild(token, 'plugins', rootId, true);
+  if (!pf.length) return;
+  const df = await _findChild(token, pluginId, pf[0].id, true);
+  if (df.length) await _deleteFile(token, df[0].id);
+}
+
 /* Read a Drive workspace's stored settings (theme/accent/font/description)
    from its root info.md. Returns {} if there is no info.md yet. */
 export async function readDriveWorkspaceMeta(rootId) {

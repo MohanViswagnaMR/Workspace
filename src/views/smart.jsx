@@ -2,41 +2,29 @@
    smart.jsx — the SMART PAGE (block editor) + shared UI primitives
    -------------------------------------------------------------------------
    Everything that renders or edits BLOCK-based content lives here: the
-   contentEditable block editor (Editable / Block / Editor), the slash and
-   block menus, databases (smart tables) with all their views, plus the
-   shared UI primitives they are built from (Popup, ContextMenu, pickers,
-   icons, caret helpers). workspace.jsx composes the app around these; the
-   SIMPLE markdown-page editor lives in ./markdown.jsx. Dependencies flow
-   one way: workspace.jsx → smart.jsx (never back).
+   contentEditable block editor (Editable / Block / Editor), databases
+   (smart tables) with all their views, pickers and caret helpers. The
+   shared primitives were extracted to ../utils.js, ../components/ui/*
+   (icons, Popup) and ../components/* (ContextMenu, SlashMenu, BlockMenu /
+   FormatBar) and are RE-EXPORTED here unchanged, so consumers keep
+   importing from this file. workspace.jsx composes the app around these;
+   the SIMPLE markdown-page editor lives in ./markdown.jsx. Dependencies
+   flow one way: utils → ui → components → views (never back).
    ========================================================================= */
-import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, Fragment } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'react';
 import { createPortal } from 'react-dom';
-import {
-  Search, Home, Inbox, Settings, Plus, ChevronRight, ChevronDown,
-  FileText, Trash2, MoreHorizontal, Star, LayoutTemplate, GripVertical,
-  Check, X, Image, Link, Table, Kanban, LayoutGrid, List, Calendar,
-  Filter, ArrowUpDown, Sun, Moon, Menu, ChevronLeft, Maximize2,
-  Share2, Users, Archive, Upload, LayoutDashboard, RotateCcw, Download,
-  Monitor, CloudCheck, CloudUpload, Key, ExternalLink, Copy, Keyboard,
-  Cloud, HardDrive, Paperclip, Database, Eye, PanelRight, PanelLeftClose, LogOut, Unlink,
-  Puzzle, Info, FolderPlus, Folder, FolderOpen,
-  Play,
-} from 'lucide-react';
-import { loadDict, isMisspelled, suggest } from './spellcheck.js';
-
-/* ---------- utils ---------- */
-const nid = () => 'n'+Math.random().toString(36).slice(2,9)+Date.now().toString(36).slice(-3);
-const cx = (...a)=>a.filter(Boolean).join(' ');
-const clone = o => typeof structuredClone==='function' ? structuredClone(o) : JSON.parse(JSON.stringify(o));
-const todayISO = () => new Date().toISOString().slice(0,10);
-const fmtDate = iso => { if(!iso) return ''; const d=new Date(iso+'T00:00');
-  return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); };
-const fmtBytes = b => { if(!b) return '0 B'; const u=['B','KB','MB','GB']; let i=0;
-  while(b>=1024&&i<u.length-1){b/=1024;i++;} return b.toFixed(i>0?1:0)+' '+u[i]; };
+import { Maximize2, PanelRight } from 'lucide-react';
+import { loadDict, isMisspelled, suggest } from '../services/spellcheck.js';
+import { nid, cx, clone, todayISO, fmtDate, fmtBytes, APP_VERSION,
+  IS_MAC, fmtShortcut, SEL_COLORS, TEXT_COLORS } from '../lib/utils.js';
+import { ICON_MAP, Ic, EXT_MARK_COLORS, ExtMark, MdMark, PageMark, NodeMark,
+  FolderMark, FILE_ICON, FILE_TYPE_COLOR, fileAccentColor } from '../components/ui/icons.jsx';
+import { Popup, ConfirmHint } from '../components/ui/popup.jsx';
+import { ContextMenu } from '../components/ContextMenu.jsx';
+import { CMDS, SlashMenu } from '../components/SlashMenu.jsx';
+import { BlockMenu, FormatBar } from '../components/RightClickMenu.jsx';
 
 /* ---------- constants ---------- */
-const SEL_COLORS = ['default','gray','brown','orange','yellow','green','blue','purple','pink','red'];
-const TEXT_COLORS = ['default','gray','brown','orange','yellow','green','blue','purple','pink','red'];
 const COVERS = [
   'linear-gradient(135deg,#ff9a56,#ff6a88)','linear-gradient(135deg,#5b86e5,#36d1dc)',
   'linear-gradient(135deg,#834d9b,#d04ed6)','linear-gradient(135deg,#11998e,#38ef7d)',
@@ -57,42 +45,6 @@ const PAGE_EMOJI = '📄 📝 📓 📕 ✅ 📅 🗂️ 🚀 💡 🎯 🏠 �
 const CODE_LANGS = ['plain text','javascript','typescript','python','html','css','json',
   'bash','sql','java','c++','go','rust','markdown'];
 
-/* slash-menu command catalog */
-const CMDS = [
-  {g:'Basic',id:'text',label:'Text',desc:'Plain paragraph',ic:'📝',kw:'text plain paragraph'},
-  {g:'Basic',id:'h1',label:'Heading 1',desc:'Big section heading',ic:'H₁',kw:'heading title h1'},
-  {g:'Basic',id:'h2',label:'Heading 2',desc:'Medium section heading',ic:'H₂',kw:'heading h2'},
-  {g:'Basic',id:'h3',label:'Heading 3',desc:'Small section heading',ic:'H₃',kw:'heading h3'},
-  {g:'Basic',id:'todo',label:'To-do list',desc:'Track tasks with checkboxes',ic:'✅',kw:'todo task checkbox check'},
-  {g:'Basic',id:'bullet',label:'Bulleted list',desc:'Simple bulleted list',ic:'•',kw:'bullet list unordered'},
-  {g:'Basic',id:'number',label:'Numbered list',desc:'Ordered numbered list',ic:'1.',kw:'number ordered list'},
-  {g:'Basic',id:'toggle',label:'Toggle list',desc:'Collapsible content',ic:'▸',kw:'toggle collapse fold'},
-  {g:'Basic',id:'quote',label:'Quote',desc:'Capture a quotation',ic:'❝',kw:'quote blockquote'},
-  {g:'Basic',id:'callout',label:'Callout',desc:'Make text stand out',ic:'💡',kw:'callout highlight info'},
-  {g:'Basic',id:'divider',label:'Divider',desc:'Visually divide blocks',ic:'—',kw:'divider line separator hr'},
-  {g:'Basic',id:'page',label:'Page',desc:'Embed a sub-page',ic:'📄',kw:'page subpage nested'},
-  {g:'Basic',id:'mdpage',label:'Markdown page',desc:'Embed a simple sub-page — plain .md, no blocks',ic:'🗒️',kw:'markdown md simple plain page subpage'},
-  {g:'Table',id:'table',label:'Simple table',desc:'Plain rows and columns of text',ic:'⊞',kw:'table simple grid rows columns'},
-  {g:'Smart table',id:'db-table',label:'Table view',desc:'Every row is a page; switch views anytime',ic:'⊟',kw:'smart table database grid'},
-  {g:'Smart table',id:'db-board',label:'Board view',desc:'Kanban-style board',ic:'▥',kw:'board kanban database smart'},
-  {g:'Smart table',id:'db-gallery',label:'Gallery view',desc:'Cards in a grid',ic:'▦',kw:'gallery cards database smart'},
-  {g:'Smart table',id:'db-list',label:'List view',desc:'Minimal list',ic:'☰',kw:'list database smart'},
-  {g:'Smart table',id:'db-calendar',label:'Calendar view',desc:'Rows on a calendar',ic:'📅',kw:'calendar database date smart'},
-  {g:'Media',id:'image',label:'Image',desc:'Upload or embed an image',ic:'🖼️',kw:'image picture photo upload'},
-  {g:'Media',id:'file',label:'File attachment',desc:'Attach any file or document',ic:'📎',kw:'file attach upload pdf doc'},
-  {g:'Media',id:'bookmark',label:'Web bookmark',desc:'Save a link as a card',ic:'🔗',kw:'bookmark link url web'},
-  {g:'Media',id:'code',label:'Code',desc:'Code with syntax style',ic:'</>',kw:'code snippet'},
-  // inline formatting — applied to the current block's text (see applySlash)
-  {g:'Format',id:'fmt-bold',label:'Bold',desc:'Make the text bold',ic:<b>B</b>,kw:'bold strong format',fmt:'bold'},
-  {g:'Format',id:'fmt-italic',label:'Italic',desc:'Make the text italic',ic:<i>I</i>,kw:'italic emphasis format',fmt:'italic'},
-  ...TEXT_COLORS.filter(c=>c!=='default').map(c=>({g:'Color',id:'fmt-tc-'+c,
-    label:c[0].toUpperCase()+c.slice(1)+' text',desc:'Colour the text '+c,
-    ic:<span className={'tc-'+c} style={{fontWeight:800}}>A</span>,kw:c+' color colour text',fmt:'tc-'+c})),
-  ...SEL_COLORS.filter(c=>c!=='default').map(c=>({g:'Highlight',id:'fmt-bg-'+c,
-    label:c[0].toUpperCase()+c.slice(1)+' highlight',desc:'Highlight the text in '+c,
-    ic:<span className={'bg-'+c} style={{padding:'0 5px',borderRadius:4}}>A</span>,kw:c+' highlight background',fmt:'bg-'+c})),
-];
-
 const SHORTCUTS = [
   ['Quick search / open','Ctrl/⌘ + K'],['New page','Alt + N'],
   ['Toggle sidebar','Ctrl/⌘ + \\'],['Toggle dark mode','Ctrl/⌘ + Shift + L'],
@@ -107,90 +59,11 @@ const SHORTCUTS = [
   ['Show shortcuts','Ctrl/⌘ + /'],['Close popup','Esc'],
 ];
 
-/* Is this a Mac / iOS device? Used to show the right modifier symbols. */
-const IS_MAC = typeof navigator!=='undefined' &&
-  /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent || '');
-
-/* Render a canonical shortcut string with platform-correct keys, e.g.
-   "Ctrl/⌘ + Shift + L" → "⌘ ⇧ L" on Mac, "Ctrl + Shift + L" elsewhere. */
-function fmtShortcut(s){
-  if(IS_MAC){
-    return s.replace(/Ctrl\/⌘/g,'⌘').replace(/\bCtrl\b/g,'⌘')
-      .replace(/\bAlt\b/g,'⌥').replace(/\bShift\b/g,'⇧')
-      .replace(/\bEnter\b/g,'↵').replace(/ \+ /g,' ');
-  }
-  return s.replace(/Ctrl\/⌘/g,'Ctrl');
-}
-
-/* ---------- Lucide icons ---------- */
-const ICON_MAP = {
-  search: Search, home: Home, inbox: Inbox, settings: Settings,
-  plus: Plus, chevron: ChevronRight, 'chevron-down': ChevronDown,
-  doc: FileText, trash: Trash2, dots: MoreHorizontal, star: Star,
-  template: LayoutTemplate, grip: GripVertical, drag: GripVertical,
-  check: Check, x: X, image: Image, link: Link,
-  table: Table, board: Kanban, gallery: LayoutGrid, list: List,
-  calendar: Calendar, filter: Filter, sort: ArrowUpDown,
-  sun: Sun, moon: Moon, menu: Menu, back: ChevronLeft, fwd: ChevronRight,
-  expand: Maximize2, share: Share2, users: Users, archive: Archive,
-  import: Upload, dashboard: LayoutDashboard, restore: RotateCcw,
-  download: Download, computer: Monitor,
-  'cloud-check': CloudCheck, 'cloud-upload': CloudUpload,
-  key: Key, 'external-link': ExternalLink, copy: Copy, keyboard: Keyboard,
-  cloud: Cloud, 'hard-drive': HardDrive,
-  paperclip: Paperclip, database: Database, eye: Eye, 'panel-right': PanelRight,
-  'panel-left-close': PanelLeftClose, puzzle: Puzzle, info: Info, 'folder-plus': FolderPlus,
-  folder: Folder, 'folder-open': FolderOpen,
-  'log-out': LogOut, unlink: Unlink, play: Play,
-};
-
-/* Injected by Vite from package.json (vite.config.js `define`). */
-const APP_VERSION=typeof __APP_VERSION__!=='undefined'?__APP_VERSION__:'';
-
 const DASH_ID='__dashboard__';
 const STORAGE_ID='__storage__';
 const TRASH_ID='__trash__';
 const ARCHIVE_ID='__archive__';
 const TEMPLATES_ID='__templates__';
-
-function Ic({n, style}) {
-  const Icon = ICON_MAP[n];
-  if (!Icon) return null;
-  const {width, height, ...rest} = style || {};
-  const sz = +(width || height || 16);
-  return <Icon width={sz} height={sz} strokeWidth={1.8}
-    {...(Object.keys(rest).length ? {style: rest} : {})}/>;
-}
-
-/* Default icon for SIMPLE markdown pages: just the text "md" — plain styled
-   text (no SVG box), so at default size it matches the page-title text size. */
-/* Text icon for file-backed pages: the extension itself ("md", "py", "txt")
-   rendered as the icon — no box, just the letters. */
-const EXT_MARK_COLORS={md:'#519aba',py:'#4B8BBE',js:'#e8d44d',jsx:'#61dafb',ts:'#3178c6',
-  html:'#e37933',css:'#9575cd',json:'#cbcb41',csv:'#89e051',sh:'#89e051',
-  yaml:'#cb4b16',xml:'#e37933',sql:'#c0c0c0',txt:'#9aa0a6'};
-function ExtMark({ext='md',size=16}){
-  const t=String(ext||'md').toLowerCase().slice(0,4);
-  return <span className="md-mark" aria-hidden="true"
-    style={{fontSize:Math.round(size*(t.length>2?0.72:0.9)),fontWeight:800,lineHeight:1,
-      fontFamily:"ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace",
-      letterSpacing:'-0.5px',color:EXT_MARK_COLORS[t]}}>{t}</span>;
-}
-const MdMark=({size=16})=><ExtMark ext="md" size={size}/>;
-/* Default icon for SMART (block) pages: the lucide page/document icon. */
-const PageMark=({size=15})=>
-  <Ic n="doc" style={{width:size,height:size,color:'var(--text-2)'}}/>;
-/* Kind-aware default (used wherever a node has no custom emoji icon):
-   smart pages → document icon; file-backed pages → their extension as text
-   ("md" for simple md + plugin pages, "py"/"txt"/… for file pages). */
-const NodeMark=({node,size=15})=>
-  !node?<PageMark size={size}/>
-  :node.kind==='md'||node.kind==='plugin'?<ExtMark ext="md" size={size}/>
-  :node.kind==='file'?<ExtMark ext={node.ext||'txt'} size={size}/>
-  :<PageMark size={size}/>;
-/* Default folder icon (simple outline, not an emoji). */
-const FolderMark=({open,size=15})=>
-  <Ic n={open?'folder-open':'folder'} style={{width:size,height:size,color:'var(--text-2)'}}/>;
 
 /* Persistence lives in ./localfs.js (folders) and ./cloudstorage.js (Google Drive). */
 
@@ -328,7 +201,7 @@ function buildSeed(){
   ]});
 
   // ---- a sample FILE page (kind:'file') — handled by a file-handler plugin
-  // (the demo ships "Code Viewer") or the built-in text editor as fallback.
+  // (the built-in "Coder Page") or the built-in text editor as fallback.
   add({id:'n_script',kind:'file',title:'hello.py',ext:'py',plugin:'',
     parentId:null,sort:9,icon:'',cover:'',
     data:'# A sample Python file living right in the workspace.\n'+
@@ -340,27 +213,8 @@ function buildSeed(){
 }
 
 /* =========================================================================
-   small reusable bits
+   small reusable bits  (Popup / ConfirmHint live in ../components/ui/popup.jsx)
    ========================================================================= */
-function Popup({rect,onClose,children,width,placement}){
-  const ref=useRef();
-  useEffect(()=>{
-    const h=e=>{ if(ref.current && !ref.current.contains(e.target)) onClose(); };
-    const k=e=>{ if(e.key==='Escape'){e.stopPropagation();onClose();} };
-    setTimeout(()=>document.addEventListener('mousedown',h),0);
-    document.addEventListener('keydown',k,true);
-    return ()=>{document.removeEventListener('mousedown',h);document.removeEventListener('keydown',k,true);};
-  },[]);
-  let top=rect.bottom+4, left=rect.left;
-  const w=width||220;
-  if(left+w>window.innerWidth-10) left=window.innerWidth-w-10;
-  if(placement==='right'){ left=rect.right+4; top=rect.top; }
-  return createPortal(
-    <div className="pop" ref={ref} style={{top,left,width:w}}>{children}</div>,
-    document.body
-  );
-}
-
 function EmojiPicker({onPick,onClose,rect}){
   const cats=Object.keys(EMOJI);
   const [tab,setTab]=useState(cats[0]);
@@ -382,8 +236,6 @@ function EmojiPicker({onPick,onClose,rect}){
     </div>
   </Popup>;
 }
-
-function ConfirmHint({msg}){ return <div className="hint">{msg}</div>; }
 
 /* ---- Image / file picker inline UI ---- */
 function ImagePicker({onFile, onUrl, uploads}){
@@ -427,9 +279,6 @@ function ImagePicker({onFile, onUrl, uploads}){
 }
 
 /* ---- File picker (From Storage / Upload tabs) ---- */
-const FILE_ICON=t=>t?.startsWith('video/')?'🎬':t?.startsWith('audio/')?'🎵'
-  :t==='application/pdf'?'📄':t?.startsWith('image/')?'🖼️':t?.startsWith('text/')?'📝':'📎';
-
 function FilePicker({uploads,onUpload,onFromStorage}){
   const all=uploads||[];
   const [view,setView]=useState('list'); // 'list' | 'grid' | 'large'
@@ -523,16 +372,6 @@ function FilePicker({uploads,onUpload,onFromStorage}){
 }
 
 /* ---- File attachment block body ---- */
-const FILE_TYPE_COLOR={
-  'image/':'#8b5cf6','video/':'#ec4899','audio/':'#f59e0b',
-  'application/pdf':'#ef4444','text/':'#3b82f6',
-};
-function fileAccentColor(type){
-  if(!type) return '#64748b';
-  for(const [k,v] of Object.entries(FILE_TYPE_COLOR)) if(type.startsWith(k)) return v;
-  return '#64748b';
-}
-
 function FileBlockBody({block,onChange,onUploadFile,uploads,onDelete}){
   const [picking,setPicking]=useState(false);
   const [preview,setPreview]=useState(false);
@@ -610,36 +449,6 @@ function FileBlockBody({block,onChange,onUploadFile,uploads,onDelete}){
   </div>;
 }
 
-/* =========================================================================
-   CONTEXT MENU  — right-click popup positioned at cursor
-   ========================================================================= */
-function ContextMenu({x,y,items,onClose}){
-  const ref=useRef();
-  useEffect(()=>{
-    const h=e=>{ if(ref.current&&!ref.current.contains(e.target)) onClose(); };
-    const k=e=>{ if(e.key==='Escape'){e.stopPropagation();onClose();} };
-    setTimeout(()=>document.addEventListener('mousedown',h),0);
-    document.addEventListener('keydown',k,true);
-    return()=>{document.removeEventListener('mousedown',h);document.removeEventListener('keydown',k,true);};
-  },[]);
-  const W=234;
-  const estH=items.reduce((s,i)=>s+(i.sep?11:i.header?28:36),12);
-  const left=x+W>window.innerWidth-8?x-W:x;
-  const top=y+estH>window.innerHeight-8?Math.max(8,y-estH):y;
-  return <div ref={ref} className="pop ctx-menu" style={{position:'fixed',left,top,width:W,zIndex:900}}>
-    <div className="menu">
-      {items.map((item,i)=>{
-        if(item.sep) return <div key={i} className="menu-sep"/>;
-        if(item.header) return <div key={i} className="menu-h">{item.header}</div>;
-        return <div key={i} className={cx('mi',item.danger&&'danger')}
-          onMouseDown={e=>{e.preventDefault();item.action?.();onClose();}}>
-          <div className="mi-tx">{item.label}</div>
-          {item.kbd&&<span className="mi-kbd">{item.kbd}</span>}
-        </div>;
-      })}
-    </div>
-  </div>;
-}
 /* =========================================================================
    caret helpers for contentEditable
    ========================================================================= */
@@ -857,203 +666,8 @@ const Editable = React.forwardRef(function Editable(props,ref){
 });
 
 window.__NOTION_PART1_DONE=true;
-/* =========================================================================
-   SLASH MENU
-   ========================================================================= */
-function SlashMenu({rect,query,onPick,onClose}){
-  const q=(query||'').toLowerCase().trim();
-  const list=useMemo(()=>CMDS.filter(c=>!q ||
-    c.label.toLowerCase().includes(q) || c.kw.includes(q)),[q]);
-  const [hi,setHi]=useState(0);
-  useEffect(()=>setHi(0),[q]);
-  const sel=useRef();
-  useEffect(()=>{
-    const k=e=>{
-      if(e.key==='ArrowDown'){e.preventDefault();setHi(h=>Math.min(h+1,list.length-1));}
-      else if(e.key==='ArrowUp'){e.preventDefault();setHi(h=>Math.max(h-1,0));}
-      else if(e.key==='Enter'){ if(list[hi]){e.preventDefault();e.stopPropagation();onPick(list[hi]);} }
-      else if(e.key==='Escape'){e.preventDefault();onClose();}
-    };
-    document.addEventListener('keydown',k,true);
-    return ()=>document.removeEventListener('keydown',k,true);
-  },[hi,list]);
-  useEffect(()=>{ sel.current&&sel.current.scrollIntoView({block:'nearest'}); },[hi]);
-  if(!list.length) return <Popup rect={rect} onClose={onClose} width={280}>
-    <div className="menu"><div className="mi" style={{color:'var(--text-3)'}}>No matching blocks</div></div>
-  </Popup>;
-  let lastG=null;
-  return <Popup rect={rect} onClose={onClose} width={300}>
-    <div className="menu">
-      {list.map((c,i)=>{
-        const head = c.g!==lastG ? <div className="menu-h" key={'h'+c.g}>{c.g}</div> : null;
-        lastG=c.g;
-        return <Fragment key={c.id}>{head}
-          <div className={cx('mi',i===hi&&'hi')} ref={i===hi?sel:null}
-            onMouseEnter={()=>setHi(i)} onMouseDown={e=>{e.preventDefault();onPick(c);}}>
-            <div className="mi-ic">{c.ic}</div>
-            <div className="mi-tx">{c.label}<small>{c.desc}</small></div>
-          </div></Fragment>;
-      })}
-    </div>
-  </Popup>;
-}
-
-/* =========================================================================
-   BLOCK CONTEXT MENU  (drag-handle ⋮⋮ menu)
-   ========================================================================= */
-function BlockMenu({rect,block,onClose,onAction,onFmt,canFormat,spell,onSpell}){
-  const [sub,setSub]=useState(null);      // 'turn' | null
-  const [subRect,setSubRect]=useState(null);
-  const mainRef=useRef();
-  const subRef=useRef();
-
-  // Single outside-click handler covering both the main menu and the submenu
-  useEffect(()=>{
-    const h=e=>{
-      if(mainRef.current?.contains(e.target)||subRef.current?.contains(e.target)) return;
-      onClose();
-    };
-    const k=e=>{ if(e.key==='Escape'){e.stopPropagation();onClose();} };
-    setTimeout(()=>document.addEventListener('mousedown',h),0);
-    document.addEventListener('keydown',k,true);
-    return ()=>{
-      document.removeEventListener('mousedown',h);
-      document.removeEventListener('keydown',k,true);
-    };
-  },[]);
-
-  const turnTypes=[['text','Text','📝'],['h1','Heading 1','H₁'],['h2','Heading 2','H₂'],
-    ['h3','Heading 3','H₃'],['todo','To-do','✅'],['bullet','Bulleted','•'],
-    ['number','Numbered','1.'],['toggle','Toggle','▸'],['quote','Quote','❝'],
-    ['callout','Callout','💡']];
-
-  // ── main menu position ──  (wider when the format toolbar is shown)
-  const mw=canFormat?312:210;
-  let mLeft=rect.left;
-  if(mLeft+mw>window.innerWidth-10) mLeft=window.innerWidth-mw-10;
-  // measured vertical clamp: open upward when there is no room below
-  const [mTopAdj,setMTopAdj]=useState(null);
-  useLayoutEffect(()=>{
-    const el=mainRef.current; if(!el) return;
-    const h=el.offsetHeight;
-    let t=rect.bottom+4;
-    if(t+h>window.innerHeight-10){
-      t=rect.top-h-4;
-      if(t<10) t=Math.max(10,window.innerHeight-h-10);
-    }
-    setMTopAdj(t);
-  },[]);
-  const mTop=mTopAdj??(rect.bottom+4);
-
-  // ── submenu position: right side of the main menu, aligned to the hovered row ──
-  const sw=210;
-  let sLeft=0;
-  if(subRect){
-    sLeft=mLeft+mw+6;
-    // flip left if no room on the right
-    if(sLeft+sw>window.innerWidth-10) sLeft=mLeft-sw-6;
-  }
-  const [sTopAdj,setSTopAdj]=useState(null);
-  useLayoutEffect(()=>{
-    if(!sub||!subRect){ setSTopAdj(null); return; }
-    const el=subRef.current; if(!el) return;
-    const h=el.offsetHeight;
-    let t=subRect.top-6;
-    if(t+h>window.innerHeight-10) t=window.innerHeight-h-10;
-    if(t<10) t=10;
-    setSTopAdj(t);
-  },[sub,subRect]);
-  const sTop=sTopAdj??(subRect?subRect.top-6:0);
-
-  const openSub=(type,e)=>{
-    setSub(type);
-    setSubRect(e.currentTarget.getBoundingClientRect());
-  };
-
-  return <>
-    {createPortal(
-      <div className="pop" ref={mainRef} style={{top:mTop,left:mLeft,width:mw}}>
-        <div className="menu">
-          {canFormat && <>
-            <FormatBar onCmd={onFmt}/>
-            <div className="menu-sep"/>
-          </>}
-          {spell && spell.suggestions.length>0 && <>
-            <div className="menu-h">Spelling</div>
-            {spell.suggestions.map(s=><div key={s} className="mi"
-              onMouseDown={e=>{e.preventDefault();onSpell(s);}}>
-              <div className="mi-ic">✓</div><div className="mi-tx spell-sug">{s}</div>
-            </div>)}
-            <div className="menu-sep"/>
-          </>}
-          {block.type!=='table'&&<div className={cx('mi',sub==='turn'&&'hi')}
-            onMouseEnter={e=>openSub('turn',e)}
-            onMouseDown={e=>{e.preventDefault();openSub('turn',e);}}>
-            <div className="mi-ic">⇄</div><div className="mi-tx">Turn into</div>
-            <Ic n="chevron" style={{width:13,height:13}}/></div>}
-          <div className="mi" onMouseDown={e=>{e.preventDefault();onAction('duplicate');}}>
-            <div className="mi-ic">⧉</div><div className="mi-tx">Duplicate</div>
-            <span className="mi-kbd">⌘D</span></div>
-          <div className="menu-sep"/>
-          <div className="mi danger" onMouseDown={e=>{e.preventDefault();onAction('delete');}}>
-            <div className="mi-ic"><Ic n="trash" style={{width:15,height:15}}/></div>
-            <div className="mi-tx">Delete</div><span className="mi-kbd">Del</span></div>
-        </div>
-      </div>,
-      document.body
-    )}
-
-    {sub==='turn'&&subRect&&createPortal(
-      <div className="pop" ref={subRef} style={{top:sTop,left:sLeft,width:sw}}>
-        <div className="menu">
-          <div className="menu-h">Turn into</div>
-          {turnTypes.map(([t,l,ic])=><div key={t} className="mi"
-            onMouseDown={e=>{e.preventDefault();onAction('turn',t);}}>
-            <div className="mi-ic">{ic}</div><div className="mi-tx">{l}</div>
-          </div>)}
-        </div>
-      </div>,
-      document.body
-    )}
-  </>;
-}
-
-/* ---- Selection format toolbar (bold / italic / colour / highlight) ---- */
-/* Rendered at the top of the block context menu; `onCmd(cmd, value?)` applies
-   the command to the current selection (or the whole block when none). */
-function FormatBar({onCmd}){
-  const [sub,setSub]=useState(null); // 'color' | 'bg'
-  const pd=f=>e=>{ e.preventDefault(); e.stopPropagation(); f(); };
-  const Btn=({title,cmd,children})=>
-    <button className="fmt-btn" title={title} onMouseDown={pd(()=>onCmd(cmd))}>{children}</button>;
-  return <div className="fmt-in-menu">
-    <div className="fmt-bar">
-      <Btn title="Bold — Ctrl+B" cmd="bold"><b>B</b></Btn>
-      <Btn title="Italic — Ctrl+I" cmd="italic"><i>I</i></Btn>
-      <Btn title="Underline — Ctrl+U" cmd="underline"><u>U</u></Btn>
-      <Btn title="Strikethrough — Ctrl+Shift+S" cmd="strike"><s>S</s></Btn>
-      <Btn title="Inline code — Ctrl+E" cmd="code"><code>&lt;&gt;</code></Btn>
-      <span className="fmt-sep"/>
-      <button className={cx('fmt-btn','fmt-dd',sub==='color'&&'on')} title="Text color"
-        onMouseDown={pd(()=>setSub(sub==='color'?null:'color'))}>
-        <span className="fmt-a">A</span><Ic n="chevron" style={{width:11,height:11}}/></button>
-      <button className={cx('fmt-btn','fmt-dd',sub==='bg'&&'on')} title="Highlight"
-        onMouseDown={pd(()=>setSub(sub==='bg'?null:'bg'))}>
-        <span className="fmt-hl">A</span><Ic n="chevron" style={{width:11,height:11}}/></button>
-      <span className="fmt-sep"/>
-      <Btn title="Clear formatting" cmd="clear"><Ic n="x" style={{width:14,height:14}}/></Btn>
-    </div>
-    {sub&&<div className="fmt-colors">
-      {(sub==='color'?TEXT_COLORS:SEL_COLORS).map(c=>
-        <button key={c} title={c==='default'?'Default':c} className="fmt-sw"
-          onMouseDown={pd(()=>onCmd(sub==='color'?'color':'bg',c))}>
-          {sub==='color'
-            ? <span className={c!=='default'?'tc-'+c:''}>A</span>
-            : <span className={cx('fmt-sw-bg',c!=='default'&&'bg-'+c)}/>}
-        </button>)}
-    </div>}
-  </div>;
-}
+/* SlashMenu + CMDS live in ../components/SlashMenu.jsx; the block context
+   menu (BlockMenu) and FormatBar live in ../components/RightClickMenu.jsx. */
 
 /* ---- Code block language selector ---- */
 function CodeLangSelect({value, onChange}){

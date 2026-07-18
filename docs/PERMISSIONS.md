@@ -27,11 +27,31 @@ in-app **Docs → Plugins & permissions** section must be kept in sync.
 }
 ```
 
-`type` says what the plugin *is*. `"page"` — a custom page type (optionally a
-file handler via `"handles"`) — is the default and the only type supported
-today; the registry is `SUPPORTED_PLUGIN_TYPES` in `src/plugins.jsx`. Future
-types will be added there, and a plugin with an unsupported type fails the
-compatibility test cleanly instead of misrendering.
+`type` says what the plugin *is*. The type registry lives in
+[`src/services/plugin.js`](../src/services/plugin.js) (`PLUGIN_TYPES`) and is
+**append-only** — a planned type is listed there *before* it's implemented, so
+older app versions reject it with a clear "planned, not yet supported" message
+instead of "unknown".
+
+- **Supported**: `page` (the default — a custom page type, optionally a file
+  handler via `"handles"`) and `theme` (a CSS-only skin).
+- **Planned**: `layout`, `icons`, `syntax`, `components` — declaring one fails
+  the compatibility test cleanly today; a truly unknown type fails with the
+  supported-types list.
+
+A minimal **theme** plugin is just a manifest plus a css file:
+
+```json
+{ "id": "my-theme", "name": "My Theme", "version": "1.0.0",
+  "type": "theme", "styles": "theme.css" }
+```
+
+Themes are **CSS-only** — the css is injected app-wide (unscoped) while the
+theme is enabled in **Settings → Plugins**, and is never executed as code.
+They are **not permission-bearing**: a theme gets no `api` access at all (it
+has no code to call it with), but still goes through the enable/consent gate
+because CSS alone can visually spoof UI. `"styles"` defaults to `theme.css`
+when present; themes need no `entry` file.
 
 `layout` says which app layout the plugin's pages render in: `"home"` (the
 Notion-style layout), `"code"` (the VS Code-style layout) or `"all"` (the

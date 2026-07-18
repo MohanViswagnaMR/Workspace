@@ -8,7 +8,7 @@
    ========================================================================= */
 import React, { useEffect } from 'react';
 import Workspace from './workspace.jsx';
-import { readTheme } from './cookies.js';
+import { readTheme } from './storage/cookies.js';
 
 export default function App() {
   useEffect(() => {
@@ -16,7 +16,7 @@ export default function App() {
     document.body.classList.toggle('dark', theme === 'dark');
     ['indigo', 'blue', 'ocean', 'forest', 'rose', 'sunset', 'violet']
       .forEach(a => document.body.classList.remove(`t-${a}`));
-    document.body.classList.add(`t-${accent || 'indigo'}`);
+    document.body.classList.add(`t-${accent || 'rose'}`);
     const b = document.getElementById('boot');
     if (b) b.style.display = 'none';
   }, []);

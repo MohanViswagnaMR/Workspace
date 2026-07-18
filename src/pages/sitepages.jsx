@@ -6,7 +6,9 @@
    import('./sitepages.jsx')), keeping them out of the main bundle.
    ========================================================================= */
 import React from 'react';
-import { CMDS, SHORTCUTS, fmtShortcut, cx, Ic, APP_VERSION, GitHubIcon } from './workspace.jsx';
+import { CMDS, SHORTCUTS, fmtShortcut, cx, Ic, APP_VERSION, GitHubIcon } from '../workspace.jsx';
+import { fetchPluginIndex, searchIndex, submitPluginUrl } from '../services/pluginrepo.js';
+import Brand from '../components/ui/brand.jsx';
 
 /* =========================================================================
    DOCS PAGE — full in-app documentation
@@ -67,11 +69,7 @@ export function DocsPage({onBack,theme,onToggleTheme}){
       <button className="docs-back" onClick={onBack} title="Back to homepage">
         <Ic n="back" style={{width:16,height:16}}/> Back
       </button>
-      <div className="docs-top-brand">
-        <span className="home-nav-mark">◧</span>
-        <span className="home-nav-title">Workspace</span>
-        <span className="docs-top-tag">Docs</span>
-      </div>
+      <Brand className="docs-top-brand" tag="Docs"/>
       <div className="docs-top-actions">
         <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
           target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
@@ -248,7 +246,7 @@ Welcome to your **connected workspace**.
             <div className="docs-card"><div className="docs-card-h">🧩 Templates</div><p>Reusable page starters, available as a dedicated Templates page.</p></div>
             <div className="docs-card"><div className="docs-card-h">📥 Import</div><p>Bring in <code>.docx</code> documents — converted to blocks via mammoth.</p></div>
             <div className="docs-card"><div className="docs-card-h">📎 Storage</div><p>Browse every uploaded image and attachment in grid, gallery or list view.</p></div>
-            <div className="docs-card"><div className="docs-card-h">🌙 Dark mode &amp; accents</div><p>Light/dark themes plus 7 accent colours (indigo, blue, ocean, forest, rose, sunset, violet). Default is dark + violet.</p></div>
+            <div className="docs-card"><div className="docs-card-h">🌙 Dark mode &amp; accents</div><p>Light/dark themes plus 7 accent colours (indigo, blue, ocean, forest, rose, sunset, violet). Default is dark + rose.</p></div>
             <div className="docs-card"><div className="docs-card-h">⌨️ Shortcuts</div><p>A full keyboard-driven flow — see the table below.</p></div>
           </div>
 
@@ -275,6 +273,13 @@ Welcome to your **connected workspace**.
             formats (<code>.py</code>, <code>.html</code>, <code>.csv</code>…) as pages.
             Install them from Settings → Plugins (GitHub URL or folder upload), and every
             plugin must be explicitly enabled before it runs.</p>
+          <p className="docs-p">A manifest's <code>type</code> says what the plugin <i>is</i> —
+            the registry lives in <code>src/services/plugin.js</code>. Supported today:
+            <code> page</code> (above) and <code>theme</code>, a <b>CSS-only skin</b> applied
+            app-wide while enabled in Settings → Plugins — never executed as code, no
+            permissions. Planned: <code>layout</code>, <code>icons</code>, <code>syntax</code>,
+            <code> components</code> — declaring one fails the compatibility test with a clear
+            “planned, not yet supported” message.</p>
           <p className="docs-p">A plugin must <b>declare each app service it uses</b> in its
             manifest's <code>"permissions"</code> array. The consent screen shows the request,
             each grant can be revoked any time in Settings → Plugins, and undeclared or revoked
@@ -367,11 +372,7 @@ function SitePage({tag,onBack,theme,onToggleTheme,children}){
       <button className="docs-back" onClick={onBack} title="Back">
         <Ic n="back" style={{width:16,height:16}}/> Back
       </button>
-      <div className="docs-top-brand">
-        <span className="home-nav-mark">◧</span>
-        <span className="home-nav-title">Workspace</span>
-        <span className="docs-top-tag">{tag}</span>
-      </div>
+      <Brand className="docs-top-brand" tag={tag}/>
       <div className="docs-top-actions">
         <a className="home-nav-link home-nav-icon" href="https://github.com/MohanViswagnaMR/Workspace"
           target="_blank" rel="noopener noreferrer" title="View on GitHub" aria-label="View on GitHub">
@@ -541,3 +542,74 @@ npm run build     # → static site in dist/`}</code></pre>
     </p>
   </SitePage>;
 }
+
+/* =========================================================================
+   PLUGIN STORE — the app-store style gallery of plugins: the built-ins plus
+   everything indexed by the community registry (links to authors' repos,
+   pinned to the commit that passed the automated tests). Browsing only —
+   plugins are installed from the create-workspace wizard or Settings →
+   Plugins inside a workspace.
+   ========================================================================= */
+export function PluginStorePage({onBack,theme,onToggleTheme}){
+  const [q,setQ]=React.useState('');
+  const [builtins,setBuiltins]=React.useState(null);
+  const [registry,setRegistry]=React.useState(null);
+  React.useEffect(()=>{
+    let alive=true;
+    import('../plugins.jsx').then(m=>m.discoverPlugins(null))
+      .then(l=>{ if(alive) setBuiltins(l.map(p=>({...p.manifest,builtin:true}))); })
+      .catch(()=>{ if(alive) setBuiltins([]); });
+    fetchPluginIndex().then(ix=>{ if(alive) setRegistry(ix); });
+    return ()=>{alive=false;};
+  },[]);
+  const all=[...(builtins||[]),...(registry||[]).filter(e=>!(builtins||[]).some(b=>b.id===e.id))];
+  const match=searchIndex(all,q).filter(e=>!q
+    ||e.name.toLowerCase().includes(q.toLowerCase())
+    ||e.description.toLowerCase().includes(q.toLowerCase())
+    ||(e.type||'').includes(q.toLowerCase()));
+  return <SitePage tag="Plugins" onBack={onBack} theme={theme} onToggleTheme={onToggleTheme}>
+    <div className="store-head">
+      <div>
+        <h1 style={{margin:'0 0 6px'}}>Plugin Store</h1>
+        <p className="store-sub">Extend Workspace like an editor — custom pages, file handlers
+          and themes. Community plugins live in their authors' own GitHub repos, indexed after
+          passing automated tests. Install them from the create-workspace wizard or
+          Settings → Plugins.</p>
+      </div>
+      <a className="btn primary" href={submitPluginUrl('')} target="_blank"
+        rel="noopener noreferrer">Submit your plugin</a>
+    </div>
+    <label className="cb-field store-search">
+      <span className="cb-field-ic"><Ic n="search" style={{width:15,height:15}}/></span>
+      <input className="cb-input" placeholder="Search plugins…" value={q}
+        onChange={e=>setQ(e.target.value)} autoFocus/>
+    </label>
+    <div className="store-count">{builtins===null?'Loading…'
+      :`${match.length} plugin${match.length===1?'':'s'}`}
+      {registry!==null&&registry.length===0&&' · registry unreachable or empty'}</div>
+    <div className="store-grid">
+      {match.map(e=><div key={e.id} className="store-card">
+        <div className="store-card-top">
+          <span className="store-card-ic">{e.icon||'🧩'}</span>
+          <div style={{minWidth:0}}>
+            <div className="store-card-t">{e.name}</div>
+            <div className="store-card-meta">
+              <span className="cb-type-badge">{e.type}</span>
+              {e.builtin&&<span className="cb-incl">built-in</span>}
+              {e.verified&&<span className="cb-incl" style={{color:'var(--accent)'}}>✓ verified</span>}
+            </div>
+          </div>
+        </div>
+        <div className="store-card-s">{e.description}</div>
+        <div className="store-card-foot">
+          <span>v{e.version||'1.0.0'}{e.submittedBy?` · by ${e.submittedBy}`:''}</span>
+          {e.repo&&e.repo!=='local'&&<a href={`https://github.com/${e.repo}${e.path?`/tree/${e.ref}/${e.path}`:`/tree/${e.ref||'main'}`}`}
+            target="_blank" rel="noopener noreferrer">Source ↗</a>}
+        </div>
+      </div>)}
+      {builtins!==null&&!match.length&&<div className="store-sub">Nothing matches “{q}” —
+        <a href={submitPluginUrl('')} target="_blank" rel="noopener noreferrer"> build & submit it</a>?</div>}
+    </div>
+  </SitePage>;
+}
+
